@@ -56,25 +56,16 @@ internal static class ProviderRoutes
             });
         }
 
-        MapInference(app, providers);
+        MapInference(app, peers);
     }
 
-    public static void MapInference(WebApplication app, ProviderCatalog providers)
+    public static void MapInference(WebApplication app, PeerNetwork peers)
     {
-        app.MapGet("/v1/models", (HttpContext context) =>
-        {
-            var view = providers.View;
-            var access = InferenceAccess.Of(context);
-            var data = view.Models.Where(model => model.Eligible && model.Id == view.Selected &&
-                    model.Model.Operations.Any(operation => (access is null || access.Allows(operation)) &&
-                        (providers.Resources?.IsAvailable(model, view.Endpoints.First(item => item.Id == model.EndpointId), operation) ?? true)))
-                .Select(model => new { id = model.Alias, @object = "model", owned_by = "mango" });
-            return new { @object = "list", data };
-        });
+        app.MapGet("/v1/models", (HttpContext context) => peers.ModelList(InferenceAccess.Of(context)));
         foreach (var operation in Enum.GetValues<InferenceOperation>())
         {
             app.MapPost(InferencePaths.Path(operation), (HttpContext context) =>
-                HandleAsync(context, cancellation => providers.ExecuteAsync(operation, context, cancellation)));
+                HandleAsync(context, cancellation => peers.RouteAsync(operation, context, cancellation)));
         }
     }
 

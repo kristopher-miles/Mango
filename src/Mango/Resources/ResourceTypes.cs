@@ -40,10 +40,11 @@ internal sealed record ResourceData(ResourceBudget[] Budgets, BenchmarkProfile[]
 }
 
 internal sealed record ResourceStatus(ContributionState State, string? Reason, DateTimeOffset? QuietUntil);
-internal sealed record Admission(AdmissionStatus Status, string? Reason, ResourceReservation? Reservation)
+internal sealed record Admission(AdmissionStatus Status, string? Reason, ResourceReservation? Reservation, bool MemoryWait = false)
 {
     public ResourceReservation Require() => Reservation ??
-        throw new ProviderFailure(Status == AdmissionStatus.Wait ? 429 : 503, Reason ?? "Local admission is unavailable.");
+        throw new ProviderFailure(503, Reason ?? "Local admission is unavailable.", capacityWait: Status == AdmissionStatus.Wait,
+            memoryWait: MemoryWait);
 }
 
 internal sealed class ResourceReservation(ResourceProtection owner, Guid endpoint, string deployment, ResourceWork work,

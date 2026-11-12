@@ -118,6 +118,7 @@ internal static class PeerChecks
                 await stoppedStream.Task.WaitAsync(TimeSpan.FromSeconds(5));
                 await Request(http, HttpMethod.Get, first.LocalAddress + "/v1/models", activeSecret, expected: 401);
             }
+            await TestReroutesAsync(http, first, second, firstAdmin, secondAdmin, key);
             await Local(http, first, "network/recover", new { recoveryRecord = recovery, newPassword = Recovered });
             await Issue(http, second, secondAdmin, "old-admin-refused", expected: 403);
             await Request(http, HttpMethod.Get, second.LocalAddress + "/v1/models", key);
@@ -267,12 +268,26 @@ internal static class PeerChecks
         var app = builder.Build();
         app.MapGet("/props", () => new { default_generation_settings = new { n_ctx = 2048 }, build_info = "fixture" });
         app.MapGet("/v1/models", () => new { data = new[] { new { id = "fixture" } } });
-        app.MapGet("/slots", () => new[] { new { is_processing = false } });
+        var uncertain = 0;
+        app.MapGet("/slots", () => new[] { new { is_processing = Volatile.Read(ref uncertain) != 0 } });
         app.MapPost("/v1/chat/completions/input_tokens", () => new { input_tokens = 12 });
         app.MapPost("/v1/chat/completions", async (HttpContext context) =>
         {
             Check(context.Request.Headers.Authorization.Count == 0, "Mango credentials stay outside provider requests");
             using var body = await JsonDocument.ParseAsync(context.Request.Body, cancellationToken: context.RequestAborted);
+            var prompt = body.RootElement.GetProperty("messages")[0].GetProperty("content").GetString();
+            if (prompt == "fail before first output")
+            {
+                context.Response.StatusCode = 503;
+                await context.Response.WriteAsJsonAsync(new { error = "fixture refusal" }, context.RequestAborted);
+                return;
+            }
+            if (prompt == "unconfirmed stop")
+            {
+                Volatile.Write(ref uncertain, 1);
+                context.Abort();
+                return;
+            }
             if (!body.RootElement.TryGetProperty("stream", out var stream) || stream.ValueKind != JsonValueKind.True)
             {
                 await context.Response.WriteAsJsonAsync(new { id = "fixture-response" }, context.RequestAborted);
@@ -281,6 +296,12 @@ internal static class PeerChecks
             context.Response.ContentType = "text/event-stream";
             await context.Response.WriteAsync("data: {\"id\":\"active-fixture\"}\n\n", context.RequestAborted);
             await context.Response.Body.FlushAsync(context.RequestAborted);
+            if (prompt == "fail after first output")
+            {
+                await Task.Delay(150, context.RequestAborted);
+                context.Abort();
+                return;
+            }
             try { await Task.Delay(Timeout.InfiniteTimeSpan, context.RequestAborted); }
             catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
             {
@@ -289,6 +310,111 @@ internal static class PeerChecks
         });
         await app.StartAsync();
         return app;
+    }
+
+    private static async Task TestReroutesAsync(HttpClient http, Host serving, Host ingress, string firstAdmin, string secondAdmin, string key)
+    {
+        var settings = (await Local(http, serving, "settings")).GetProperty("settings").Deserialize<LocalSettings>(Json)!;
+        await Local(http, serving, "settings", new { settings = settings with { Role = LocalRole.Contributor } }, expected: 204);
+        await Local(http, serving, "network/queue", new { waitSeconds = 15 }, expected: 403);
+        await Local(http, serving, "network/queue", new { waitSeconds = 15 }, firstAdmin, expected: 204);
+        await Eventually(() => ingress.Network.QueueWaitSeconds == 15, "master queue setting replicates");
+        await Eventually(() => ingress.Network.Snapshot.Records.Catalogs.Any(catalog => catalog.Role == LocalRole.Contributor &&
+            catalog.Models.Any(model => model.LocallyAvailable == true)), "remote fixture advertises contribution");
+        await Eventually(() => serving.Network.Snapshot.Digest == ingress.Network.Snapshot.Digest, "routing fixtures reach the same digest");
+        var before = await Local(http, ingress, "network/scheduling");
+        foreach (var session in new[] { "before", "after", "ambiguous" })
+        {
+            using var request = Chat(session == "before" ? new string('x', 3000) : "seed a related route", session);
+            using var response = await http.SendAsync(request);
+            Check(response.IsSuccessStatusCode, "one authenticated remote attempt succeeds, including provider-counted context fit");
+        }
+        var healthy = await Local(http, ingress, "network/scheduling");
+        Check(healthy.GetProperty("submissions").GetInt32() == before.GetProperty("submissions").GetInt32() + 3 &&
+            healthy.GetProperty("stopQueries").GetInt32() == before.GetProperty("stopQueries").GetInt32() &&
+            healthy.GetProperty("digestMerges").GetInt32() == before.GetProperty("digestMerges").GetInt32(),
+            "matching digest uses one submission and no status or metadata fetch");
+
+        var from = ingress.Network.Snapshot;
+        var serve = serving.Network.Snapshot;
+        var epoch = serve.Records.Catalogs.Single(item => item.Node == serve.Self!.Id).SchedulingEpoch;
+        var controlId = Guid.NewGuid();
+        using (var request = Control(Guid.NewGuid().ToString("N")))
+        using (var response = await http.SendAsync(request))
+        {
+            var state = await response.Content.ReadFromJsonAsync<JsonElement>(Json);
+            Check(state.GetProperty("state").GetString() == "uncertain", "a new serving process cannot fence a predecessor's attempt");
+        }
+        using (var request = Control(epoch!))
+        using (var response = await http.SendAsync(request))
+        {
+            var state = await response.Content.ReadFromJsonAsync<JsonElement>(Json);
+            Check(state.GetProperty("state").GetString() == "rejected", "the original serving process can fence an undelivered submission");
+        }
+
+        var fallbackCalls = 0;
+        var builder = WebApplication.CreateSlimBuilder();
+        builder.WebHost.ConfigureKestrel(options => options.Listen(IPAddress.Loopback, 0));
+        await using var fallback = builder.Build();
+        fallback.MapGet("/props", () => new { default_generation_settings = new { n_ctx = 2048 }, build_info = "fallback" });
+        fallback.MapGet("/v1/models", () => new { data = new[] { new { id = "fallback" } } });
+        fallback.MapPost("/v1/chat/completions/input_tokens", () => new { input_tokens = 12 });
+        fallback.MapPost("/v1/chat/completions", () =>
+        {
+            Interlocked.Increment(ref fallbackCalls);
+            return Results.Json(new { id = "fallback-response" });
+        });
+        await fallback.StartAsync();
+        await Local(http, ingress, "providers", new { profile = "llamaSingle", mode = "attached", address = fallback.Urls.Single() });
+        var deployment = (await Local(http, ingress, "providers")).GetProperty("models")[0].GetProperty("id").GetString();
+        await Local(http, ingress, "providers/models", new { id = deployment, alias = "shared-fixture", revision = 0 }, secondAdmin, expected: 204);
+
+        using (var request = Chat("fail before first output", "before"))
+        using (var response = await http.SendAsync(request))
+        {
+            var body = await response.Content.ReadFromJsonAsync<JsonElement>(Json);
+            Check(response.IsSuccessStatusCode && body.GetProperty("id").GetString() == "fallback-response" && fallbackCalls == 1,
+                "confirmed remote failure before output reroutes to one fallback");
+        }
+        using (var request = Chat("fail after first output", "after", stream: true))
+        using (var response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead))
+        using (var body = new StreamReader(await response.Content.ReadAsStreamAsync()))
+        {
+            Check(response.IsSuccessStatusCode && (await body.ReadLineAsync())?.Contains("active-fixture") == true,
+                "stream forwards the first serving chunk");
+            try { await body.ReadToEndAsync(); }
+            catch (IOException) { }
+            Check(fallbackCalls == 1, "a failed partial stream never starts a second response");
+        }
+        using (var request = Chat("unconfirmed stop", "ambiguous"))
+        using (var response = await http.SendAsync(request))
+            Check(response.StatusCode == HttpStatusCode.BadGateway && fallbackCalls == 1,
+                "unknown provider outcome returns failure without running duplicate inference");
+
+        await fallback.StopAsync();
+
+        HttpRequestMessage Chat(string text, string session, bool stream = false)
+        {
+            var request = new HttpRequestMessage(HttpMethod.Post, ingress.TailAddress + "/v1/chat/completions");
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", key);
+            request.Headers.Add("Mango-Session", session);
+            request.Content = JsonContent.Create(new
+            {
+                model = "shared-fixture", messages = new[] { new { role = "user", content = text } }, stream
+            }, options: Json);
+            return request;
+        }
+
+        HttpRequestMessage Control(string servingEpoch)
+        {
+            var request = new HttpRequestMessage(HttpMethod.Post, serving.TailAddress + "/peer/inference/control");
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", from.Token);
+            request.Headers.Add(PeerNetwork.NodeHeader, from.Self!.Id.ToString("N"));
+            request.Headers.Add(PeerNetwork.NetworkHeader, from.Records.Identity!.Id.ToString("N"));
+            request.Headers.Add(PeerNetwork.DigestHeader, from.Digest);
+            request.Content = JsonContent.Create(new { attempt = controlId, fenceMilliseconds = 15000, servingEpoch }, options: Json);
+            return request;
+        }
     }
 
     private static void Check(bool value, string description)

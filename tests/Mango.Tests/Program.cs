@@ -15,6 +15,7 @@ try
     await ProviderChecks.RunAsync();
     await PeerChecks.RunAsync(directory);
     await ResourceChecks.RunAsync(directory);
+    await SchedulingChecks.RunAsync();
     Console.WriteLine("Mango host checks passed.");
 }
 finally

@@ -23,12 +23,15 @@ internal sealed partial class PeerNetwork(string directory, int port, ProviderCa
     private readonly CancellationTokenSource stopping = new();
     private readonly ConcurrentDictionary<Guid, string> mismatches = new();
     private readonly ConcurrentDictionary<Guid, PeerContact> contacts = new();
-    private readonly HttpClient http = new(new SocketsHttpHandler
+    private readonly HttpClient http = CreatePeerClient(8);
+    private readonly HttpClient inferenceHttp = CreatePeerClient(MaxIngress);
+
+    private static HttpClient CreatePeerClient(int connections) => new(new SocketsHttpHandler
     {
         UseProxy = false,
         AllowAutoRedirect = false,
         UseCookies = false,
-        MaxConnectionsPerServer = 8,
+        MaxConnectionsPerServer = connections,
         ConnectTimeout = PeerLimits.CallTimeout,
         PooledConnectionLifetime = TimeSpan.FromMinutes(10)
     }) { Timeout = Timeout.InfiniteTimeSpan, MaxResponseContentBufferSize = PeerLimits.ControlBytes };
@@ -74,6 +77,7 @@ internal sealed partial class PeerNetwork(string directory, int port, ProviderCa
             Keys = current.Records.Keys.Select(KeyView).ToArray(),
             Models = current.Records.Models.Where(model => !model.Removed).ToArray(),
             Catalogs = current.Records.Catalogs,
+            QueueWaitSeconds,
             Unlocked = HasAdmin(current, AdminHeader(request))
         };
     }
@@ -190,7 +194,7 @@ internal sealed partial class PeerNetwork(string directory, int port, ProviderCa
                 {
                     try
                     {
-                        listener = await PeerRoutes.StartAsync(this, providers, status.LocalAddresses, port, cancellation);
+                        listener = await PeerRoutes.StartAsync(this, status.LocalAddresses, port, cancellation);
                         bound = status.LocalAddresses;
                         listenerError = null;
                     }
@@ -288,15 +292,10 @@ internal sealed partial class PeerNetwork(string directory, int port, ProviderCa
             if (current.Self is not { } self || DeviceChanged(current))
                 return current.Disk;
             var observations = view.Models.OrderBy(model => model.Id, StringComparer.Ordinal)
-                .Take(PeerLimits.ModelsPerNode).Select(model => new ObservedDeployment(
-                    model.Id, DisplayName(model.Model.DisplayName), model.Model.Variant, model.Version,
-                    model.Model.Inputs, model.Model.Outputs, model.Model.Operations, model.Context, model.ContextSource,
-                    model.Online, model.Instance is not null, model.Instance?.Fingerprint, model.Instance?.Slots,
-                    model.EmbeddingDimensions, model.EmbeddingSpace,
-                    protection?.IsAvailable(model, view.Endpoints.First(endpoint => endpoint.Id == model.EndpointId)))).ToArray();
+                .Take(PeerLimits.ModelsPerNode).Select(model => ObserveDeployment(model, view)).ToArray();
             var existing = current.Records.Catalogs.FirstOrDefault(catalog => catalog.Node == self.Id);
             var catalog = new NodeCatalog(self.Id, Next(current, self.Id), self.Name, role, observations,
-                protection?.Status.State);
+                protection?.Status.State, schedulingEpoch);
             var changed = existing is null || !JsonSerializer.SerializeToUtf8Bytes(catalog with { Revision = existing.Revision }, Json)
                 .AsSpan().SequenceEqual(JsonSerializer.SerializeToUtf8Bytes(existing, Json));
             var existingModels = current.Records.Models.Select(model => model.Id).ToHashSet(StringComparer.Ordinal);
@@ -352,6 +351,9 @@ internal sealed partial class PeerNetwork(string directory, int port, ProviderCa
             protection.Changed -= QueueCatalog;
         settings.Changed -= QueueCatalog;
         await StopListenerAsync();
+        await serving.DisposeAsync();
+        affinity.Dispose();
+        inferenceHttp.Dispose();
         http.Dispose();
         stopping.Dispose();
     }

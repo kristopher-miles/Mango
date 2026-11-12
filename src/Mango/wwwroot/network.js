@@ -2,7 +2,7 @@
 
 const networkFeedback = document.querySelector("#network-status");
 const networkForms = Object.fromEntries(
-  ["discover", "join", "create", "unlock", "issue", "recover", "reset"].map(name => [name, document.querySelector(`#network-${name}`)])
+  ["discover", "join", "create", "unlock", "issue", "recover", "reset", "queue"].map(name => [name, document.querySelector(`#network-${name}`)])
 );
 for (const choice of document.querySelectorAll("[data-benchmark-choice]"))
   choice.addEventListener("change", () => choice.dataset.changed = "true");
@@ -83,6 +83,9 @@ async function loadNetwork() {
   document.querySelector("#network-unlocked").hidden = !network.unlocked;
   document.querySelector("#network-reset-panel").hidden = !network.unlocked;
   networkForms.issue.hidden = !network.unlocked;
+  networkForms.queue.hidden = !network.unlocked;
+  if (document.activeElement !== networkForms.queue.elements.waitSeconds)
+    networkForms.queue.elements.waitSeconds.value = network.queueWaitSeconds;
   if (!active) {
     if (network.identity) networkForms.join.elements.network.value = network.identity.id;
     return;
@@ -156,6 +159,11 @@ networkForm("unlock", async fields => {
   networkAdmin = (await api("network/unlock", fields)).token;
   await loadNetwork();
   return "Network administration unlocked.";
+});
+networkForm("queue", async fields => {
+  await api("network/queue", { waitSeconds: Number(fields.waitSeconds) });
+  await loadNetwork();
+  return "Queue limit saved.";
 });
 networkForms.issue.elements.expiry.addEventListener("change", event => {
   const dated = event.target.value === "date";

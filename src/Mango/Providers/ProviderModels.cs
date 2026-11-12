@@ -40,10 +40,10 @@ internal sealed record ProviderModel(string Id, string NativeId, string Manageme
     bool SupportsLoad = true, bool SupportsUnload = true, string? Format = null);
 
 internal sealed record ProviderInventory(string? Version, ProviderModel[] Models, bool CanLoad, bool CanUnload,
-    bool CanStop, int? OwnedProcessId = null);
+    bool CanStop, int? OwnedProcessId = null, int? MaxLoadedModels = null);
 
 internal sealed record Deployment(Guid EndpointId, ProviderModel Model, ModelOptions Options, bool Online, bool Busy,
-    string? Version, string? Configuration = null)
+    string? Version, string? Configuration = null, string? PlacementEpoch = null)
 {
     public string Id => Model.Id;
     public string Alias => Options.Alias;
@@ -78,10 +78,13 @@ internal static class ProviderLimits
     public static readonly TimeSpan InventoryInterval = TimeSpan.FromHours(1);
 }
 
-internal sealed class ProviderFailure(int status, string message, bool allocationFailure = false) : Exception(message)
+internal sealed class ProviderFailure(int status, string message, bool allocationFailure = false, bool capacityWait = false,
+    bool memoryWait = false) : Exception(message)
 {
     public int Status { get; } = status;
     public bool AllocationFailure { get; } = allocationFailure;
+    public bool CapacityWait { get; } = capacityWait;
+    public bool MemoryWait { get; } = memoryWait;
 }
 
 internal static class ProviderIdentity

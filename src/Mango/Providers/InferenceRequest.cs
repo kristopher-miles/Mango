@@ -1,6 +1,8 @@
 using System.Diagnostics;
 using System.Net.Http.Headers;
+using System.Net.Http.Json;
 using System.Text;
+using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Mango.Peers;
@@ -13,6 +15,39 @@ internal sealed record ProviderExecution(string DeploymentId, string InstanceFin
     long AliasRevision, int? PromptTokens, string? PromptCountSource, TimeSpan ProviderHeaders,
     TimeSpan? FirstOutput, TimeSpan Elapsed);
 
+internal sealed record InferenceShape(string Alias, InferenceOperation Operation, string[] Inputs, bool Tools,
+    bool Structured, long PromptUnits, int OutputUnits, int MediaItems, int Items, long WorkUnits,
+    int? Dimensions, string? Encoding, bool CanCountPrompt = false)
+{
+    public Workload Demand(int? context) => new(Operation,
+        Operation is InferenceOperation.Chat or InferenceOperation.Embeddings or InferenceOperation.SystemOne
+            ? context ?? ProviderLimits.MaxContext : WorkUnits, Items, MediaItems);
+
+    public bool Fits(string[] inputs, bool tools, bool structured, int? context, int? mediaTokens,
+        int? dimensions, string[]? encodings, bool allowUnverifiedContext = false)
+    {
+        if (!Inputs.All(inputs.Contains) || Tools && !tools || Structured && !structured)
+            return false;
+        if (Operation == InferenceOperation.Embeddings && (dimensions is null ||
+            Dimensions is not null && Dimensions != dimensions || encodings?.Contains(Encoding) != true))
+            return false;
+        if (Operation is not (InferenceOperation.Chat or InferenceOperation.Embeddings or InferenceOperation.SystemOne))
+            return true;
+        if (context is not { } limit || MediaItems > 0 && mediaTokens is null)
+            return false;
+        var output = OutputUnits == 0 && Operation == InferenceOperation.Chat ? Math.Min(1024, Math.Max(1, limit / 4)) : OutputUnits;
+        return PromptUnits + (long)MediaItems * mediaTokens.GetValueOrDefault() + output <= limit ||
+            allowUnverifiedContext && CanCountPrompt && MediaItems == 0 && output < limit;
+    }
+
+    public bool Valid => Alias is { Length: > 0 and <= 200 } && Enum.IsDefined(Operation) &&
+        Inputs is { Length: <= 3 } && Inputs.All(input => input is "text" or "image" or "audio") &&
+        PromptUnits is >= 0 and <= 128L * ProviderLimits.MaxRequestBytes && OutputUnits >= 0 &&
+        MediaItems is >= 0 and <= ProviderLimits.MaxRequestBytes && Items is >= 1 and <= 128 &&
+        WorkUnits is >= 1 and <= ProviderLimits.MaxRequestBytes && Encoding is null or "float" or "base64" &&
+        Dimensions is null or > 0;
+}
+
 internal sealed class InferenceRequest(InferenceOperation operation, string alias, JsonObject? json, IFormCollection? form)
     : IDisposable
 {
@@ -20,29 +55,29 @@ internal sealed class InferenceRequest(InferenceOperation operation, string alia
     private const int MaxBatch = 128;
     private const int MaxImagePixels = 4096 * 4096;
     private const int MaxSpeechCharacters = 4096;
+    private static readonly JsonSerializerOptions WireJson = new() { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
     private HttpContent? outbound;
     public string Alias { get; } = alias;
+    public InferenceOperation Operation => operation;
     public bool Submitted { get; private set; }
     public bool Settled { get; private set; }
+    public long Bytes { get; private set; }
+    public InferenceShape Shape { get; private set; } = null!;
 
-    public Workload ResourceDemand(Deployment deployment)
+    public string[] Prefixes()
     {
-        var context = deployment.Context ?? ProviderLimits.MaxContext;
-        return operation switch
+        if (operation != InferenceOperation.Chat || Bytes > 1024 * 1024 || json?["messages"] is not JsonArray messages)
+            return [];
+        var prefix = ProviderIdentity.Hash(json["tools"]?.ToJsonString(), json["tool_choice"]?.ToJsonString(),
+            json["response_format"]?.ToJsonString(), json["reasoning_effort"]?.ToJsonString());
+        var hashes = new List<string>();
+        foreach (var message in messages.Take(32))
         {
-            InferenceOperation.Chat => new(operation, context, BoundedInt(json?["n"], 1, 8),
-                json?["messages"] is JsonArray messages ? messages.OfType<JsonObject>()
-                    .SelectMany(message => message["content"] is JsonArray parts ? parts.OfType<JsonObject>() : [])
-                    .Count(part => String(part["type"]) is "image_url" or "input_audio") : 0),
-            InferenceOperation.Embeddings => new(operation, context,
-                json?["input"] is JsonArray { Count: > 0 } rows && !rows.All(IsToken) ? rows.Count : 1),
-            InferenceOperation.SystemOne => new(operation, context, 1,
-                ((json?["files"] as JsonArray)?.Count ?? 0) + ((json?["images"] as JsonArray)?.Count ?? 0)),
-            InferenceOperation.Transcription => new(operation, form!.Files[0].Length),
-            InferenceOperation.Speech => new(operation, Math.Max(1, String(json?["input"])?.Length ?? 0)),
-            InferenceOperation.Images => ImageDemand(json!),
-            _ => throw new ArgumentOutOfRangeException(nameof(operation))
-        };
+            prefix = ProviderIdentity.Hash(prefix, message?.ToJsonString());
+            if (String(message?["role"]) == "user")
+                hashes.Add(prefix);
+        }
+        return hashes.ToArray();
     }
 
     private static Workload ImageDemand(JsonObject payload)
@@ -93,7 +128,9 @@ internal sealed class InferenceRequest(InferenceOperation operation, string alia
                     if (!TranscriptionFields.Contains(entry.Key, StringComparer.Ordinal) ||
                         entry.Value.Count != 1 && !entry.Key.EndsWith("[]", StringComparison.Ordinal))
                         throw new ProviderFailure(400, "The transcription form contains an unsupported or repeated field.");
-                return new(operation, RequireAlias(form["model"].ToString()), null, form);
+                var audio = new InferenceRequest(operation, RequireAlias(form["model"].ToString()), null, form);
+                audio.SetShape(request.ContentLength ?? form.Files[0].Length + form.Sum(entry => entry.Value.ToString().Length * 4L) + 4096);
+                return audio;
             }
             if (!request.HasJsonContentType())
                 throw new ProviderFailure(415, "This operation requires an application/json request body.");
@@ -108,7 +145,9 @@ internal sealed class InferenceRequest(InferenceOperation operation, string alia
                 _ => DecisionFields
             });
             RequireMediaScope(request.HttpContext, operation, payload);
-            return new(operation, RequireAlias(String(payload["model"])), payload, null);
+            var result = new InferenceRequest(operation, RequireAlias(String(payload["model"])), payload, null);
+            result.SetShape(request.ContentLength ?? Encoding.UTF8.GetByteCount(payload.ToJsonString(WireJson)));
+            return result;
         }
         catch (JsonException)
         {
@@ -122,6 +161,53 @@ internal sealed class InferenceRequest(InferenceOperation operation, string alia
         {
             throw new ProviderFailure(400, "The transcription form is invalid or exceeds the upload limits.");
         }
+    }
+
+    private void SetShape(long bytes)
+    {
+        Bytes = Math.Max(1, bytes);
+        if (operation == InferenceOperation.Images)
+            CheckImage(json!);
+        if (operation == InferenceOperation.Speech)
+            CheckSpeech(json!);
+        var rows = operation == InferenceOperation.Embeddings ? EmbeddingRows(json!) : [];
+        var image = operation == InferenceOperation.Images ? ImageDemand(json!) : default;
+        Shape = operation switch
+        {
+            InferenceOperation.Chat => ChatShape(json!, Alias),
+            InferenceOperation.Embeddings => new(Alias, operation, ["text"], false, false,
+                rows.Max(row => row is JsonArray sequence ? sequence.Count + 4 : Size(row) + 32),
+                0, 0, rows.Length, 1,
+                json!["dimensions"] is { } dim ? Positive(dim, "dimensions") : null, String(json["encoding_format"]) ?? "float",
+                CanCountPrompt: rows[0] is not JsonArray),
+            InferenceOperation.SystemOne => DecisionShape(json!, Alias),
+            InferenceOperation.Images => new(Alias, operation, ["text"], false, false, 0, 0, 0,
+                image.Items, image.Units, null, null),
+            InferenceOperation.Transcription => new(Alias, operation, ["audio"], false, false, 0, 0, 0,
+                1, form!.Files[0].Length, null, null),
+            InferenceOperation.Speech => new(Alias, operation, ["text"], false, false, 0, 0, 0,
+                1, Math.Max(1, String(json!["input"])?.Length ?? 0), null, null),
+            _ => throw new ArgumentOutOfRangeException(nameof(operation))
+        };
+    }
+
+    public HttpContent CreateBody() => json is { } payload
+        ? JsonContent.Create(payload, options: WireJson) : CreateForm(Alias);
+
+    private MultipartFormDataContent CreateForm(string model)
+    {
+        var multipart = new MultipartFormDataContent();
+        foreach (var field in form!)
+            if (field.Key != "model")
+                foreach (var value in field.Value)
+                    multipart.Add(new StringContent(value ?? ""), field.Key);
+        multipart.Add(new StringContent(model), "model");
+        var file = form!.Files[0];
+        var content = new StreamContent(file.OpenReadStream());
+        if (MediaTypeHeaderValue.TryParse(file.ContentType, out var mediaType))
+            content.Headers.ContentType = mediaType;
+        multipart.Add(content, "file", Path.GetFileName(file.FileName));
+        return multipart;
     }
 
     private static void RequireMediaScope(HttpContext context, InferenceOperation operation, JsonObject payload)
@@ -167,7 +253,7 @@ internal sealed class InferenceRequest(InferenceOperation operation, string alia
         string? embeddingEncoding = null;
         var embeddingCount = 0;
         var started = Stopwatch.GetTimestamp();
-        if (json is { } payload)
+        if (json?.DeepClone() is JsonObject payload)
         {
             payload["model"] = instance.Id;
             try
@@ -181,14 +267,8 @@ internal sealed class InferenceRequest(InferenceOperation operation, string alia
                         (promptTokens, promptCountSource, embeddingEncoding, embeddingCount) =
                             await PrepareEmbeddingsAsync(payload, deployment, adapter, instance.Id, cancellation);
                         break;
-                    case InferenceOperation.Images:
-                        CheckImage(payload);
-                        break;
-                    case InferenceOperation.Speech:
-                        CheckSpeech(payload);
-                        break;
                     case InferenceOperation.SystemOne:
-                        (promptTokens, promptCountSource) = CheckDecision(payload, deployment);
+                        (promptTokens, promptCountSource) = CheckDecision(deployment);
                         break;
                 }
                 if (operation != InferenceOperation.Chat)
@@ -198,25 +278,10 @@ internal sealed class InferenceRequest(InferenceOperation operation, string alia
             {
                 throw new ProviderFailure(400, "The inference body contains invalid or duplicate fields.");
             }
-            outbound = new StringContent(payload.ToJsonString(), Encoding.UTF8, "application/json");
+            outbound = JsonContent.Create(payload, options: WireJson);
         }
         else
-        {
-            var multipart = new MultipartFormDataContent();
-            outbound = multipart;
-            foreach (var field in form!)
-            {
-                if (field.Key != "model")
-                    foreach (var value in field.Value)
-                        multipart.Add(new StringContent(value ?? ""), field.Key);
-            }
-            multipart.Add(new StringContent(instance.Id), "model");
-            var file = form!.Files[0];
-            var content = new StreamContent(file.OpenReadStream());
-            if (MediaTypeHeaderValue.TryParse(file.ContentType, out var mediaType))
-                content.Headers.ContentType = mediaType;
-            multipart.Add(content, "file", Path.GetFileName(file.FileName));
-        }
+            outbound = CreateForm(instance.Id);
 
         await adapter.ConfirmDeploymentAsync(operation, deployment.Model, instance, cancellation);
         var send = Stopwatch.GetTimestamp();
@@ -237,7 +302,8 @@ internal sealed class InferenceRequest(InferenceOperation operation, string alia
             Settled = true;
             CheckEmbeddingResult(bytes, deployment.EmbeddingDimensions!.Value, embeddingEncoding, embeddingCount);
             firstOutput = Stopwatch.GetElapsedTime(send);
-            await target.Body.WriteAsync(bytes, cancellation);
+            for (var offset = 0; offset < bytes.Length; offset += 16 * 1024)
+                await WriteOutputAsync(context, bytes.AsMemory(offset, Math.Min(16 * 1024, bytes.Length - offset)), cancellation);
         }
         else
         {
@@ -250,8 +316,7 @@ internal sealed class InferenceRequest(InferenceOperation operation, string alia
             {
                 firstOutput ??= Stopwatch.GetElapsedTime(send);
                 events?.Read(buffer.AsSpan(0, count));
-                await target.Body.WriteAsync(buffer.AsMemory(0, count), cancellation);
-                await target.Body.FlushAsync(cancellation);
+                await WriteOutputAsync(context, buffer.AsMemory(0, count), cancellation);
             }
             events?.FinishLine();
             Settled = events?.Completed ?? true;
@@ -260,6 +325,22 @@ internal sealed class InferenceRequest(InferenceOperation operation, string alia
         }
         return new(deployment.Id, instance.Fingerprint, operation, deployment.Options.Revision,
             promptTokens, promptCountSource, headers, firstOutput, Stopwatch.GetElapsedTime(started));
+    }
+
+    internal static async Task WriteOutputAsync(HttpContext context, ReadOnlyMemory<byte> bytes, CancellationToken cancellation)
+    {
+        using var progress = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
+        progress.CancelAfter(TimeSpan.FromSeconds(30));
+        try
+        {
+            await context.Response.Body.WriteAsync(bytes, progress.Token);
+            await context.Response.Body.FlushAsync(progress.Token);
+        }
+        catch (OperationCanceledException) when (!cancellation.IsCancellationRequested)
+        {
+            context.Abort();
+            throw;
+        }
     }
 
     private sealed class InferenceEvents
@@ -304,10 +385,8 @@ internal sealed class InferenceRequest(InferenceOperation operation, string alia
         }
     }
 
-    private static async Task<(int, string)> PrepareChatAsync(JsonObject payload, Deployment deployment,
-        ProviderAdapter adapter, CancellationToken cancellation)
+    private static InferenceShape ChatShape(JsonObject payload, string alias)
     {
-        var limit = RequireContext(deployment);
         if (payload["messages"] is not JsonArray { Count: > 0 } messages)
             throw new ProviderFailure(400, "Chat requires a nonempty messages array.");
         if (payload["tools"] is { } tools &&
@@ -321,6 +400,7 @@ internal sealed class InferenceRequest(InferenceOperation operation, string alia
             String(payload["tool_choice"]) == "required";
         var countEstimate = 256L + 16L * messages.Count;
         var mediaCount = 0;
+        var inputs = new HashSet<string>(StringComparer.Ordinal) { "text" };
         foreach (var element in messages)
         {
             if (element is not JsonObject message || String(message["role"]) is not ("user" or "assistant" or "system" or "developer" or "tool" or "function"))
@@ -349,15 +429,17 @@ internal sealed class InferenceRequest(InferenceOperation operation, string alia
                     case "image_url" when part["image_url"] is JsonObject image:
                         RequireFields(part, ["type", "image_url"]);
                         RequireFields(image, ["url", "detail"]);
-                        RequireInlineMedia(String(image["url"]), "image", deployment);
+                        RequireInlineMedia(String(image["url"]), "image");
+                        inputs.Add("image");
                         mediaCount++;
                         break;
                     case "input_audio" when part["input_audio"] is JsonObject audio:
                         RequireFields(part, ["type", "input_audio"]);
                         RequireFields(audio, ["data", "format"]);
-                        if (!deployment.Model.Inputs.Contains("audio") || String(audio["format"]) is not ("wav" or "mp3") ||
+                        if (String(audio["format"]) is not ("wav" or "mp3") ||
                             String(audio["data"]) is not { Length: > 0 })
-                            throw new ProviderFailure(422, "The deployment does not support this inline audio input.");
+                            throw new ProviderFailure(422, "Use supported inline audio input.");
+                        inputs.Add("audio");
                         mediaCount++;
                         break;
                     default:
@@ -365,25 +447,37 @@ internal sealed class InferenceRequest(InferenceOperation operation, string alia
                 }
             }
         }
-        if (toolsRequested && !deployment.Model.ClientTools)
-            throw new ProviderFailure(422, "Client-executed function tools are unavailable on this deployment.");
-        if (payload["response_format"] is JsonObject format && String(format["type"]) != "text" &&
-            !deployment.Model.StructuredOutput)
-            throw new ProviderFailure(422, "Structured chat output is unavailable on this deployment.");
-        if (payload["n"] is { } choices && Positive(choices, "n") > 8)
+        var items = payload["n"] is { } choices ? Positive(choices, "n") : 1;
+        if (items > 8)
             throw new ProviderFailure(400, "Chat supports at most eight choices per request.");
-        var output = payload["max_completion_tokens"] ?? payload["max_tokens"];
         if (payload["max_completion_tokens"] is not null && payload["max_tokens"] is not null)
             throw new ProviderFailure(400, "Specify one chat output token limit.");
-        var reserved = output is not null ? Positive(output, "maximum output tokens")
-            : Math.Min(DefaultMaxOutput, Math.Max(1, limit / 4));
-        if (output is null)
+        var output = payload["max_completion_tokens"] ?? payload["max_tokens"];
+        return new(alias, InferenceOperation.Chat, inputs.ToArray(), toolsRequested,
+            payload["response_format"] is JsonObject format && String(format["type"]) != "text",
+            countEstimate + Size(payload["tools"]) + Size(payload["response_format"]),
+            output is not null ? Positive(output, "maximum output tokens") : 0, mediaCount, items, 1, null, null,
+            CanCountPrompt: mediaCount == 0);
+    }
+
+    private async Task<(int, string)> PrepareChatAsync(JsonObject payload, Deployment deployment,
+        ProviderAdapter adapter, CancellationToken cancellation)
+    {
+        var limit = RequireContext(deployment);
+        if (Shape.Tools && !deployment.Model.ClientTools)
+            throw new ProviderFailure(422, "Client-executed function tools are unavailable on this deployment.");
+        if (Shape.Structured && !deployment.Model.StructuredOutput)
+            throw new ProviderFailure(422, "Structured chat output is unavailable on this deployment.");
+        if (!Shape.Inputs.All(deployment.Model.Inputs.Contains))
+            throw new ProviderFailure(422, "This deployment does not support the requested chat inputs.");
+        var reserved = Shape.OutputUnits != 0 ? Shape.OutputUnits : Math.Min(DefaultMaxOutput, Math.Max(1, limit / 4));
+        if (Shape.OutputUnits == 0)
             payload["max_tokens"] = reserved;
         if (reserved >= limit)
             throw new ProviderFailure(422, "The reserved output tokens exceed the deployment's usable context.");
         adapter.Prepare(InferenceOperation.Chat, payload);
-        var reported = mediaCount == 0 ? await adapter.CountChatAsync(payload, cancellation) : null;
-        var estimate = countEstimate + Size(payload["tools"]) + Size(payload["response_format"]) + MediaBudget(mediaCount, deployment);
+        var reported = Shape.MediaItems == 0 ? await adapter.CountChatAsync(payload, cancellation) : null;
+        var estimate = Shape.PromptUnits + MediaBudget(Shape.MediaItems, deployment);
         return CheckFit(reported, estimate, reserved, limit);
     }
 
@@ -397,15 +491,7 @@ internal sealed class InferenceRequest(InferenceOperation operation, string alia
         if (deployment.EmbeddingDimensions is not { } dimensions ||
             payload["dimensions"] is { } requested && Positive(requested, "dimensions") != dimensions)
             throw new ProviderFailure(422, "The requested embedding dimensions do not match the deployment.");
-        var input = payload["input"] ?? throw new ProviderFailure(400, "Embeddings require input.");
-        JsonNode[] rows;
-        if (String(input) is not null || input is JsonArray { Count: > 0 } tokens && tokens.All(IsToken))
-            rows = [input];
-        else if (input is JsonArray { Count: > 0 and <= MaxBatch } batch &&
-                 (batch.All(item => String(item) is not null) || batch.All(item => item is JsonArray { Count: > 0 } sequence && sequence.All(IsToken))))
-            rows = batch.Select(item => item!).ToArray();
-        else
-            throw new ProviderFailure(400, "Supply text, token IDs, or a bounded batch of one input type.");
+        var rows = EmbeddingRows(payload);
         var largest = 0;
         var allReported = true;
         foreach (var row in rows)
@@ -417,6 +503,17 @@ internal sealed class InferenceRequest(InferenceOperation operation, string alia
             largest = Math.Max(count, largest);
         }
         return (largest, allReported ? "provider" : "conservative estimate", encoding, rows.Length);
+    }
+
+    private static JsonNode[] EmbeddingRows(JsonObject payload)
+    {
+        var input = payload["input"] ?? throw new ProviderFailure(400, "Embeddings require input.");
+        if (String(input) is not null || input is JsonArray { Count: > 0 } tokens && tokens.All(IsToken))
+            return [input];
+        if (input is JsonArray { Count: > 0 and <= MaxBatch } batch &&
+            (batch.All(item => String(item) is not null) || batch.All(item => item is JsonArray { Count: > 0 } sequence && sequence.All(IsToken))))
+            return batch.Select(item => item!).ToArray();
+        throw new ProviderFailure(400, "Supply text, token IDs, or a bounded batch of one input type.");
     }
 
     private static void CheckEmbeddingResult(byte[] bytes, int dimensions, string encoding, int count)
@@ -485,13 +582,22 @@ internal sealed class InferenceRequest(InferenceOperation operation, string alia
             throw new ProviderFailure(400, "Choose a provider voice name.");
     }
 
-    private static (int, string) CheckDecision(JsonObject payload, Deployment deployment)
+    private (int, string) CheckDecision(Deployment deployment)
+    {
+        if (!Shape.Inputs.All(deployment.Model.Inputs.Contains))
+            throw new ProviderFailure(422, "This deployment does not support the requested decision inputs.");
+        return CheckFit(null, Shape.PromptUnits + MediaBudget(Shape.MediaItems, deployment), Shape.OutputUnits,
+            RequireContext(deployment));
+    }
+
+    private static InferenceShape DecisionShape(JsonObject payload, string alias)
     {
         if (!payload.ContainsKey("state") || payload["questions"] is not JsonObject { Count: > 0 } questions ||
             questions.Any(pair => pair.Value is not JsonObject question ||
                 String(question["type"]) is not ("noul" or "choice" or "score")))
             throw new ProviderFailure(400, "System One requires state and named noul, choice, or score questions.");
         var media = 0;
+        var inputs = new HashSet<string>(StringComparer.Ordinal) { "text" };
         foreach (var key in new[] { "files", "images" })
         {
             if (payload[key] is null)
@@ -501,19 +607,19 @@ internal sealed class InferenceRequest(InferenceOperation operation, string alia
             foreach (var file in files)
             {
                 var value = String(file);
-                RequireInlineMedia(value, value?.StartsWith("data:audio/", StringComparison.OrdinalIgnoreCase) == true
-                    ? "audio" : "image", deployment);
+                var modality = value?.StartsWith("data:audio/", StringComparison.OrdinalIgnoreCase) == true ? "audio" : "image";
+                RequireInlineMedia(value, modality);
+                inputs.Add(modality);
                 media++;
             }
         }
-        return CheckFit(null, Size(payload["state"]) + Size(questions) + 128 + MediaBudget(media, deployment),
-            128, RequireContext(deployment));
+        return new(alias, InferenceOperation.SystemOne, inputs.ToArray(), false, false,
+            Size(payload["state"]) + Size(questions) + 128, 128, media, 1, 1, null, null);
     }
 
-    private static void RequireInlineMedia(string? value, string modality, Deployment deployment)
+    private static void RequireInlineMedia(string? value, string modality)
     {
-        if (!deployment.Model.Inputs.Contains(modality) ||
-            value?.StartsWith($"data:{modality}/", StringComparison.OrdinalIgnoreCase) != true ||
+        if (value?.StartsWith($"data:{modality}/", StringComparison.OrdinalIgnoreCase) != true ||
             value.IndexOf(";base64,", StringComparison.OrdinalIgnoreCase) is < 1 or > 80)
             throw new ProviderFailure(422, "Use inline base64 media supported by the selected deployment.");
     }

@@ -49,6 +49,14 @@ Use a table of concrete scheduler cases with deterministic resource/provider dou
 
 Run a two-node live example for streaming, a related follow-up, unrelated parallel requests, model displacement, failure before first output, failure after first output, and client disconnect. Check the metadata counters: matching valid requests do not perform full refreshes, repeated absent-model requests share the discovery cooldown, and retry attempts terminate.
 
+## Windows qualification
+
+- The Release host suite covered concurrent same-key requests, competing reservations, FIFO after reroute, priority rejection and displacement, and independent resource sets. Deterministic queue checks covered the scarcity exception, revalidation when an alternate disappeared or a new higher-priority request could not move, and independent work starting during a targeted eligibility check. Cancellation released one active reservation and fenced a delayed submission.
+- Two enrolled Mango processes on the same Windows Tailscale interface used distinct ports and data directories. With CPU llama-server b12292 and Qwen2.5 0.5B Q4_0, a remote cold load streamed over one peer submission and a follow-up reported 214 cached prompt tokens. Unrelated concurrent requests under one key used both serving placements. A disconnected client drained its remote execution. Two missing-alias requests shared one discovery scan.
+- A live llama-server router configured for one resident model unloaded an idle deployment before loading the requested deployment. Both aliases used the same GGUF artifact. The next related request for the displaced alias used the alternate host.
+- Fault-controlled providers on the real Tailscale listener exercised a confirmed failure before output, a broken partial stream, and an unconfirmed provider stop. Only the confirmed failure before output reached the fallback. Three matching-digest requests made three peer submissions with zero additional digest merges or stop queries. A control request for a different serving process epoch returned an uncertain outcome.
+- This run qualified CPU llama-server and the fault-controlled providers on one physical Windows machine. Cache benefits depend on the adapter and observed model instance. Placements with unavailable timing data use best-effort affinity. An unconfirmed stop remains ineligible for retry until the serving process can verify settlement.
+
 ## Done
 
 Requests enter any enrolled node and are served by eligible peers without a central router, duplicate execution queues, or routine online-map polling. The observable scheduling examples match the owner's policies. No `best` routing, priority predictor, global optimization solver, distributed quota service, or durable job platform is added.

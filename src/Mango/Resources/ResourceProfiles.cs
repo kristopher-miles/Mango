@@ -25,18 +25,25 @@ internal sealed partial class ResourceProtection
         }
     }
 
-    public void RequireServing()
-    {
-        lock (sync)
-            if (!ServingAllowed)
-                throw new ProviderFailure(503, status.Reason ??
-                    "The local benchmark policy requires complete profiles before inference.");
-    }
-
     public ResourceBudget? Estimate(Deployment model, EndpointStatus endpoint, InferenceOperation operation)
     {
         lock (sync)
             return FindBudget(model, endpoint, operation);
+    }
+
+    public (double? PromptMilliseconds, double? CacheSavingsMilliseconds) RouteTiming(Deployment model, InferenceOperation operation)
+    {
+        lock (sync)
+        {
+            var profile = MatchProfile(model.Id, operation, Configuration(model), model.Instance?.ResourceFingerprint);
+            var cold = profile?.Measurements.Where(item => item.ReusedCache != true)
+                .Select(item => item.PromptMilliseconds ?? item.FirstToken?.TotalMilliseconds).OfType<double>()
+                .DefaultIfEmpty().Average();
+            var warm = profile?.Measurements.Where(item => item.ReusedCache == true)
+                .Select(item => item.PromptMilliseconds ?? item.FirstToken?.TotalMilliseconds).OfType<double>()
+                .DefaultIfEmpty().Average();
+            return (cold is > 0 ? cold : null, cold is > 0 && warm is > 0 && warm < cold ? cold - warm : null);
+        }
     }
 
     private sealed record Target(Deployment Model, EndpointStatus Endpoint, InferenceOperation Operation, string Configuration,
@@ -378,7 +385,7 @@ internal sealed partial class ResourceProtection
         }
     }
 
-    private async Task<bool> WaitForObservationAsync(CancellationToken cancellation)
+    internal async Task<bool> WaitForObservationAsync(CancellationToken cancellation)
     {
         Task observation;
         lock (sync)

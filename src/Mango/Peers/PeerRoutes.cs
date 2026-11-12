@@ -12,6 +12,9 @@ internal static class PeerRoutes
     {
         var network = local.MapGroup("/network");
         network.MapGet("", (HttpRequest request) => peers.View(request));
+        network.MapGet("/scheduling", () => peers.SchedulingView());
+        network.MapPut("/queue", (QueueSettings input, HttpContext context) =>
+            HandleAsync(context, token => peers.SetQueuePolicyAsync(context.Request, input.WaitSeconds, token)));
         network.MapPut("/discover", (DiscoveryRequest input, HttpContext context) =>
             HandleAsync(context, token => peers.DiscoverAsync(input.Address, token)));
         network.MapPut("/refresh", (HttpContext context) => HandleAsync(context, peers.RefreshAsync));
@@ -33,8 +36,7 @@ internal static class PeerRoutes
             HandleAsync(context, token => peers.RemoveAsync(context.Request, id, token)));
     }
 
-    public static async Task<WebApplication> StartAsync(PeerNetwork peers, ProviderCatalog providers,
-        IPAddress[] addresses, int port, CancellationToken cancellation)
+    public static async Task<WebApplication> StartAsync(PeerNetwork peers, IPAddress[] addresses, int port, CancellationToken cancellation)
     {
         var builder = WebApplication.CreateSlimBuilder(new WebApplicationOptions { Args = [], ContentRootPath = AppContext.BaseDirectory });
         builder.Configuration.Sources.Clear();
@@ -42,7 +44,7 @@ internal static class PeerRoutes
         {
             options.AddServerHeader = false;
             options.Limits.RequestHeadersTimeout = TimeSpan.FromSeconds(10);
-            options.Limits.MaxConcurrentConnections = 96;
+            options.Limits.MaxConcurrentConnections = 1536;
             options.Limits.MaxRequestHeadersTotalSize = 16 * 1024;
             options.Limits.MaxRequestBodySize = PeerLimits.ControlBytes;
             foreach (var address in addresses)
@@ -94,8 +96,10 @@ internal static class PeerRoutes
                 await context.Response.WriteAsJsonAsync(notice, context.RequestAborted);
                 return;
             }
+            context.Items[typeof(PeerAuthentication)] = access;
             var route = request.Path.Value ?? "";
-            peers.ObservePeer(access.Node, request, refresh: route is "/peer/ping" || route.StartsWith("/peer/key/", StringComparison.Ordinal));
+            peers.ObservePeer(access.Node, request, refresh: route is "/peer/ping" ||
+                route.StartsWith("/peer/key/", StringComparison.Ordinal) || route.StartsWith("/peer/inference/", StringComparison.Ordinal));
             await next(context);
         });
 
@@ -112,7 +116,8 @@ internal static class PeerRoutes
         peer.MapPost("/notice", (PeerNotice notice, HttpContext context) =>
             HandleAsync(context, token => peers.ApplyNoticeAsync(notice, token)));
         peer.MapGet("/key/{id:guid}", (Guid id) => new PeerKeyReply(peers.Snapshot.Keys.GetValueOrDefault(id)));
-        ProviderRoutes.MapInference(app, providers);
+        peers.MapAttemptRoutes(peer);
+        ProviderRoutes.MapInference(app, peers);
         try
         {
             await app.StartAsync(cancellation);
@@ -150,4 +155,5 @@ internal static class PeerRoutes
     }
 
     private sealed record DiscoveryRequest(string? Address);
+    private sealed record QueueSettings(int WaitSeconds);
 }

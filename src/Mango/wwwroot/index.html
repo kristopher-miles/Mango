@@ -89,6 +89,13 @@
             </fieldset>
           </form>
           <p id="network-unlocked" hidden>Network administration is unlocked.</p>
+          <form id="network-queue" hidden>
+            <fieldset>
+              <legend>Inference queue</legend>
+              <label>Maximum wait in seconds<input name="waitSeconds" type="number" min="1" max="3600" required></label>
+              <button type="submit">Save queue limit</button>
+            </fieldset>
+          </form>
           <h3>Inference keys</h3>
           <p class="muted">Key changes need one other reachable peer when the network has more than one enrolled node.</p>
           <ul id="network-keys"></ul>

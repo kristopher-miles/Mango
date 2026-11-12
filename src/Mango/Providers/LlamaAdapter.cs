@@ -9,16 +9,26 @@ internal sealed class LlamaAdapter(HttpClient http, ProviderEndpoint endpoint) :
 {
     private Process? owned;
     private int allocationFailure;
+    private long inventoryGeneration;
     private bool Router => Endpoint.Profile == ProviderProfile.LlamaRouter;
     public bool HasInventoryEvents => Router;
     private bool CanLaunch => Managed && !Router && Endpoint.Executable is not null && Endpoint.ModelFile is not null;
     protected override string InferenceQuery => Router ? "?autoload=false" : "";
     public override int? OwnedProcessId => owned is { HasExited: false } process ? process.Id : null;
 
-    public ProviderModel? ConfiguredModel => CanLaunch
-        ? Model(Path.GetFileNameWithoutExtension(Endpoint.ModelFile!),
-            Path.GetFileNameWithoutExtension(Endpoint.ModelFile!), null, [], [], [], [], null,
-            installed: File.Exists(Endpoint.ModelFile)) : null;
+    public ProviderModel? ConfiguredModel
+    {
+        get
+        {
+            if (!CanLaunch)
+                return null;
+            var id = Path.GetFileNameWithoutExtension(Endpoint.ModelFile!);
+            var embedding = Endpoint.Profile == ProviderProfile.LlamaEmbedding;
+            return Model(id, id, null, ["text"], embedding ? ["embedding"] : ["text"],
+                [embedding ? InferenceOperation.Embeddings : InferenceOperation.Chat], [], null,
+                structured: !embedding, encodings: embedding ? ["base64", "float"] : [], installed: File.Exists(Endpoint.ModelFile));
+        }
+    }
 
     public override async Task<ProviderInventory> InspectAsync(CancellationToken cancellation)
     {
@@ -66,7 +76,9 @@ internal sealed class LlamaAdapter(HttpClient http, ProviderEndpoint endpoint) :
             var fingerprint = ProviderIdentity.Hash(Endpoint.Id.ToString("N"), id, version, meta.Text("ftype"),
                 props.Text("model_path"), props.Text("chat_template"), props.Text("model_ftype"),
                 context?.ToString(), props.Number("total_slots")?.ToString(), row.Get("status").Text("preset"));
-            var instances = loaded ? new[] { new ProviderInstance(id, context, props.Number("total_slots"), fingerprint) } : [];
+            var generation = Router ? Volatile.Read(ref inventoryGeneration).ToString(System.Globalization.CultureInfo.InvariantCulture) : null;
+            var instances = loaded ? new[] { new ProviderInstance(id, context, props.Number("total_slots"), fingerprint,
+                NativeGeneration: generation) } : [];
             models.Add(Model(id, id, meta.Text("ftype") ?? props.Text("model_ftype"),
                 inputs, outputs, operations, instances, meta.Number("n_ctx_train") ?? row.Number("context_length"),
                 tools: caps.IsTrue("supports_tools") || caps.IsTrue("supports_tool_calls"),
@@ -76,7 +88,8 @@ internal sealed class LlamaAdapter(HttpClient http, ProviderEndpoint endpoint) :
                 artifactBytes: meta.Long("size"), installed: state is not ("downloading" or "incomplete"), format: "gguf"));
         }
         return new(version, models.ToArray(), Managed && (Router || CanLaunch), Managed && (Router || OwnedProcessId.HasValue),
-            OwnedProcessId.HasValue, OwnedProcessId);
+            OwnedProcessId.HasValue, OwnedProcessId, Router && root.Number("max_instances") is > 0 and <= ProviderLimits.MaxModels
+                ? root.Number("max_instances") : null);
     }
 
     public override async Task<int?> CountChatAsync(JsonObject payload, CancellationToken cancellation)
@@ -132,7 +145,10 @@ internal sealed class LlamaAdapter(HttpClient http, ProviderEndpoint endpoint) :
                         {
                             matched = value == prefix[matched] ? matched + 1 : -1;
                             if (matched == prefix.Length)
+                            {
+                                Interlocked.Increment(ref inventoryGeneration);
                                 changed();
+                            }
                         }
                     }
             }

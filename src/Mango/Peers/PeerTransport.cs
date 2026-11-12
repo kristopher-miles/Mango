@@ -148,7 +148,7 @@ internal sealed partial class PeerNetwork
     }
 
     private async Task<PeerReply<T>?> SendAsync<T>(PeerSnapshot from, PeerNode peer, string route, object? body,
-        CancellationToken cancellation, bool refresh = false)
+        CancellationToken cancellation, bool refresh = false, TimeSpan? timeout = null)
     {
         if (from.Self is not { } self || from.Records.Identity is not { } identity || from.Token is null || DeviceChanged(from))
             return null;
@@ -156,7 +156,7 @@ internal sealed partial class PeerNetwork
         {
             try
             {
-                using var timeout = CallDeadline(cancellation);
+                using var deadline = CallDeadline(cancellation, timeout);
                 using var request = new HttpRequestMessage(body is null ? HttpMethod.Get : HttpMethod.Post, new Uri(target, PeerRoot + route));
                 request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", from.Token);
                 request.Headers.Add(NodeHeader, self.Id.ToString("N"));
@@ -165,9 +165,9 @@ internal sealed partial class PeerNetwork
                 request.Headers.Add(RevisionHeader, from.Latest.ToString(System.Globalization.CultureInfo.InvariantCulture));
                 if (body is not null)
                     request.Content = JsonContent.Create(body, options: Json);
-                using var response = await http.SendAsync(request, timeout.Token);
+                using var response = await http.SendAsync(request, deadline.Token);
                 if (route == "ping" && response.StatusCode == HttpStatusCode.Unauthorized &&
-                    await GetIntroAsync(target, timeout.Token) is { } intro && intro.Node == peer.Id &&
+                    await GetIntroAsync(target, deadline.Token) is { } intro && intro.Node == peer.Id &&
                     intro.Device == peer.Device && intro.Identity.Id == identity.Id)
                 {
                     if (intro.Identity.Generation.CompareTo(identity.Generation) > 0)
@@ -179,7 +179,7 @@ internal sealed partial class PeerNetwork
                     continue;
                 if (response.StatusCode == HttpStatusCode.Conflict)
                 {
-                    var notice = await response.Content.ReadFromJsonAsync<PeerNotice>(Json, timeout.Token);
+                    var notice = await response.Content.ReadFromJsonAsync<PeerNotice>(Json, deadline.Token);
                     if (notice is not null)
                         await ApplyNoticeAsync(notice, cancellation);
                     return null;
@@ -188,7 +188,7 @@ internal sealed partial class PeerNetwork
                     continue;
                 var digest = Header(response, DigestHeader);
                 var result = response.StatusCode == HttpStatusCode.NoContent ? default :
-                    await response.Content.ReadFromJsonAsync<T>(Json, timeout.Token);
+                    await response.Content.ReadFromJsonAsync<T>(Json, deadline.Token);
                 contacts[peer.Id] = new(clock.GetUtcNow(), true, digest);
                 if (refresh)
                     QueueMismatch(peer.Id, digest);
@@ -201,10 +201,10 @@ internal sealed partial class PeerNetwork
         return null;
     }
 
-    private CancellationTokenSource CallDeadline(CancellationToken cancellation)
+    private CancellationTokenSource CallDeadline(CancellationToken cancellation, TimeSpan? duration = null)
     {
         var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellation, stopping.Token);
-        timeout.CancelAfter(PeerLimits.CallTimeout);
+        timeout.CancelAfter(duration ?? PeerLimits.CallTimeout);
         return timeout;
     }
 
@@ -311,6 +311,7 @@ internal sealed partial class PeerNetwork
             return ReconcileResult.Incomplete;
         if (ping.Digest == current.Digest)
             return ReconcileResult.Synchronized;
+        Interlocked.Increment(ref digestMerges);
         try
         {
             var versions = await SendAsync<PeerVersions>(current, peer, "versions", null, cancellation);

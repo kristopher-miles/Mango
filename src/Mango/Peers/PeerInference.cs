@@ -76,7 +76,7 @@ internal sealed partial class PeerNetwork
         await next(context);
     }
 
-    private InferenceLease? AcquireLease(Guid id, string? secret, InferenceOperation? operation, out int status)
+    private InferenceLease? AcquireLease(Guid id, string? secret, InferenceOperation? operation, out int status, bool forwarded = false)
     {
         status = 401;
         lock (authorization)
@@ -86,7 +86,7 @@ internal sealed partial class PeerNetwork
             if (id != Guid.Empty)
             {
                 if (!Ready || current.Self is null || DeviceChanged(current) || !current.Keys.TryGetValue(id, out key) ||
-                    key.Revoked || key.ExpiresAt <= clock.GetUtcNow() || !PeerCredentials.Verify(secret, key.Verifier))
+                    key.Revoked || key.ExpiresAt <= clock.GetUtcNow() || !forwarded && !PeerCredentials.Verify(secret, key.Verifier))
                     return null;
                 if (operation.HasValue && !key.Scopes.Contains((InferenceScope)operation.Value))
                 {
@@ -95,7 +95,11 @@ internal sealed partial class PeerNetwork
                 }
             }
             if (!active.TryGetValue(id, out var currentLease))
+            {
                 active[id] = currentLease = new();
+                if (key?.ExpiresAt is { } expires && expires - clock.GetUtcNow() is { TotalMilliseconds: > 0 and < uint.MaxValue } remaining)
+                    currentLease.Stop.CancelAfter(remaining);
+            }
             currentLease.Count++;
             return new(this, id, currentLease, new(key?.Id, key?.Name, key?.Scopes ?? [], key?.Priority ?? KeyPriority.Normal,
                 currentLease.Stop.Token));
@@ -128,7 +132,8 @@ internal sealed partial class PeerNetwork
                 unlocks.Clear();
             foreach (var (id, lease) in active.ToArray())
             {
-                if (!reset && !membershipLost && (id == Guid.Empty || after.Keys.TryGetValue(id, out var key) && !key.Revoked))
+                if (!reset && !membershipLost && (id == Guid.Empty || after.Keys.TryGetValue(id, out var key) && !key.Revoked &&
+                    (key.ExpiresAt is null || key.ExpiresAt > clock.GetUtcNow())))
                     continue;
                 active.Remove(id);
                 lease.CancelWork = lease.Stop.CancelAsync();
@@ -139,9 +144,14 @@ internal sealed partial class PeerNetwork
             providers.ClearPrivateExecution();
             contacts.Clear();
             mismatches.Clear();
+            ClearSchedulingMemory();
             lock (lookupLock)
                 negatives.Clear();
         }
+        foreach (var node in before.Nodes.Values.Where(node => !node.Removed &&
+                     (!after.Nodes.TryGetValue(node.Id, out var current) || current.Removed)))
+            serving.CancelOrigin(node.Id);
+        serving.Wake();
     }
 
     private async Task LookupAsync(Guid id, IPAddress source, CancellationToken cancellation)

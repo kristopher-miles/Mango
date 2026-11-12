@@ -37,6 +37,7 @@ internal sealed partial class ResourceProtection : IDisposable
     private BenchmarkPolicy policy;
     private int stopping;
     public event Action? Changed;
+    public event Action? CapacityChanged;
 
     public ResourceProtection(string directory, SnapshotFile<LocalSettings> settings,
         Func<CatalogView, DateTimeOffset, ResourceObservation>? sample = null,
@@ -190,10 +191,10 @@ internal sealed partial class ResourceProtection : IDisposable
             var cost = work == ResourceWork.Load ? budget.Load : budget.Execute;
             if (work == ResourceWork.Load && cost.RamBytes == 0 && cost.DeviceBytes.Values.All(value => value == 0))
                 return Refuse("Set a peak memory allowance before loading this model.");
-            var overlap = current.BenchmarkPolicy != BenchmarkPolicy.Never && budget.AllowOverlap &&
+            var overlap = AllowsOverlap(budget) &&
                 !profiling && work == ResourceWork.Execute && workload.Items == 1;
             var peersOnEndpoint = reservations.Where(item => item.Endpoint == model.EndpointId && !item.Settled).ToArray();
-            var slots = Math.Min(budget.ParallelSlots, model.Instance?.Slots ?? 1);
+            var slots = OverlapSlots(model, budget);
             if (reservations.Any(item => !item.Settled &&
                 (!overlap || !item.Overlap || !item.Running || (item.Endpoint == model.EndpointId
                     ? item.Deployment != model.Id : !SeparateWorkers(latest, item.Endpoint, model.EndpointId)))) ||
@@ -212,7 +213,7 @@ internal sealed partial class ResourceProtection : IDisposable
                 return Refuse(pressure);
             }
             if (!Fits(cost, latest, freeRam, current))
-                return new(AdmissionStatus.Wait, "The request does not fit current RAM or per-device VRAM reserves.", null);
+                return new(AdmissionStatus.Wait, "The request does not fit current RAM or per-device VRAM reserves.", null, MemoryWait: true);
             var lease = new ResourceReservation(this, model.EndpointId, model.Id, work, fingerprint, cost, overlap,
                 sampleNumber, latest.Workers.GetValueOrDefault(model.EndpointId));
             reservations.Add(lease);
@@ -221,9 +222,38 @@ internal sealed partial class ResourceProtection : IDisposable
     }
 
     private static Admission Refuse(string reason) => new(AdmissionStatus.Unavailable, reason, null);
+
+    private bool AllowsOverlap(ResourceBudget budget) => settings.Value.BenchmarkPolicy != BenchmarkPolicy.Never && budget.AllowOverlap;
+
+    public int OverlapSlots(Deployment model, ResourceBudget budget) => model.Instance?.Slots is <= 0 ? 0 :
+        AllowsOverlap(budget) ? Math.Min(model.Instance?.Slots ?? 1, budget.ParallelSlots) : 1;
     private static bool SeparateWorkers(ResourceObservation latest, Guid first, Guid second) =>
         latest.Workers.TryGetValue(first, out var a) && latest.Workers.TryGetValue(second, out var b) &&
         !a.Processes.Intersect(b.Processes).Any();
+
+    public bool CanBackfill(ServingPlacement a, ServingPlacement b)
+    {
+        lock (sync)
+        {
+            if (settings.Value.BenchmarkPolicy == BenchmarkPolicy.Never || observed is not { } latest ||
+                a.Model.Instance is null || b.Model.Instance is null || a.Workload.Items != 1 || b.Workload.Items != 1 ||
+                a.Budget is not { AllowOverlap: true } first || b.Budget is not { AllowOverlap: true } second ||
+                !SeparateWorkers(latest, a.Endpoint.Id, b.Endpoint.Id) ||
+                first.Execute.DeviceBytes.Keys.Intersect(second.Execute.DeviceBytes.Keys).Any())
+                return false;
+            var combined = new MemoryCost(first.Execute.RamBytes + second.Execute.RamBytes,
+                first.Execute.DeviceBytes.Concat(second.Execute.DeviceBytes).ToDictionary());
+            return Fits(combined, latest, latest.FreeRam, settings.Value);
+        }
+    }
+
+    public bool CanReleaseForLoad(ServingPlacement target, Guid victimEndpoint)
+    {
+        lock (sync)
+            return target.Budget?.Load is { } load && observed?.Workers.GetValueOrDefault(victimEndpoint) is { } worker &&
+                (load.RamBytes > 0 && worker.ResidentBytes > 0 || load.DeviceBytes.Any(pair => pair.Value > 0 &&
+                    worker.DedicatedBytes?.GetValueOrDefault(pair.Key) > 0));
+    }
 
     internal static bool Covers(Workload limit, Workload actual) =>
         limit.Operation == actual.Operation && limit.Units >= actual.Units && limit.Items >= actual.Items &&
@@ -290,6 +320,7 @@ internal sealed partial class ResourceProtection : IDisposable
                 Remove(item);
         }
         Signal();
+        CapacityChanged?.Invoke();
     }
 
     public void ConfirmSettled(string deployment)
@@ -374,6 +405,7 @@ internal sealed partial class ResourceProtection : IDisposable
                     sampled = now;
                     nextSample = sampled + interval;
                     ApplyObservation(latest);
+                    CapacityChanged?.Invoke();
                 }
                 await AdvanceWithdrawalAsync(providers, cancellation);
                 AdvanceBenchmarks(providers, cancellation);
