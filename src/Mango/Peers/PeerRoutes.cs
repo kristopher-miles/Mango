@@ -13,8 +13,14 @@ internal static class PeerRoutes
         var network = local.MapGroup("/network");
         network.MapGet("", (HttpRequest request) => peers.View(request));
         network.MapGet("/scheduling", () => peers.SchedulingView());
+        network.MapGet("/events", (HttpContext context) => HandleAsync(context,
+            token => peers.WatchDashboardAsync(context, token), noContent: false));
         network.MapPut("/queue", (QueueSettings input, HttpContext context) =>
             HandleAsync(context, token => peers.SetQueuePolicyAsync(context.Request, input.WaitSeconds, token)));
+        network.MapPut("/models", (SharedModelUpdate input, HttpContext context) =>
+            HandleAsync(context, token => peers.SetModelIntentAsync(context.Request, input, token)));
+        network.MapPut("/providers", (SharedProviderUpdate input, HttpContext context) =>
+            HandleAsync(context, token => peers.SetProviderIntentAsync(context.Request, input, token)));
         network.MapPut("/discover", (DiscoveryRequest input, HttpContext context) =>
             HandleAsync(context, token => peers.DiscoverAsync(input.Address, token)));
         network.MapPut("/refresh", (HttpContext context) => HandleAsync(context, peers.RefreshAsync));
@@ -130,10 +136,10 @@ internal static class PeerRoutes
         }
     }
 
-    private static Task HandleAsync<T>(HttpContext context, Func<CancellationToken, Task<T>> action) =>
+    internal static Task HandleAsync<T>(HttpContext context, Func<CancellationToken, Task<T>> action) =>
         HandleAsync(context, async token => await context.Response.WriteAsJsonAsync(await action(token), token), noContent: false);
 
-    private static async Task HandleAsync(HttpContext context, Func<CancellationToken, Task> action, bool noContent = true)
+    internal static async Task HandleAsync(HttpContext context, Func<CancellationToken, Task> action, bool noContent = true)
     {
         try
         {

@@ -10,7 +10,7 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Hosting;
 
-internal static class PeerChecks
+internal static partial class PeerChecks
 {
     private const string Password = "Mango test master password";
     private const string Recovered = "Mango recovered master password";
@@ -30,9 +30,14 @@ internal static class PeerChecks
 
         var output = Console.Out;
         Console.SetOut(TextWriter.Null);
-        try { await TestTailnetAsync(root, status, address); }
+        try
+        {
+            await TestTailnetAsync(root, status, address);
+            await TestPhaseSixAsync(root, status, address);
+        }
         finally { Console.SetOut(output); }
         Console.WriteLine("Peer checks passed on the live Windows Tailscale interface with two Mango instances.");
+        Console.WriteLine("Shared host intent, local dashboard and TLS public ingress checks passed.");
     }
 
     private static async Task TestTailnetAsync(string root, TailnetStatus status, IPAddress address)
@@ -84,7 +89,9 @@ internal static class PeerChecks
                 "create and join persist each host's own benchmark choice without replication");
             await Request(http, HttpMethod.Get, second.LocalAddress + "/v1/models", key);
 
-            await Local(http, first, "providers", new { profile = "llamaSingle", mode = "attached", address = provider.Urls.Single() });
+            var registration = new { profile = "llamaSingle", mode = "attached", address = provider.Urls.Single() };
+            await Local(http, first, "providers", registration, expected: 403);
+            await Local(http, first, "providers", registration, firstAdmin);
             var catalog = await Local(http, first, "providers");
             var model = catalog.GetProperty("models")[0];
             var deployment = model.GetProperty("id").GetString()!;
@@ -238,7 +245,14 @@ internal static class PeerChecks
         if (body is not null)
             request.Content = JsonContent.Create(body, options: Json);
         using var response = await http.SendAsync(request);
-        Check((int)response.StatusCode == expected, $"{method} {new Uri(url).AbsolutePath} expected HTTP {expected}, got {(int)response.StatusCode}");
+        if ((int)response.StatusCode != expected)
+        {
+            var detail = response.Content.Headers.ContentType?.MediaType == "application/json" ?
+                await response.Content.ReadFromJsonAsync<JsonElement>(Json) : default;
+            var error = detail.ValueKind == JsonValueKind.Object && detail.TryGetProperty("error", out var value) ? value.ToString() : "";
+            throw new InvalidOperationException($"Peer check failed: {method} {new Uri(url).AbsolutePath} expected HTTP {expected}, " +
+                $"got {(int)response.StatusCode}. {error}");
+        }
         return response.Content.Headers.ContentType?.MediaType == "application/json"
             ? await response.Content.ReadFromJsonAsync<JsonElement>(Json) : default;
     }
@@ -261,7 +275,7 @@ internal static class PeerChecks
         finally { socket.Stop(); }
     }
 
-    private static async Task<WebApplication> StartProviderAsync(TaskCompletionSource stoppedStream)
+    private static async Task<WebApplication> StartProviderAsync(TaskCompletionSource stoppedStream, string? providerToken = null)
     {
         var builder = WebApplication.CreateSlimBuilder();
         builder.WebHost.ConfigureKestrel(options => options.Listen(IPAddress.Loopback, 0));
@@ -273,7 +287,8 @@ internal static class PeerChecks
         app.MapPost("/v1/chat/completions/input_tokens", () => new { input_tokens = 12 });
         app.MapPost("/v1/chat/completions", async (HttpContext context) =>
         {
-            Check(context.Request.Headers.Authorization.Count == 0, "Mango credentials stay outside provider requests");
+            Check(providerToken is null ? context.Request.Headers.Authorization.Count == 0 :
+                context.Request.Headers.Authorization.ToString() == $"Bearer {providerToken}", "Mango credentials stay outside provider requests");
             using var body = await JsonDocument.ParseAsync(context.Request.Body, cancellationToken: context.RequestAborted);
             var prompt = body.RootElement.GetProperty("messages")[0].GetProperty("content").GetString();
             if (prompt == "fail before first output")
@@ -365,7 +380,7 @@ internal static class PeerChecks
             return Results.Json(new { id = "fallback-response" });
         });
         await fallback.StartAsync();
-        await Local(http, ingress, "providers", new { profile = "llamaSingle", mode = "attached", address = fallback.Urls.Single() });
+        await Local(http, ingress, "providers", new { profile = "llamaSingle", mode = "attached", address = fallback.Urls.Single() }, secondAdmin);
         var deployment = (await Local(http, ingress, "providers")).GetProperty("models")[0].GetProperty("id").GetString();
         await Local(http, ingress, "providers/models", new { id = deployment, alias = "shared-fixture", revision = 0 }, secondAdmin, expected: 204);
 
@@ -423,7 +438,7 @@ internal static class PeerChecks
             throw new InvalidOperationException($"Peer check failed: {description}");
     }
 
-    private sealed class Host(WebApplication app, ProviderCatalog providers, PeerNetwork network, Task worker,
+    private sealed class Host(WebApplication app, ProviderCatalog providers, PeerNetwork network, PublicIngress publicIngress, Task worker,
         string localAddress, string tailAddress, string session) : IAsyncDisposable
     {
         private bool closed;
@@ -441,13 +456,15 @@ internal static class PeerChecks
             await providers.InitializeAsync();
             var peers = new PeerNetwork(directory, port, providers, settings, _ => Task.FromResult(tailnet));
             await peers.InitializeAsync();
+            var ingress = new PublicIngress(directory, peers);
+            await ingress.InitializeAsync();
             var local = new LocalWeb();
-            var app = local.Build(0, directory, settings, new LoginStartup(directory), providers, peers);
+            var app = local.Build(0, directory, settings, new LoginStartup(directory), providers, peers, ingress);
             await app.StartAsync();
-            var worker = peers.RunAsync(app.Lifetime.ApplicationStopping);
+            var worker = Task.WhenAll(peers.RunAsync(app.Lifetime.ApplicationStopping), providers.RunAsync(app.Lifetime.ApplicationStopping));
             var address = app.Urls.Single();
             var session = new Uri(local.BrowserUrl(address)).Fragment["#session=".Length..];
-            var host = new Host(app, providers, peers, worker, address, Tailnet.Origin(tailnet.LocalAddresses[0], port), session);
+            var host = new Host(app, providers, peers, ingress, worker, address, Tailnet.Origin(tailnet.LocalAddresses[0], port), session);
             try
             {
                 await Eventually(() => peers.Ready || worker.IsFaulted, "peer startup reconciliation");
@@ -471,6 +488,7 @@ internal static class PeerChecks
             try { await worker; }
             finally
             {
+                await publicIngress.DisposeAsync();
                 await Network.DisposeAsync();
                 await app.StopAsync();
                 await app.DisposeAsync();

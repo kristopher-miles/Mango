@@ -6,18 +6,27 @@
   <title>Mango · Local settings</title>
   <link rel="stylesheet" href="/mango.css">
   <script src="/mango.js" defer></script>
+  <script src="/network-catalog.js" defer></script>
   <script src="/network.js" defer></script>
+  <script src="/dashboard.js" defer></script>
   <script src="/resources.js" defer></script>
 </head>
 <body>
   <main>
     <header>
       <p class="product">Mango</p>
-      <h1>Local settings</h1>
+      <h1>Network and local settings</h1>
     </header>
 
     <p id="status" role="status">Opening local session…</p>
     <div id="workspace" hidden>
+      <nav class="section-links" aria-label="Mango settings">
+        <a href="#private-network">Private network</a>
+        <a href="#providers">Providers</a>
+        <a href="#live-requests">Live requests</a>
+        <a href="#public-inference">Public inference</a>
+        <a href="#settings">Contribution</a>
+      </nav>
       <section class="card" aria-labelledby="host-title">
         <h2 id="host-title">Host status</h2>
         <dl class="host-status">
@@ -30,9 +39,10 @@
         <p id="recovery" class="warning" hidden></p>
       </section>
 
-      <section class="card" aria-labelledby="network-title">
+      <section id="private-network" class="card" aria-labelledby="network-title">
         <h2 id="network-title">Private network</h2>
         <p id="network-tailnet" class="muted"></p>
+        <p id="network-recovery" class="warning" hidden></p>
         <p id="network-status" class="action-status" role="status"></p>
         <p id="network-addresses" class="path"></p>
         <button id="network-refresh" class="secondary" type="button">Refresh network</button>
@@ -54,6 +64,9 @@
                 <label>Network ID<input name="network" type="text" maxlength="36" required></label>
                 <label>This node's name<input name="name" type="text" maxlength="120" required></label>
                 <label>Master password<input name="password" type="password" maxlength="256" autocomplete="off" required></label>
+                <label>This node's role<select name="role" data-role-choice>
+                  <option value="leech">Leech</option><option value="contributor">Contributor</option>
+                </select></label>
                 <label>Benchmark this node<select name="benchmarkPolicy" data-benchmark-choice>
                   <option value="never">Never</option><option value="now">Now</option>
                   <option value="whenConvenient">When convenient</option>
@@ -62,12 +75,18 @@
               <button type="submit">Join network</button>
             </fieldset>
           </form>
+          <details id="network-new-panel">
+            <summary>Create a separate network</summary>
+            <p class="muted">Use this when starting a new Mango network. If an existing peer is unreachable, try joining again with its known address and network ID.</p>
           <form id="network-create">
             <fieldset>
               <legend>Create a new network</legend>
               <div class="inputs">
                 <label>This node's name<input name="name" type="text" maxlength="120" required></label>
                 <label>Master password<input name="password" type="password" minlength="12" maxlength="256" autocomplete="new-password" required></label>
+                <label>This node's role<select name="role" data-role-choice>
+                  <option value="leech">Leech</option><option value="contributor">Contributor</option>
+                </select></label>
                 <label>Benchmark this node<select name="benchmarkPolicy" data-benchmark-choice>
                   <option value="never">Never</option><option value="now">Now</option>
                   <option value="whenConvenient">When convenient</option>
@@ -76,11 +95,10 @@
               <button type="submit">Create network</button>
             </fieldset>
           </form>
+          </details>
         </div>
         <div id="network-enrolled" hidden>
           <p id="network-local"></p>
-          <ul id="network-nodes"></ul>
-          <div id="network-models"></div>
           <form id="network-unlock">
             <fieldset>
               <legend>Unlock network administration</legend>
@@ -89,6 +107,39 @@
             </fieldset>
           </form>
           <p id="network-unlocked" hidden>Network administration is unlocked.</p>
+          <h3>Nodes and deployments</h3>
+          <div id="network-models"></div>
+          <button id="network-provider-add" class="secondary" type="button" hidden>Request a provider registration</button>
+          <form id="network-provider-intent" hidden>
+            <fieldset>
+              <legend>Requested provider configuration</legend>
+              <div class="inputs">
+                <label>Owning node<select name="owner" required></select></label>
+                <label>Provider profile<select name="profile" required></select></label>
+                <label>Provider origin<input name="address" type="url" maxlength="2048" placeholder="Use profile default"></label>
+              </div>
+              <label class="checkbox"><input name="enabled" type="checkbox" checked> Enable this registration</label>
+              <p class="muted">Credentials and process access are configured on the owning node.</p>
+              <div class="actions"><button type="submit">Save provider request</button>
+                <button id="network-provider-cancel" class="secondary" type="button">Cancel</button></div>
+            </fieldset>
+          </form>
+          <form id="network-model-intent" hidden>
+            <fieldset>
+              <legend id="network-model-edit-title">Requested deployment settings</legend>
+              <div class="inputs">
+                <label>Alias<input name="alias" type="text" maxlength="200" required></label>
+                <label>Configured context tokens<input name="servedContext" type="number" min="1" max="4194304"></label>
+                <label>Configured embedding dimensions<input name="embeddingDimensions" type="number" min="1" max="65536"></label>
+                <label>Embedding family<input name="embeddingFamily" type="text" maxlength="200"></label>
+                <label>Tokens per inline media item<input name="mediaTokensPerItem" type="number" min="1" max="4194304"></label>
+              </div>
+              <div id="network-rating-rows"></div>
+              <div class="actions"><button id="network-rating-add" type="button" class="secondary">Add capability rating</button></div>
+              <div class="actions"><button type="submit">Save model request</button>
+                <button id="network-model-cancel" class="secondary" type="button">Cancel</button></div>
+            </fieldset>
+          </form>
           <form id="network-queue" hidden>
             <fieldset>
               <legend>Inference queue</legend>
@@ -97,7 +148,7 @@
             </fieldset>
           </form>
           <h3>Inference keys</h3>
-          <p class="muted">Key changes need one other reachable peer when the network has more than one enrolled node.</p>
+          <p id="network-key-policy" class="muted"></p>
           <ul id="network-keys"></ul>
           <form id="network-issue" hidden>
             <fieldset>
@@ -141,9 +192,9 @@
         </div>
       </section>
 
-      <section class="card" aria-labelledby="providers-title">
+      <section id="providers" class="card" aria-labelledby="providers-title">
         <h2 id="providers-title">Providers and models</h2>
-        <p class="muted">Select one loaded deployment for local inference. Mango will use that model until you change the selection.</p>
+        <p class="muted">Register a local provider and decide whether Mango may manage its model lifecycle.</p>
         <p id="providers-recovery" class="warning" hidden></p>
         <form id="provider-form" aria-labelledby="provider-form-title">
           <fieldset>
@@ -187,7 +238,7 @@
         <h3>Local inference selection</h3>
         <p id="selection-status"></p>
         <button type="button" id="clear-selection" class="secondary" hidden>Clear selection</button>
-        <p class="muted">Choose an explicit deployment or declare an embedding family for embeddings that share a vector space.</p>
+        <p class="muted">Selection prefers this deployment among comparable placements. Use an embedding family for deployments that share a vector space.</p>
         <div id="deployment-list"></div>
         <form id="alias-rating-form" hidden>
           <fieldset>
@@ -200,6 +251,41 @@
           </fieldset>
           <button type="submit">Apply rating to alias</button>
         </form>
+      </section>
+
+      <section id="live-requests" class="card" aria-labelledby="requests-title">
+        <h2 id="requests-title">Live requests</h2>
+        <p id="requests-status" role="status" class="muted">Connecting to the local request feed…</p>
+        <p id="requests-resources" class="muted"></p>
+        <details open class="deployment">
+          <summary>Received here</summary>
+          <ul id="ingress-activity" class="activity-list"></ul>
+        </details>
+        <details open class="deployment">
+          <summary>Serving here</summary>
+          <ul id="serving-activity" class="activity-list"></ul>
+        </details>
+      </section>
+
+      <section id="public-inference" class="card" aria-labelledby="public-title">
+        <h2 id="public-title">Public HTTPS inference</h2>
+        <p id="public-state"></p>
+        <p class="muted">Point an HTTPS reverse proxy or Tailscale Funnel at the dedicated local upstream. Anyone who can reach the HTTPS endpoint and has a permitted inference key can submit work.</p>
+        <form id="public-form">
+          <fieldset>
+            <legend>Local public ingress</legend>
+            <label class="checkbox"><input name="enabled" type="checkbox"> Enable the inference-only upstream</label>
+            <div class="inputs">
+              <label>Loopback upstream port<input name="port" type="number" min="1024" max="65535" required></label>
+              <label>HTTPS origin for a reachability check<input name="httpsOrigin" type="url" maxlength="512" placeholder="https://mango.example.com"></label>
+              <label>Trusted proxy IPv4 address, optional<input name="trustedProxy" type="text" maxlength="45" aria-describedby="proxy-source-hint" placeholder="127.0.0.1"></label>
+            </div>
+            <p id="proxy-source-hint" class="muted">Use this field only when the proxy overwrites X-Forwarded-For with a single observed client IP. Leave it blank for Funnel.</p>
+            <div class="actions"><button type="submit">Save local ingress</button>
+              <button id="public-check" type="button" class="secondary" disabled>Check HTTPS from this node</button></div>
+          </fieldset>
+        </form>
+        <p id="public-feedback" role="status" class="action-status"></p>
       </section>
 
       <form id="settings" class="card" aria-labelledby="settings-title">

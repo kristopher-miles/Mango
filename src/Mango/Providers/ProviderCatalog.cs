@@ -9,7 +9,7 @@ namespace Mango.Providers;
 internal sealed record EndpointStatus(Guid Id, ProviderProfile Profile, ProviderMode Mode, string Address,
     Guid? CredentialReference, string? Executable, string? ModelFile, bool Online, string? Version,
     string? Error, DateTimeOffset? ObservedAt, bool CanLoad, bool CanUnload, bool CanStop, int? OwnedProcessId,
-    int? MaxLoadedModels = null);
+    int? MaxLoadedModels = null, bool CredentialNeeded = false);
 
 internal sealed record CatalogView(EndpointStatus[] Endpoints, Deployment[] Models, string? Selected, string? RecoveryWarning);
 internal sealed record ProviderLifecycle(string DeploymentId, bool Loading, TimeSpan Elapsed);
@@ -22,7 +22,8 @@ internal sealed record StartExecution(AdmissionStatus Status, string? Reason,
 
 internal sealed class ProviderCatalog(string directory, ResourceProtection? resources = null) : IAsyncDisposable, IServingBackend
 {
-    private sealed record Observation(ProviderInventory Inventory, string? Error, DateTimeOffset ObservedAt, bool AllocationFailed = false);
+    private sealed record Observation(ProviderInventory Inventory, string? Error, DateTimeOffset ObservedAt,
+        bool AllocationFailed = false, bool CredentialNeeded = false);
 
     private readonly SnapshotFile<ProviderSettings> store = new(Path.Combine(directory, "providers.json"), Validate);
     private readonly HttpClient http = new(new SocketsHttpHandler
@@ -119,9 +120,10 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
         catch (OperationCanceledException) when (stopping.IsCancellationRequested) { }
     }
 
-    public async Task<EndpointStatus> ConfigureAsync(EndpointUpdate input, CancellationToken cancellation)
+    public async Task<EndpointStatus> ConfigureAsync(EndpointUpdate input, CancellationToken cancellation, Guid? registration = null,
+        bool automatic = false)
     {
-        await operation.WaitAsync(cancellation);
+        await EnterConfigurationAsync(automatic, cancellation);
         try
         {
             var current = store.Value;
@@ -137,7 +139,11 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
                 input.ClearToken && !string.IsNullOrEmpty(input.Token))
                 throw new ProviderFailure(400, "Enter one valid provider bearer token or clear the saved token.");
             var address = NormalizeAddress(string.IsNullOrWhiteSpace(input.Address) ? DefaultAddress(input.Profile) : input.Address);
-            var endpoint = new ProviderEndpoint(previous?.Id ?? Guid.NewGuid(), input.Profile, input.Mode, address,
+            if (automatic && previous?.Address == address && previous.Profile == input.Profile)
+                return View.Endpoints.Single(item => item.Id == previous.Id);
+            if (automatic && (!new Uri(address).IsLoopback || previous is { Mode: ProviderMode.Managed } or { ProtectedToken: not null }))
+                throw new ProviderFailure(412, "Approve the provider address and any credentials or process access on the owning host.");
+            var endpoint = new ProviderEndpoint(previous?.Id ?? registration ?? Guid.NewGuid(), input.Profile, input.Mode, address,
                 input.ClearToken ? null : !string.IsNullOrEmpty(input.Token) ? ProviderSecrets.Protect(input.Token)
                     : previous?.Address == address && previous.Profile == input.Profile ? previous.ProtectedToken : null,
                 BlankToNull(input.Executable), BlankToNull(input.ModelFile));
@@ -145,7 +151,7 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
             if (previous is not null && previous != endpoint && adapters[endpoint.Id].OwnedProcessId.HasValue)
                 throw new ProviderFailure(409, "Stop the process Mango started before changing this registration.");
             if (previous != endpoint && WorkInProgress(endpoint.Id))
-                throw new ProviderFailure(409, "Wait for work on this provider to settle before changing its registration.");
+                throw new ProviderFailure(automatic ? 423 : 409, "Wait for work on this provider to settle before changing its registration.");
             if (previous != endpoint && uncertainModels.Values.Contains(endpoint.Id))
                 throw new ProviderFailure(409, "Confirm the provider has stopped the prior request before changing its registration.");
             if (current.Endpoints.Any(existing => existing.Id != endpoint.Id && existing.Address == endpoint.Address))
@@ -161,23 +167,29 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
                 observations.Remove(endpoint.Id);
                 Publish();
             }
-            await RefreshOneAsync(endpoint.Id, cancellation);
+            if (automatic)
+                SignalRefresh(endpoint.Id);
+            else
+                await RefreshOneAsync(endpoint.Id, cancellation);
             return View.Endpoints.Single(item => item.Id == endpoint.Id);
         }
         finally { ReleaseOperation(); }
     }
 
-    public async Task RemoveAsync(Guid id, CancellationToken cancellation)
+    public async Task RemoveAsync(Guid id, CancellationToken cancellation, bool automatic = false)
     {
-        await operation.WaitAsync(cancellation);
+        await EnterConfigurationAsync(automatic, cancellation);
         try
         {
             if (!adapters.TryGetValue(id, out var adapter))
                 throw new ProviderFailure(404, "Provider endpoint does not exist.");
+            if (automatic && store.Value.Endpoints.Single(item => item.Id == id) is
+                { Mode: ProviderMode.Managed } or { ProtectedToken: not null })
+                throw new ProviderFailure(412, "Confirm disabling this provider on the owning host.");
             if (adapter.OwnedProcessId.HasValue)
                 throw new ProviderFailure(409, "Stop the process Mango started before removing this registration.");
             if (WorkInProgress(id))
-                throw new ProviderFailure(409, "Wait for work on this provider to settle before removing it.");
+                throw new ProviderFailure(automatic ? 423 : 409, "Wait for work on this provider to settle before removing it.");
             if (uncertainModels.Values.Contains(id))
                 throw new ProviderFailure(409, "Confirm the provider has stopped the prior request before removing it.");
             var modelIds = View.Models.Where(model => model.EndpointId == id).Select(model => model.Id).ToHashSet();
@@ -209,9 +221,9 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
         finally { ReleaseOperation(); }
     }
 
-    public async Task EditAsync(ModelUpdate input, CancellationToken cancellation)
+    public async Task EditAsync(ModelUpdate input, CancellationToken cancellation, bool automatic = false)
     {
-        await operation.WaitAsync(cancellation);
+        await EnterConfigurationAsync(automatic, cancellation);
         try
         {
             var model = Find(input.Id);
@@ -222,6 +234,8 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
                 input.MediaTokensPerItem, model.Options.Revision + 1);
             ValidateModel(updated);
             RequireCompatibleAlias(model with { Options = updated }, View.Models);
+            if (ModelServing.Of(model.Options) != ModelServing.Of(updated) && WorkInProgress(model.EndpointId))
+                throw new ProviderFailure(423, "Wait for work on this provider to settle before changing its serving limits.");
             await store.UpdateAsync(value => value with { Models = new(value.Models) { [model.Id] = updated } }, cancellation);
             Publish();
         }
@@ -602,6 +616,14 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
         AdmissionChanged?.Invoke();
     }
 
+    private async Task EnterConfigurationAsync(bool automatic, CancellationToken cancellation)
+    {
+        if (!automatic)
+            await operation.WaitAsync(cancellation);
+        else if (!await operation.WaitAsync(0, cancellation))
+            throw new ProviderFailure(423, "Waiting for the current provider operation to finish.");
+    }
+
     private bool WorkInProgress(Guid endpoint, bool includeUncertain = true) =>
         activeModels.Values.Any(item => item.Endpoint == endpoint) ||
         (includeUncertain ? resources?.HasWork(endpoint) : resources?.HasRunning(endpoint)) == true;
@@ -714,7 +736,8 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
                         ? last with { Instances = [], Installed = configured.Installed } : configured], true, adapter.OwnedProcessId.HasValue,
                     adapter.OwnedProcessId.HasValue, adapter.OwnedProcessId)
                 : previous ?? new ProviderInventory(null, [], false, false, false);
-            observations[id] = new(fallback, error.Message, DateTimeOffset.UtcNow, error.AllocationFailure);
+            observations[id] = new(fallback, error.Message, DateTimeOffset.UtcNow, error.AllocationFailure,
+                error.Status is 401 or 403);
             if (settleOwnedExit && fallback.CanLoad && !adapter.OwnedProcessId.HasValue && previous?.CanStop == true &&
                 (resources?.Observation?.Workers.GetValueOrDefault(id)?.Processes.All(pid => !WindowsObservation.ProcessExists(pid)) ?? true))
                 foreach (var key in uncertainModels.Where(pair => pair.Value == id).Select(pair => pair.Key).ToArray())
@@ -743,7 +766,7 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
                 inventory?.CanLoad == true && (online || endpoint.Executable is not null),
                 inventory?.CanUnload == true && (online || inventory.CanStop),
                 inventory?.CanStop == true, adapters.GetValueOrDefault(endpoint.Id)?.OwnedProcessId ?? inventory?.OwnedProcessId,
-                inventory?.MaxLoadedModels));
+                inventory?.MaxLoadedModels, observation?.CredentialNeeded == true));
             foreach (var model in inventory?.Models ?? [])
             {
                 var options = value.Models.GetValueOrDefault(model.Id) ?? new ModelOptions(DefaultAlias(model), [], null, null, null, null, 0);
@@ -840,7 +863,7 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
         _ => "http://127.0.0.1:8080"
     };
 
-    private static string NormalizeAddress(string address)
+    internal static string NormalizeAddress(string address)
     {
         if (address.Length > 2048 || !Uri.TryCreate(address.Trim(), UriKind.Absolute, out var uri) ||
             uri.Port is <= 0 or > 65535 || uri.UserInfo.Length != 0 || uri.Query.Length != 0 ||
@@ -898,7 +921,7 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
         catch (ProviderFailure error) { return error.Message; }
     }
 
-    private static void ValidateModel(ModelOptions value)
+    internal static void ValidateModel(ModelOptions value)
     {
         if (value is null || !ValidAlias(value.Alias) || value.Ratings is null || value.Ratings.Count > 64 ||
             value.Ratings.Any(rating => string.IsNullOrWhiteSpace(rating.Key) || rating.Key.Length > 100 ||

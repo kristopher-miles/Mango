@@ -4,7 +4,7 @@ const networkFeedback = document.querySelector("#network-status");
 const networkForms = Object.fromEntries(
   ["discover", "join", "create", "unlock", "issue", "recover", "reset", "queue"].map(name => [name, document.querySelector(`#network-${name}`)])
 );
-for (const choice of document.querySelectorAll("[data-benchmark-choice]"))
+for (const choice of document.querySelectorAll("[data-benchmark-choice], [data-role-choice]"))
   choice.addEventListener("change", () => choice.dataset.changed = "true");
 const networkScopes = { ...operationNames, imageInput: "Image input", audioInput: "Audio input" };
 const networkSecretPanel = document.querySelector("#network-secret");
@@ -48,7 +48,8 @@ networkDownload.addEventListener("click", () => {
 });
 
 function showDelivery(result) {
-  return result?.pending ? `Saved locally. ${result.confirmed} confirmed, ${result.pending} pending.` : "Saved.";
+  if (!result || result.confirmed + result.pending === 0) return "Saved on this node.";
+  return `Saved locally. ${result.confirmed} peer confirmations, ${result.pending} pending.`;
 }
 
 async function networkAction(button, work) {
@@ -69,17 +70,42 @@ function networkList(id, rows) {
   document.querySelector(`#network-${id}`).replaceChildren(...rows);
 }
 
+let networkLoad = 0;
+let unlockExpiry;
+
+function renderNetworkLists(network) {
+  const focused = document.activeElement?.dataset.focusKey;
+  networkList("keys", network.keys.map(key => {
+    const expiry = key.expiresAt ? timeLabel(key.expiresAt) : "Never expires";
+    const row = element("li", `${key.name} · ${key.id} · ${key.scopes.map(scope => networkScopes[scope]).join(", ")} · ${key.priority} · ${key.revoked ? "Revoked" : expiry}`);
+    if (network.unlocked && !key.revoked)
+      row.append(catalogAction(`key:${key.id}`, "Revoke", event => networkAction(event.currentTarget, async () => {
+        const result = await api(`network/keys/${key.id}`, null, "DELETE");
+        await loadNetwork();
+        return showDelivery(result);
+      })));
+    return row;
+  }));
+  renderNetworkCatalog(network);
+  if (focused) document.querySelector(`[data-focus-key="${CSS.escape(focused)}"]`)?.focus({ preventScroll: true });
+}
+
 async function loadNetwork() {
+  const revision = ++networkLoad;
   const network = await api("network");
+  if (revision !== networkLoad) return;
   const active = network.localNode && !network.reenroll;
   const state = network.reenroll ? "Reenrollment required" : active
     ? (network.isolated ? "Isolated" : network.ready ? "Enrolled" : "Reconciling") : "Not configured";
   document.querySelector("#network-summary").textContent = state;
   document.querySelector("#network-tailnet").textContent = network.tailnet.error || network.tailnet.message;
+  const warning = document.querySelector("#network-recovery");
+  warning.textContent = network.recoveryWarning || "";
+  warning.hidden = !network.recoveryWarning;
   document.querySelector("#network-addresses").textContent = network.tailnet.addresses.join(" · ");
   document.querySelector("#network-setup").hidden = !!active;
   document.querySelector("#network-enrolled").hidden = !active;
-  networkForms.create.hidden = !!network.identity;
+  document.querySelector("#network-new-panel").hidden = !!network.identity;
   document.querySelector("#network-unlocked").hidden = !network.unlocked;
   document.querySelector("#network-reset-panel").hidden = !network.unlocked;
   networkForms.issue.hidden = !network.unlocked;
@@ -87,35 +113,16 @@ async function loadNetwork() {
   if (document.activeElement !== networkForms.queue.elements.waitSeconds)
     networkForms.queue.elements.waitSeconds.value = network.queueWaitSeconds;
   if (!active) {
+    memberNames = new Map();
     if (network.identity) networkForms.join.elements.network.value = network.identity.id;
     return;
   }
-  document.querySelector("#network-local").textContent = `${network.localNode.name} · Network ${network.identity.id}`;
-  networkList("nodes", network.nodes.map(peer => {
-    const last = peer.lastContact ? new Date(peer.lastContact).toLocaleString() : "No successful contact";
-    return element("li", `${peer.name} · ${peer.address} · ${peer.current ? "Catalog matched at last contact" : "State may be stale"} · ${last}`);
-  }));
-  networkList("keys", network.keys.map(key => {
-    const expiry = key.expiresAt ? new Date(key.expiresAt).toLocaleString() : "Never expires";
-    const row = element("li", `${key.name} · ${key.id} · ${key.scopes.map(scope => networkScopes[scope]).join(", ")} · ${key.priority} · ${key.revoked ? "Revoked" : expiry}`);
-    if (network.unlocked && !key.revoked)
-      row.append(action("Revoke", event => networkAction(event.currentTarget, async () => {
-        const result = await api(`network/keys/${key.id}`, null, "DELETE");
-        await loadNetwork();
-        return showDelivery(result);
-      })));
-    return row;
-  }));
-  const aliases = new Map(network.models.map(model => [`${model.owner}/${model.deployment}`, model.alias]));
-  networkList("models", network.catalogs.map(catalog => {
-    const details = element("details", null, "deployment");
-    details.append(element("summary", `${catalog.name} · ${catalog.role === "contributor" ? "Contributor" : "Leech"} · ${catalog.models.length} deployments`));
-    for (const model of catalog.models) {
-      const alias = aliases.get(`${catalog.node}/${model.id}`) || model.displayName;
-      details.append(element("p", `${alias} · ${model.loaded ? "Last reported loaded" : "Last reported unloaded"}${model.context ? ` · ${model.context} tokens` : ""}`));
-    }
-    return details;
-  }));
+  document.querySelector("#network-local").textContent =
+    `${network.localNode.name} · Node ${network.localNode.id} · Network ${network.identity.id}`;
+  document.querySelector("#network-key-policy").textContent = network.nodes.length === 0
+    ? "This is a single-node network. Key changes take effect here."
+    : "Key changes require a reachable peer. Unreachable peers may continue using their last known key state until they reconcile.";
+  renderNetworkLists(network);
 }
 
 function networkForm(name, work) {
@@ -140,13 +147,13 @@ networkForm("discover", async fields => {
     return row;
   }));
   await loadNetwork();
-  return results.length ? "Select a peer to join." : "No Mango peer found. Try a known Tailscale address.";
+  return results.length ? "Select a peer to join." : "No Mango peer reached. Try a known address and network ID, or retry discovery.";
 });
 networkForm("create", async fields => {
   const result = await api("network/create", fields);
+  showNetworkSecret(result.recoveryRecord, true);
   if (!dirty) await loadSettings();
   await loadNetwork();
-  showNetworkSecret(result.recoveryRecord, true);
   return "Network created.";
 });
 networkForm("join", async fields => {
@@ -156,7 +163,15 @@ networkForm("join", async fields => {
   return "Joined the selected network.";
 });
 networkForm("unlock", async fields => {
-  networkAdmin = (await api("network/unlock", fields)).token;
+  const unlocked = await api("network/unlock", fields);
+  networkAdmin = unlocked.token;
+  clearTimeout(unlockExpiry);
+  unlockExpiry = setTimeout(() => {
+    if (networkAdmin === unlocked.token) {
+      networkAdmin = null;
+      loadNetwork().catch(error => networkFeedback.textContent = error.message);
+    }
+  }, Math.max(0, Date.parse(unlocked.expiresAt) - Date.now()));
   await loadNetwork();
   return "Network administration unlocked.";
 });
@@ -176,8 +191,8 @@ networkForm("issue", async (values, fields) => {
     neverExpires: values.expiry === "never",
     expiresAt: values.expiry === "date" ? new Date(values.expiresAt).toISOString() : null
   }, "POST");
-  await loadNetwork();
   showNetworkSecret(result.secret, false);
+  await loadNetwork();
   return showDelivery(result.delivery);
 });
 networkForm("recover", async fields => {
@@ -189,8 +204,8 @@ networkForm("recover", async fields => {
 networkForm("reset", async fields => {
   const result = await api("network/reset", { newPassword: fields.newPassword, confirm: fields.confirm === "on" });
   networkAdmin = null;
-  await loadNetwork();
   showNetworkSecret(result.recoveryRecord, true);
+  await loadNetwork();
   return showDelivery(result.delivery);
 });
 

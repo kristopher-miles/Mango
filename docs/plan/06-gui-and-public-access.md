@@ -36,3 +36,11 @@ Set generous finite request-body and connection-buffer bounds suitable for suppo
 ## Done
 
 A user can configure the network from any enrolled GUI while each host retains its own resource authority. Public inference works only through an explicitly enabled HTTPS ingress and reaches the same scheduler. No public admin console, proxy-hosting service, new provider tooling, or background peer scan is introduced.
+
+## Windows qualification
+
+- Two enrolled hosts on the same Windows Tailscale interface exercised model alias, capability rating, and configured context edits from another node. An offline edit remained distinct from the cached applied state until the owner rejoined. The owner's reported 2,048-token context remained distinct from the requested 4,096-token fallback. A stale edit conflicted, and local protection and provider credentials could not be set through remote requests.
+- A separate loopback HTTPS proxy used a temporary certificate authority trusted only by the test client. It streamed the first response chunk while a remote fixture was still running. It verified the exact inference allowlist, authentication before upload, key scope and rejection, disconnect propagation, and ignored client-supplied forwarding headers on an untrusted proxy. With an explicitly trusted proxy that replaced the header, the observed address and provenance reached the serving peer.
+- Issuing a key left the upstream off. Recovery preserved keyed HTTPS access. Full reset invalidated it and retained model and provider requests. The host reachability check rejected the test proxy certificate outside its custom client trust.
+- At 502 pixels wide in Edge, the setup controls fit in one column and responded to keyboard selection. The key form revealed the date control on the explicit dated-expiry choice. The model editor saved an alias and rating by keyboard on a disposable host using llama.cpp b12292 and Qwen2.5 0.5B Q4_0. During eight requests, the live panel displayed one running, seven queued, and the queue reason without a page refresh. Three of those requests reached the fixture client's 50-second timeout. Enrollment, key creation, recovery, and reset mutations were exercised through the local HTTP handlers.
+- Qualification used one physical Windows machine. HTTPS from the public internet and the real Funnel path remain unverified.

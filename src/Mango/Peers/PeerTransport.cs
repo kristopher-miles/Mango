@@ -142,7 +142,7 @@ internal sealed partial class PeerNetwork
         var digest = request.Headers[DigestHeader].ToString();
         if (!PeerCredentials.IsSecret(digest))
             return;
-        contacts[peer] = new(clock.GetUtcNow(), true, digest);
+        RecordContact(peer, true, digest);
         if (refresh)
             QueueMismatch(peer, digest);
     }
@@ -189,15 +189,14 @@ internal sealed partial class PeerNetwork
                 var digest = Header(response, DigestHeader);
                 var result = response.StatusCode == HttpStatusCode.NoContent ? default :
                     await response.Content.ReadFromJsonAsync<T>(Json, deadline.Token);
-                contacts[peer.Id] = new(clock.GetUtcNow(), true, digest);
+                RecordContact(peer.Id, true, digest);
                 if (refresh)
                     QueueMismatch(peer.Id, digest);
                 return new(result, digest);
             }
             catch (Exception error) when (Unavailable(error, cancellation)) { }
         }
-        if (contacts.TryGetValue(peer.Id, out var previous))
-            contacts[peer.Id] = previous with { Reachable = false };
+        RecordContact(peer.Id, false, null);
         return null;
     }
 
@@ -297,6 +296,7 @@ internal sealed partial class PeerNetwork
         {
             if (gate && !cancellation.IsCancellationRequested)
                 ready = Snapshot.Self is null || (!needsPeerConfirmation && (synchronized > 0 || incomplete == 0));
+            SignalNetwork();
             reconciliation.Release();
         }
     }

@@ -84,6 +84,7 @@ internal static class Program
         using var resources = new ResourceProtection(directory, settings);
         var providers = new ProviderCatalog(directory, resources);
         var peers = new PeerNetwork(directory, options.PeerPort, providers, settings);
+        var ingress = new PublicIngress(directory, peers);
         var web = new LocalWeb();
         try
         {
@@ -91,7 +92,8 @@ internal static class Program
             providers.InitializeAsync().GetAwaiter().GetResult();
             resources.RestoreUnsettled(providers);
             peers.InitializeAsync().GetAwaiter().GetResult();
-            var app = web.Build(options.Port, directory, settings, new LoginStartup(options.DataDirectory), providers, peers);
+            ingress.InitializeAsync().GetAwaiter().GetResult();
+            var app = web.Build(options.Port, directory, settings, new LoginStartup(options.DataDirectory), providers, peers, ingress);
             try
             {
                 RunHost(app, options, instance, diagnostic, settings, web, providers, peers);
@@ -103,6 +105,7 @@ internal static class Program
         }
         finally
         {
+            ingress.DisposeAsync().AsTask().GetAwaiter().GetResult();
             peers.DisposeAsync().AsTask().GetAwaiter().GetResult();
             providers.DisposeAsync().AsTask().GetAwaiter().GetResult();
         }

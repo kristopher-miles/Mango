@@ -36,8 +36,11 @@ internal sealed class ServingQueue : IAsyncDisposable
     private long waitingBytes;
     private long sequence;
     private long capacityRevision;
+    private int activityGeneration;
+    private readonly Queue<ServingActivity> recentActivity = new();
     private (Entry Entry, Task<AttemptReply?> Work)? loading;
     private (Entry Entry, Task<ScarcityProof?> Check, ScarcityCheck Target)? verifying;
+    public event Action? ActivityChanged;
 
     internal sealed class Work(Guid origin, AttemptTicket ticket, InferenceRequest payload, InferenceAccess access,
         HttpContext context, Func<AlternateProbe, CancellationToken, Task<Guid?>> alternate, Action<Work, Guid> advise,
@@ -74,6 +77,12 @@ internal sealed class ServingQueue : IAsyncDisposable
         public bool AwaitingSettlement { get; set; }
         public ScarcityCheck? Denied { get; set; }
         public bool Rechecking { get; set; }
+        public long QueuedAt { get; init; }
+        public int ActivityGeneration { get; init; }
+        public double? QueueMilliseconds { get; set; }
+        public long? LoadingAt { get; set; }
+        public double? LoadMilliseconds { get; set; }
+        public string? WaitingReason { get; set; } = "Checking local resources.";
     }
 
     public ServingQueue(IServingBackend providers, TimeProvider? time = null)
@@ -123,12 +132,15 @@ internal sealed class ServingQueue : IAsyncDisposable
             {
                 Work = work,
                 Stop = CancellationTokenSource.CreateLinkedTokenSource(cancellation, stop.Token),
-                Sequence = sequence++
+                Sequence = sequence++,
+                QueuedAt = clock.GetTimestamp(),
+                ActivityGeneration = activityGeneration
             };
             entries.Add(id, entry);
             waiting++;
             waitingBytes += work.Payload.Bytes;
             entry.Cancellation = entry.Stop.Token.Register(Wake);
+            ActivityChanged?.Invoke();
             Wake();
             return entry.Complete.Task;
         }
@@ -168,6 +180,54 @@ internal sealed class ServingQueue : IAsyncDisposable
         get { lock (sync) return (waiting, entries.Values.Count(entry => entry.State.State == AttemptState.Running)); }
     }
 
+    public ServingActivity[] Activity()
+    {
+        lock (sync)
+        {
+            var cutoff = clock.GetUtcNow().AddMinutes(-5);
+            return entries.Values.Where(entry => entry.Work is not null && entry.ActivityGeneration == activityGeneration)
+                .OrderBy(entry => entry.Sequence).Take(48).Select(entry => Describe(entry, entry.Work!, null))
+                .Concat(recentActivity.Reverse().Where(item => item.Finished >= cutoff).Take(32)).ToArray();
+        }
+    }
+
+    public void ClearActivity()
+    {
+        lock (sync)
+        {
+            activityGeneration++;
+            recentActivity.Clear();
+        }
+        ActivityChanged?.Invoke();
+    }
+
+    private ServingActivity Describe(Entry entry, Work work, DateTimeOffset? finished) =>
+        new(work.Ticket.Request, work.Ticket.Attempt, work.Origin, work.Payload.Alias, work.Ticket.Deployment,
+            work.Access.Priority, work.Ticket.Source ?? InferenceSource.Of(work.Context), work.Ticket.Arrived, finished,
+            entry.State.State, entry.State.Reason ?? (entry.State.State == AttemptState.Waiting ? entry.WaitingReason : null),
+            entry.QueueMilliseconds ?? clock.GetElapsedTime(entry.QueuedAt).TotalMilliseconds,
+            entry.LoadMilliseconds ?? (entry.LoadingAt is { } loadingAt ? clock.GetElapsedTime(loadingAt).TotalMilliseconds : null),
+            entry.LoadingAt is not null);
+
+    private void WaitingReason(Entry entry, string? reason)
+    {
+        lock (sync)
+        {
+            if (entry.LoadingAt is not null || entry.WaitingReason == reason)
+                return;
+            entry.WaitingReason = reason;
+            ActivityChanged?.Invoke();
+        }
+    }
+
+    private void EndLoad(Entry entry)
+    {
+        if (entry.LoadingAt is not { } at)
+            return;
+        entry.LoadMilliseconds = (entry.LoadMilliseconds ?? 0) + clock.GetElapsedTime(at).TotalMilliseconds;
+        entry.LoadingAt = null;
+    }
+
     public void CancelOrigin(Guid origin)
     {
         lock (sync)
@@ -201,6 +261,12 @@ internal sealed class ServingQueue : IAsyncDisposable
         if (loading is { Work.IsCompleted: true } prepared)
         {
             loading = null;
+            lock (sync)
+            {
+                EndLoad(prepared.Entry);
+                prepared.Entry.WaitingReason = "Checking capacity after model loading.";
+                ActivityChanged?.Invoke();
+            }
             if (await prepared.Work is { } error)
                 Finish(prepared.Entry, error);
         }
@@ -254,10 +320,12 @@ internal sealed class ServingQueue : IAsyncDisposable
             }
             if (entry.Rechecking)
             {
+                WaitingReason(entry, "Rechecking whether alternate hosts can take competing work.");
                 blocked.Add(entry);
                 continue;
             }
             var ahead = blocked.Where(other => providers.Conflicts(placement, other.Placement!)).ToArray();
+            var reason = "Waiting for work that reserved the same resources.";
             if (ahead.Length == 0)
             {
                 var start = providers.TryStart(work.Payload, work.Ticket.Deployment);
@@ -272,6 +340,7 @@ internal sealed class ServingQueue : IAsyncDisposable
                     Finish(entry, Rejected(start.Reason ?? "The local deployment is unavailable."));
                     continue;
                 }
+                reason = start.Reason ?? "Waiting for local capacity.";
             }
 
             var higher = Higher(work, placement, active.Concat(ahead)).ToArray();
@@ -286,15 +355,23 @@ internal sealed class ServingQueue : IAsyncDisposable
                     continue;
                 }
                 StartScarcityCheck(entry, higher, digest);
+                WaitingReason(entry, "Checking alternate hosts for higher-priority work.");
                 blocked.Add(entry);
                 continue;
             }
             blocked.Add(entry);
+            WaitingReason(entry, work.Protection is null ? reason : "Reserved for the next safe start on this host.");
             var revision = Volatile.Read(ref capacityRevision);
             if (ahead.Length == 0 && placement.Model.Instance is null && loading is null && entry.LastLoadRevision != revision &&
                 !active.Any(other => other.Work is not null && providers.Conflicts(placement, other.Placement!)))
             {
                 entry.LastLoadRevision = revision;
+                lock (sync)
+                {
+                    entry.LoadingAt = clock.GetTimestamp();
+                    entry.WaitingReason = "Preparing or loading the model.";
+                    ActivityChanged?.Invoke();
+                }
                 var preparation = PrepareAsync(entry.Placement!, work, entry.Stop!.Token);
                 loading = (entry, preparation);
                 _ = preparation.ContinueWith(_ => Wake(), TaskScheduler.Default);
@@ -383,6 +460,8 @@ internal sealed class ServingQueue : IAsyncDisposable
             token = entry.Stop!.Token;
             RemoveWaiting(work);
             entry.State = new(AttemptState.Running);
+            entry.QueueMilliseconds = clock.GetElapsedTime(entry.QueuedAt).TotalMilliseconds;
+            ActivityChanged?.Invoke();
         }
         _ = ExecuteAsync(entry, work, execute, epoch, token);
     }
@@ -434,7 +513,15 @@ internal sealed class ServingQueue : IAsyncDisposable
                 return;
             if (entry.State.State == AttemptState.Waiting)
                 RemoveWaiting(work);
-            entry.State = result;
+            EndLoad(entry);
+            entry.QueueMilliseconds ??= clock.GetElapsedTime(entry.QueuedAt).TotalMilliseconds;
+            entry.State = result = result with { QueueMilliseconds = entry.QueueMilliseconds, LoadMilliseconds = entry.LoadMilliseconds };
+            if (entry.ActivityGeneration == activityGeneration)
+            {
+                if (recentActivity.Count == 48)
+                    recentActivity.Dequeue();
+                recentActivity.Enqueue(Describe(entry, work, clock.GetUtcNow()));
+            }
             entry.AwaitingSettlement = awaitingSettlement;
             entry.Work = null;
             entry.RetainUntil = entry.RetainUntil > clock.GetUtcNow().AddMinutes(5)
@@ -450,6 +537,7 @@ internal sealed class ServingQueue : IAsyncDisposable
             else
                 source.Dispose();
             entry.Complete.TrySetResult(result);
+            ActivityChanged?.Invoke();
         }
     }
 

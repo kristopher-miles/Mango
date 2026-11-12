@@ -13,29 +13,17 @@ internal static class ProviderRoutes
         local.MapGet("/providers", () => providers.View);
         local.MapPut("/providers", (EndpointUpdate update, HttpContext context) =>
             HandleAsync(context, async cancellation => await context.Response.WriteAsJsonAsync(
-                await providers.ConfigureAsync(update, cancellation), cancellation)));
+                await peers.ConfigureLocalProviderAsync(context.Request, update, cancellation), cancellation)));
         local.MapDelete("/providers/{id:guid}", (Guid id, HttpContext context) =>
-            CommandAsync(context, cancellation => providers.RemoveAsync(id, cancellation)));
+            CommandAsync(context, cancellation => peers.RemoveLocalProviderAsync(context.Request, id, cancellation)));
         local.MapPut("/providers/{id:guid}/stop", (Guid id, HttpContext context) =>
             CommandAsync(context, cancellation => providers.StopAsync(id, cancellation)));
         local.MapPut("/providers/refresh", (RefreshRequest request, HttpContext context) =>
             CommandAsync(context, cancellation => providers.RefreshAsync(request.Id, cancellation)));
         local.MapPut("/providers/models", (ModelUpdate update, HttpContext context) =>
-            CommandAsync(context, async cancellation =>
-            {
-                peers.RequireModelAdmin(context.Request);
-                await providers.EditAsync(update, cancellation);
-                await peers.PublishModelSettingsAsync(context.Request, [update.Id], cancellation);
-            }));
+            CommandAsync(context, cancellation => peers.EditLocalModelAsync(context.Request, update, cancellation)));
         local.MapPut("/providers/ratings", (RatingsRequest request, HttpContext context) =>
-            CommandAsync(context, async cancellation =>
-            {
-                peers.RequireModelAdmin(context.Request);
-                var ids = providers.View.Models.Where(model => string.Equals(model.Alias, request.Alias,
-                    StringComparison.OrdinalIgnoreCase)).Select(model => model.Id).ToArray();
-                await providers.ApplyRatingsAsync(request.Alias ?? "", request.Ratings ?? [], cancellation);
-                await peers.PublishModelSettingsAsync(context.Request, ids, cancellation);
-            }));
+            CommandAsync(context, cancellation => peers.EditRatingsAsync(context.Request, request.Alias ?? "", request.Ratings ?? [], cancellation)));
         local.MapPut("/providers/selection", (SelectionRequest request, HttpContext context) =>
             CommandAsync(context, cancellation => providers.SelectAsync(request.Id, cancellation)));
         local.MapPut("/providers/lifecycle", (LifecycleRequest request, HttpContext context) =>

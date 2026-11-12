@@ -22,6 +22,18 @@ internal sealed record ModelOptions(string Alias, Dictionary<string, int?> Ratin
 internal sealed record ModelUpdate(string Id, string? Alias, Dictionary<string, int?>? Ratings, int? ServedContext,
     int? EmbeddingDimensions, string? EmbeddingFamily, int? MediaTokensPerItem, long Revision);
 
+internal sealed record ModelServing(int? ServedContext, int? EmbeddingDimensions, string? EmbeddingFamily, int? MediaTokensPerItem)
+{
+    public static ModelServing Of(ModelOptions options) =>
+        new(options.ServedContext, options.EmbeddingDimensions, options.EmbeddingFamily, options.MediaTokensPerItem);
+
+    public ModelOptions ApplyTo(ModelOptions options) => options with
+    {
+        ServedContext = ServedContext, EmbeddingDimensions = EmbeddingDimensions,
+        EmbeddingFamily = EmbeddingFamily, MediaTokensPerItem = MediaTokensPerItem
+    };
+}
+
 internal sealed record ProviderSettings(ProviderEndpoint[] Endpoints, Dictionary<string, ModelOptions> Models, string? Selected)
 {
     public static readonly ProviderSettings Empty = new([], [], null);

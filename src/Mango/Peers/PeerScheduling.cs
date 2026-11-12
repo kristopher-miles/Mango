@@ -18,7 +18,8 @@ internal sealed partial class PeerNetwork
     private readonly Dictionary<Guid, (Guid Node, Guid Suggested)> advice = [];
     private readonly Dictionary<(Guid, string), HostUse> hostUse = [];
     private readonly Queue<RecentService> recentServices = new();
-    private readonly Queue<(Guid Id, AttemptTrace[] Attempts, bool Output)> recentIngress = new();
+    private readonly Queue<IngressActivity> recentIngress = new();
+    private int schedulingGeneration;
     private readonly object discoveryLock = new();
     private Task? discovery;
     private DateTimeOffset discoverAfter;
@@ -39,13 +40,18 @@ internal sealed partial class PeerNetwork
     }
 
     private sealed record RecentService(Guid Origin, AttemptTicket Ticket, InferenceShape Shape, DateTimeOffset At);
+    private sealed record IngressActivity(Guid Id, string Alias, InferenceOperation Operation, InferenceSource Source,
+        string? KeyName, KeyPriority Priority, DateTimeOffset Arrived, DateTimeOffset Finished, AttemptTrace[] Attempts,
+        bool Output, string? Reason);
 
     public int QueueWaitSeconds => Snapshot.Records.Queue?.WaitSeconds ?? QueuePolicy.DefaultWaitSeconds;
 
     private void ClearSchedulingMemory()
     {
+        serving.ClearActivity();
         lock (routing)
         {
+            schedulingGeneration++;
             affinity.Clear();
             advice.Clear();
             recentServices.Clear();
@@ -53,6 +59,7 @@ internal sealed partial class PeerNetwork
             foreach (var key in hostUse.Where(item => item.Value.Active == 0).Select(item => item.Key).ToArray())
                 hostUse.Remove(key);
         }
+        SignalRequests();
     }
 
     public async Task SetQueuePolicyAsync(HttpRequest request, int seconds, CancellationToken cancellation)
@@ -74,16 +81,19 @@ internal sealed partial class PeerNetwork
     public object SchedulingView()
     {
         var counts = serving.Counts;
+        var servingActivity = serving.Activity();
+        var cutoff = clock.GetUtcNow().AddMinutes(-5);
         lock (routing)
             return new
             {
                 QueueWaitSeconds, counts.Waiting, counts.Running, DiscoveryRuns = Volatile.Read(ref discoveryRuns),
                 Submissions = Volatile.Read(ref submissions), StopQueries = Volatile.Read(ref stopQueries),
                 PlacementChecks = Volatile.Read(ref placementChecks), DigestMerges = Volatile.Read(ref digestMerges),
-                Ingress = ingress.Values.Select(item => new { item.Id, item.Alias, item.Operation, item.Source,
-                    item.Access.KeyId, item.Access.Priority, item.Arrived, item.QueueUntil, item.OutputStarted,
+                Serving = servingActivity, LocalResources = providers.Resources?.Status,
+                Ingress = ingress.Values.Take(48).Select(item => new { item.Id, item.Alias, item.Operation, item.Source,
+                    item.Access.KeyId, item.Access.KeyName, item.Access.Priority, item.Arrived, item.QueueUntil, item.OutputStarted,
                     Attempts = item.Attempts.ToArray() }).ToArray(),
-                Recent = recentIngress.Select(item => new { item.Id, item.Attempts, item.Output }).ToArray()
+                Recent = recentIngress.Where(item => item.Finished >= cutoff).TakeLast(48).ToArray()
             };
     }
 
@@ -106,7 +116,7 @@ internal sealed partial class PeerNetwork
         if (string.Equals(payload.Alias, "best", StringComparison.OrdinalIgnoreCase))
             throw new ProviderFailure(501, "Automatic best-model selection is not available.");
         var access = InferenceAccess.Of(context) ?? throw new ProviderFailure(401, "The inference credential is required.");
-        var source = context.Connection.RemoteIpAddress?.ToString() ?? "";
+        var source = InferenceSource.Of(context);
         var session = context.Request.Headers["Mango-Session"].ToString();
         if (session.Length > 256)
             throw new ProviderFailure(400, "Mango-Session may contain up to 256 characters.");
@@ -114,13 +124,16 @@ internal sealed partial class PeerNetwork
         var prefixes = session is null ? payload.Prefixes() : [];
         var identity = access.KeyId ?? Guid.Empty;
         var item = new IngressRequest(Guid.NewGuid(), arrived, arrived + limit, access, source, payload.Alias, operation);
+        int generation;
         lock (routing)
         {
             if (ingress.Count >= MaxIngress || ingressBytes + payload.Bytes > MaxIngressBytes)
                 throw new ProviderFailure(429, "Mango's ingress input limit is busy.");
             ingress.Add(item.Id, item);
             ingressBytes += payload.Bytes;
+            generation = schedulingGeneration;
         }
+        SignalRequests();
         context.Response.OnStarting(() =>
         {
             lock (routing)
@@ -132,6 +145,7 @@ internal sealed partial class PeerNetwork
                     item.Attempts[index] = item.Attempts[index] with { State = AttemptState.Running };
                 }
             }
+            SignalRequests();
             return Task.CompletedTask;
         });
         try
@@ -170,13 +184,14 @@ internal sealed partial class PeerNetwork
                     continue;
                 }
                 tried.Add(choice.Node);
+                SignalRequests();
                 attemptCount++;
                 var elapsed = clock.GetElapsedTime(age);
                 var remaining = limit - elapsed;
                 var here = Snapshot.Self?.Id ?? Guid.Empty;
                 var address = Snapshot.Nodes.GetValueOrDefault(choice.Node)?.Address;
                 var ticket = new AttemptTicket(item.Id, attempt, access.KeyId, choice.Deployment,
-                    clock.GetUtcNow() - elapsed, clock.GetUtcNow() + remaining, session, choice.ServingEpoch);
+                    clock.GetUtcNow() - elapsed, clock.GetUtcNow() + remaining, session, choice.ServingEpoch, source);
                 var started = clock.GetTimestamp();
                 var result = new AttemptReply(AttemptState.Uncertain, 503, "The attempt ended without a confirmed result.");
                 try
@@ -192,7 +207,8 @@ internal sealed partial class PeerNetwork
                     {
                         item.OutputStarted |= context.Response.HasStarted;
                         var index = item.Attempts.Count - 1;
-                        item.Attempts[index] = item.Attempts[index] with { State = result.State, Status = result.Status, Timing = result.Timing };
+                        item.Attempts[index] = item.Attempts[index] with { State = result.State, Status = result.Status, Timing = result.Timing,
+                            Reason = result.Reason, QueueMilliseconds = result.QueueMilliseconds, LoadMilliseconds = result.LoadMilliseconds };
                         var use = hostUse[(choice.Node, choice.Deployment)];
                         use.Active--;
                         if (result.State == AttemptState.Completed)
@@ -207,13 +223,15 @@ internal sealed partial class PeerNetwork
                             use.AvoidUntil = clock.GetUtcNow().AddMilliseconds(125 << use.Failures);
                         }
                     }
+                    SignalRequests();
                 }
                 if (result.State == AttemptState.Completed)
                 {
                     lock (routing)
-                        affinity.Remember(new(item.Id, identity, payload.Alias, operation, session, prefixes.LastOrDefault(),
-                            choice with { Epoch = result.Epoch }, clock.GetUtcNow().AddMinutes(5),
-                            advice.TryGetValue(item.Id, out var route) && route.Node == choice.Node ? route.Suggested : null));
+                        if (generation == schedulingGeneration)
+                            affinity.Remember(new(item.Id, identity, payload.Alias, operation, session, prefixes.LastOrDefault(),
+                                choice with { Epoch = result.Epoch }, clock.GetUtcNow().AddMinutes(5),
+                                advice.TryGetValue(item.Id, out var route) && route.Node == choice.Node ? route.Suggested : null));
                     return;
                 }
                 cancellation.ThrowIfCancellationRequested();
@@ -239,6 +257,16 @@ internal sealed partial class PeerNetwork
                 throw new ProviderFailure(422, "The available deployments do not support this operation, context, or request features.");
             throw new ProviderFailure(503, "No eligible model host has available inference capacity.");
         }
+        catch (ProviderFailure error)
+        {
+            item.Reason = error.Message;
+            throw;
+        }
+        catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+        {
+            item.Reason = context.RequestAborted.IsCancellationRequested ? "The client disconnected." : "Inference authority or host service ended.";
+            throw;
+        }
         finally
         {
             lock (routing)
@@ -246,10 +274,15 @@ internal sealed partial class PeerNetwork
                 ingress.Remove(item.Id);
                 advice.Remove(item.Id);
                 ingressBytes -= payload.Bytes;
-                if (recentIngress.Count == 256)
-                    recentIngress.Dequeue();
-                recentIngress.Enqueue((item.Id, item.Attempts.ToArray(), item.OutputStarted));
+                if (generation == schedulingGeneration)
+                {
+                    if (recentIngress.Count == 64)
+                        recentIngress.Dequeue();
+                    recentIngress.Enqueue(new(item.Id, item.Alias, item.Operation, item.Source, item.Access.KeyName, item.Access.Priority,
+                        item.Arrived, clock.GetUtcNow(), item.Attempts.ToArray(), item.OutputStarted, item.Reason));
+                }
             }
+            SignalRequests();
         }
     }
 
@@ -307,14 +340,18 @@ internal sealed partial class PeerNetwork
     private async Task<AttemptReply> SubmitLocalAsync(Guid origin, AttemptTicket ticket, InferenceRequest payload,
         InferenceAccess access, HttpContext context, CancellationToken cancellation)
     {
+        var generation = Volatile.Read(ref schedulingGeneration);
         var result = await serving.SubmitAsync(new(origin, ticket, payload, access, context, FindAlternateAsync, Advise, DisplaceAsync,
             () => Snapshot.Digest, Suggest), cancellation);
         if (result.State == AttemptState.Completed)
             lock (routing)
             {
-                if (recentServices.Count == 512)
-                    recentServices.Dequeue();
-                recentServices.Enqueue(new(origin, ticket, payload.Shape, clock.GetUtcNow()));
+                if (generation == schedulingGeneration)
+                {
+                    if (recentServices.Count == 512)
+                        recentServices.Dequeue();
+                    recentServices.Enqueue(new(origin, ticket, payload.Shape, clock.GetUtcNow()));
+                }
             }
         return result;
     }
@@ -333,7 +370,7 @@ internal sealed partial class PeerNetwork
             (item.ResourceState is null or ContributionState.Contributor) && current.Nodes.TryGetValue(item.Node, out var node) && !node.Removed))
             foreach (var model in catalog.Models)
                 if (sharedModels.TryGetValue((catalog.Node, model.Id), out var shared))
-                    yield return (catalog.Node, shared.Alias, model, catalog.SchedulingEpoch!);
+                    yield return (catalog.Node, model.EffectiveAlias ?? shared.Alias, model, catalog.SchedulingEpoch!);
     }
 
     private ObservedDeployment ObserveDeployment(Deployment model, CatalogView view)

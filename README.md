@@ -66,7 +66,9 @@ The inference surface includes chat completions, embeddings, images, audio trans
 
 Install and sign in to Tailscale separately. Mango binds its peer and keyed inference listener to the Windows Tailscale adapter. The default peer port is `53781`. The browser settings and administrative API use the separate loopback listener.
 
-Open **Private network** in the local UI. On the first node, choose **Create network** and save the recovery record outside the network. On another node, choose **Find peers**, confirm the expected network ID, and join with the master password. A known Tailscale IP and optional port also work for manual enrollment. Mango reuses the enrolled node credential on subsequent launches. Use **Refresh network** to check the listener, reconcile state, or diagnose a failed connection.
+Open **Private network** in the local UI. On the first node, open **Create a separate network**, choose the local role and benchmark policy, and save the recovery record outside the network. On another node, choose **Find peers**, confirm the expected network ID, and join with the master password. A known Tailscale IP and optional port also work for manual enrollment. Mango reuses the enrolled node credential on subsequent launches. Use **Refresh network** to check the listener, reconcile state, or diagnose a failed connection.
+
+The node view shows the last observed reachability, provider and model state, applied limits, and benchmark coverage. Unlock network administration to request a provider registration or edit an existing model or provider on any enrolled node. A saved request remains pending until the owning node reports applying it. For address changes that need new credentials or lifecycle permission, use **Review on this host** in the owning node's GUI. Contribution, thresholds, reserves, benchmark policy, credentials, and process permissions are set on the owning machine.
 
 Unlock network administration to change shared aliases and ratings or issue and revoke inference keys. Save each newly issued key when it appears. It can access the permitted `/v1` routes over Tailscale or on the local loopback address using `Authorization: Bearer <key>`. Requests can enter any enrolled node and use an eligible contributor. A known key can work from cached authority while that node is isolated. Issuing or revoking keys in an enrolled multi-node network requires another reachable member.
 
@@ -75,5 +77,41 @@ The serving node queues work when capacity is busy. Network administrators can c
 Use the optional `Mango-Session` request header to identify a conversation. The value is scoped to the authenticated key and model alias. Mango can also recognize related chat requests from their message prefixes. Cache affinity lasts five minutes after completion and depends on an eligible live model instance.
 
 Use **Recover a forgotten password** to replace the master password and keep existing inference keys. **Full network reset** is a separate, confirmed action that removes keys and private request state and requires peers to reenroll. It preserves reusable model settings and benchmarks. A recovery record cannot reconstruct missing data.
+
+**Live requests** shows ingress placement and retries, plus this host's loading, queue, and execution state. The open page subscribes to local changes. The view keeps a bounded recent history in memory.
+
+## Optional public HTTPS inference
+
+Public inference starts off. To enable it, open **Public HTTPS inference**, enable the local upstream, and choose a port. The default upstream is `http://127.0.0.1:53782`. Point an existing HTTPS reverse proxy at that upstream. Enable streaming and request bodies up to 64 MiB, and give the upstream time to cover the configured queue wait and model preparation. Forward the inference `Authorization` header. Only the dedicated upstream should be proxied.
+
+For example, this location block can go inside an existing HTTPS server in NGINX. Use the port configured in Mango. `proxy_set_header` replaces the client-provided forwarding header. [NGINX HTTP proxy module](https://nginx.org/en/docs/http/ngx_http_proxy_module.html)
+
+```nginx
+location / {
+    proxy_pass http://127.0.0.1:53782;
+    proxy_http_version 1.1;
+    proxy_set_header X-Forwarded-For $remote_addr;
+    client_max_body_size 64m;
+    proxy_request_buffering off;
+    proxy_buffering off;
+    proxy_read_timeout 360s;
+}
+```
+
+Set **Trusted proxy IPv4 address** to the proxy's loopback source IP only if the proxy overwrites `X-Forwarded-For` with the observed client address. Leave the field blank when attribution is unavailable. Mango reports the proxy address as the observed source in that case.
+
+On a tailnet already configured for Funnel, the owner can run `tailscale funnel 53782` in the foreground and use the reported HTTPS origin. Stop the foreground command to withdraw that exposure. Leave the trusted proxy field blank for this setup. [Tailscale Funnel prerequisites and limits](https://tailscale.com/docs/features/tailscale-funnel)
+
+Use **Check HTTPS from this node** after entering the origin. It checks that the HTTPS endpoint reaches this upstream using the host's normal certificate trust. To verify internet reachability, test the endpoint from outside the tailnet. Public requests use `Authorization: Bearer <inference-key>` with the key's configured scope and priority.
+
+The public upstream serves these methods and paths.
+
+- `GET /v1/models`
+- `POST /v1/chat/completions`
+- `POST /v1/embeddings`
+- `POST /v1/images/generations`
+- `POST /v1/audio/transcriptions`
+- `POST /v1/audio/speech`
+- `POST /v1/systemone`
 
 Runtime state, credentials, logs, models, and generated application builds do not belong in Git. No remote repository or hosted service is required by this plan.

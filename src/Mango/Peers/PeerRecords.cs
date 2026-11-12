@@ -8,7 +8,8 @@ namespace Mango.Peers;
 
 internal enum KeyPriority { Low, Normal, High }
 internal enum InferenceScope { Chat, Embeddings, Images, Transcription, Speech, SystemOne, ImageInput, AudioInput }
-internal enum RecordKind { Authority, Node, Key, Model, Catalog, RetiredNode, QueuePolicy }
+internal enum RecordKind { Authority, Node, Key, Model, Catalog, RetiredNode, QueuePolicy, Provider }
+internal enum IntentState { Applied, Pending, LocalAction, Rejected }
 
 internal readonly record struct Revision(long Time, Guid Writer) : IComparable<Revision>
 {
@@ -35,16 +36,24 @@ internal sealed record PeerNode(Guid Id, string Device, string Name, string Addr
 internal sealed record InferenceKey(Guid Id, string Name, InferenceScope[] Scopes, KeyPriority Priority,
     DateTimeOffset? ExpiresAt, Guid CreatedBy, Revision Revision, string Verifier, bool Revoked = false);
 internal sealed record SharedModel(string Id, Guid Owner, string Deployment, Revision Revision, string Alias,
-    Dictionary<string, int?> Ratings, bool Removed = false);
+    Dictionary<string, int?> Ratings, bool Removed = false, ModelServing? Serving = null);
+internal sealed record SharedProvider(Guid Id, Guid Owner, Revision Revision, ProviderProfile Profile, string Address, bool Enabled);
+internal sealed record IntentReport(Revision Revision, IntentState State, string? Reason = null);
+internal sealed record ObservedProvider(Guid Id, ProviderProfile? Profile, string? Address, string? Version,
+    DateTimeOffset? ObservedAt, bool? Reachable, IntentReport? Intent);
 internal sealed record ObservedDeployment(string Id, string DisplayName, string? Variant, string? ProviderVersion,
     string[] Inputs, string[] Outputs, InferenceOperation[] Operations, int? Context, LimitSource? ContextSource,
     bool Online, bool Loaded, string? Fingerprint, int? Slots, int? EmbeddingDimensions, string EmbeddingSpace,
     bool? LocallyAvailable = null, bool ClientTools = false, bool StructuredOutput = false,
     int? MediaTokensPerItem = null, string[]? EmbeddingEncodings = null, string? PlacementEpoch = null,
-    ObservedWorkload[]? Workloads = null);
+    ObservedWorkload[]? Workloads = null, Guid? Endpoint = null, string? EffectiveAlias = null,
+    Dictionary<string, int?>? EffectiveRatings = null, ModelServing? EffectiveServing = null, IntentReport? Intent = null,
+    bool Busy = false, int BenchmarksComplete = 0, int BenchmarksPartial = 0);
 internal sealed record ObservedWorkload(Workload Limit, double? PromptMilliseconds, double? CacheSavingsMilliseconds, int Slots = 1);
 internal sealed record NodeCatalog(Guid Node, Revision Revision, string Name, LocalRole Role, ObservedDeployment[] Models,
-    ContributionState? ResourceState = null, string? SchedulingEpoch = null);
+    ContributionState? ResourceState = null, string? SchedulingEpoch = null, ObservedProvider[]? Providers = null,
+    string? ContributionReason = null, LocalRole? PreferredRole = null, BenchmarkPolicy? LocalBenchmarkPolicy = null,
+    DateTimeOffset? ObservedAt = null, string? AppVersion = null);
 internal sealed record RetiredNode(string Verifier, Guid Node, Revision Revision);
 internal sealed record LocalMembership(Guid Node, string Device, string? ProtectedSecret,
     Guid? JoiningNetwork = null, string? Issuer = null);
@@ -63,7 +72,8 @@ internal readonly record struct RecordVersion(RecordKind Kind, string Id, Revisi
 }
 
 internal sealed record NetworkRecords(NetworkIdentity? Identity, AuthorityRecord? Authority, PeerNode[] Nodes,
-    InferenceKey[] Keys, SharedModel[] Models, NodeCatalog[] Catalogs, RetiredNode[] Retired, QueuePolicy? Queue = null)
+    InferenceKey[] Keys, SharedModel[] Models, NodeCatalog[] Catalogs, RetiredNode[] Retired, QueuePolicy? Queue = null,
+    SharedProvider[]? Providers = null)
 {
     public static readonly NetworkRecords Empty = new(null, null, [], [], [], [], []);
 
@@ -72,6 +82,7 @@ internal sealed record NetworkRecords(NetworkIdentity? Identity, AuthorityRecord
         .Concat(Nodes.Select(Version)).Concat(Keys.Select(Version)).Concat(Models.Select(Version))
         .Concat(Catalogs.Select(Version)).Concat(Retired.Select(Version))
         .Concat(Queue is { } queue ? [Version(queue)] : [])
+        .Concat((Providers ?? []).Select(Version))
         .OrderBy(record => record.Kind).ThenBy(record => record.Id, StringComparer.Ordinal).ToArray();
 
     public NetworkRecords Delta(RecordVersion[] known)
@@ -83,7 +94,8 @@ internal sealed record NetworkRecords(NetworkIdentity? Identity, AuthorityRecord
             ? authority : null, Nodes.Where(node => Newer(Version(node))).ToArray(),
             Keys.Where(key => Newer(Version(key))).ToArray(), Models.Where(model => Newer(Version(model))).ToArray(),
             Catalogs.Where(catalog => Newer(Version(catalog))).ToArray(), Retired.Where(node => Newer(Version(node))).ToArray(),
-            Queue is { } queue && Newer(Version(queue)) ? queue : null);
+            Queue is { } queue && Newer(Version(queue)) ? queue : null,
+            Providers?.Where(provider => Newer(Version(provider))).ToArray());
     }
 
     public NetworkRecords Merge(NetworkRecords incoming)
@@ -99,8 +111,10 @@ internal sealed record NetworkRecords(NetworkIdentity? Identity, AuthorityRecord
         var retired = Merge(Retired, incoming.Retired, Version);
         var queue = incoming.Queue is { } policy &&
             (Queue is null || policy.Revision.CompareTo(Queue.Revision) > 0) ? policy : Queue;
+        var providers = incoming.Providers is { Length: > 0 } desired ? Merge(Providers ?? [], desired, Version) : Providers;
         return authority == Authority && nodes == Nodes && keys == Keys && models == Models && catalogs == Catalogs &&
-            retired == Retired && queue == Queue ? this : new(Identity, authority, nodes, keys, models, catalogs, retired, queue);
+            retired == Retired && queue == Queue && providers == Providers
+            ? this : new(Identity, authority, nodes, keys, models, catalogs, retired, queue, providers);
     }
 
     private static T[] Merge<T>(T[] current, T[] incoming, Func<T, RecordVersion> version)
@@ -126,9 +140,11 @@ internal sealed record NetworkRecords(NetworkIdentity? Identity, AuthorityRecord
     private static RecordVersion Version(NodeCatalog catalog) => new(RecordKind.Catalog, catalog.Node.ToString("N"), catalog.Revision);
     private static RecordVersion Version(RetiredNode node) => new(RecordKind.RetiredNode, node.Verifier, node.Revision);
     private static RecordVersion Version(QueuePolicy policy) => new(RecordKind.QueuePolicy, "", policy.Revision);
+    private static RecordVersion Version(SharedProvider provider) =>
+        new(RecordKind.Provider, $"{provider.Owner:N}/{provider.Id:N}", provider.Revision);
 
     public bool IsEmptyDelta => Authority is null && Nodes.Length == 0 && Keys.Length == 0 && Models.Length == 0 &&
-        Catalogs.Length == 0 && Retired.Length == 0 && Queue is null;
+        Catalogs.Length == 0 && Retired.Length == 0 && Queue is null && Providers is null or { Length: 0 };
 }
 
 internal sealed class PeerSnapshot
@@ -174,7 +190,8 @@ internal static class PeerLimits
     public const int Models = 2048;
     public const int ModelsPerNode = 256;
     public const int Retired = 512;
-    public const int Versions = Nodes * 2 + Keys + Models + Retired + 2;
+    public const int Providers = 512;
+    public const int Versions = Nodes * 2 + Keys + Models + Retired + Providers + 2;
     public const int ControlBytes = 8 * 1024 * 1024;
     public const int DiscoveryCandidates = 128;
     public const int UnknownPeers = 3;
@@ -209,11 +226,33 @@ internal static class PeerValidation
         Text(node.Name, 120) && Tailnet.Address(node.Address) is not null && Valid(node.Joined) && Valid(node.Revision) &&
         PeerCredentials.IsSecret(node.Verifier);
 
+    public static bool ValidModelSettings(string? alias, Dictionary<string, int?>? ratings, ModelServing? serving)
+    {
+        if (alias is null || ratings is null)
+            return false;
+        var options = new ModelOptions(alias, ratings, null, null, null, null, 0);
+        try { ProviderCatalog.ValidateModel(serving?.ApplyTo(options) ?? options); return true; }
+        catch (ProviderFailure) { return false; }
+    }
+
+    private static bool ValidProvider(SharedProvider? provider)
+    {
+        if (provider is null || provider.Id == Guid.Empty || provider.Owner == Guid.Empty || !Valid(provider.Revision) ||
+            !Enum.IsDefined(provider.Profile) || !Text(provider.Address, 2048))
+            return false;
+        try { return ProviderCatalog.NormalizeAddress(provider.Address) == provider.Address; }
+        catch (ProviderFailure) { return false; }
+    }
+
+    private static bool ValidIntent(IntentReport? report) => report is null || Valid(report.Revision) &&
+        Enum.IsDefined(report.State) && (report.Reason is null || Text(report.Reason, 300));
+
     public static bool Valid(NetworkRecords? records)
     {
         if (records is null || records.Nodes is not { Length: <= PeerLimits.Nodes } ||
             records.Keys is not { Length: <= PeerLimits.Keys } || records.Models is not { Length: <= PeerLimits.Models } ||
-            records.Catalogs is not { Length: <= PeerLimits.Nodes } || records.Retired is not { Length: <= PeerLimits.Retired })
+            records.Catalogs is not { Length: <= PeerLimits.Nodes } || records.Retired is not { Length: <= PeerLimits.Retired } ||
+            records.Providers is { Length: > PeerLimits.Providers })
             return false;
         if (records.Identity is null)
             return records.IsEmptyDelta;
@@ -226,18 +265,31 @@ internal static class PeerValidation
             records.Keys.All(Valid) && records.Keys.Select(key => key.Id).Distinct().Count() == records.Keys.Length &&
             records.Models.All(model => model is not null && Text(model.Id, 180) && model.Owner != Guid.Empty &&
                 Text(model.Deployment, 128) && model.Id == ModelId(model.Owner, model.Deployment) &&
-                Text(model.Alias, 200) && Valid(model.Revision) &&
-                model.Ratings is { Count: <= 128 } && model.Ratings.All(item => Text(item.Key, 100) && item.Value is null or >= 0 and <= 5)) &&
+                Valid(model.Revision) && ValidModelSettings(model.Alias, model.Ratings, model.Serving)) &&
             records.Models.Select(model => model.Id).Distinct(StringComparer.Ordinal).Count() == records.Models.Length &&
+            (records.Providers is null || records.Providers.All(ValidProvider) &&
+                records.Providers.DistinctBy(provider => (provider.Owner, provider.Id)).Count() == records.Providers.Length) &&
             records.Catalogs.All(catalog => catalog is not null && catalog.Node != Guid.Empty && Text(catalog.Name, 120) &&
                 Valid(catalog.Revision) && Enum.IsDefined(catalog.Role) &&
                 (catalog.ResourceState is null || Enum.IsDefined(catalog.ResourceState.Value)) &&
+                (catalog.PreferredRole is null || Enum.IsDefined(catalog.PreferredRole.Value)) &&
+                (catalog.LocalBenchmarkPolicy is null || Enum.IsDefined(catalog.LocalBenchmarkPolicy.Value)) &&
+                (catalog.AppVersion is null || Text(catalog.AppVersion, 64)) &&
+                (catalog.ContributionReason is null || Text(catalog.ContributionReason, 300)) &&
+                (catalog.Providers is null || catalog.Providers.Length <= PeerLimits.Providers &&
+                    catalog.Providers.All(provider => provider is not null && provider.Id != Guid.Empty &&
+                        (provider.Profile is null || Enum.IsDefined(provider.Profile.Value)) &&
+                        (provider.Address is null || Text(provider.Address, 2048)) &&
+                        (provider.Version is null || Text(provider.Version, 512)) && ValidIntent(provider.Intent)) &&
+                    catalog.Providers.DistinctBy(provider => provider.Id).Count() == catalog.Providers.Length) &&
                 (catalog.SchedulingEpoch is null || Guid.TryParseExact(catalog.SchedulingEpoch, "N", out _)) &&
                 catalog.Models is { Length: <= PeerLimits.ModelsPerNode } &&
                 catalog.Models.All(model => model is not null && Text(model.Id, 128) && Text(model.DisplayName, 512) &&
                     model.Inputs is { Length: <= 16 } && model.Outputs is { Length: <= 16 } &&
                     model.Operations is { Length: <= 6 } && model.Operations.All(Enum.IsDefined) &&
                     model.EmbeddingEncodings is null or { Length: <= 8 } &&
+                    (model.EffectiveAlias is null || ValidModelSettings(model.EffectiveAlias, model.EffectiveRatings, model.EffectiveServing)) &&
+                    ValidIntent(model.Intent) && model.BenchmarksComplete is >= 0 and <= 6 && model.BenchmarksPartial is >= 0 and <= 6 &&
                     (model.PlacementEpoch is null || Text(model.PlacementEpoch, 128)) &&
                     (model.Workloads is null || model.Workloads.Length <= 6 && model.Workloads.All(work => work is not null &&
                         model.Operations.Contains(work.Limit.Operation) && work.Limit.Units > 0 && work.Limit.Items > 0 &&

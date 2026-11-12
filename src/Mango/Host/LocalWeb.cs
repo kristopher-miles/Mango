@@ -17,7 +17,7 @@ internal sealed class LocalWeb
     public string BrowserUrl(string origin) => $"{origin}/#session={token}";
 
     public WebApplication Build(int port, string dataDirectory, SnapshotFile<LocalSettings> settings, LoginStartup startup,
-        ProviderCatalog providers, PeerNetwork peers)
+        ProviderCatalog providers, PeerNetwork peers, PublicIngress? ingress = null)
     {
         var builder = WebApplication.CreateSlimBuilder(new WebApplicationOptions
         {
@@ -133,6 +133,7 @@ internal sealed class LocalWeb
             }
         });
         PeerRoutes.MapLocal(local, peers);
+        ingress?.Map(local);
         ProviderRoutes.Map(app, local, providers, peers);
         return app;
     }

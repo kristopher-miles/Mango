@@ -34,6 +34,10 @@ internal sealed partial class PeerNetwork
         public void Dispose() => owner.ReleaseLease(id, active);
     }
 
+    public static bool IsInferenceRequest(HttpRequest request) =>
+        HttpMethods.IsGet(request.Method) && request.Path.Equals("/v1/models", StringComparison.OrdinalIgnoreCase) ||
+        HttpMethods.IsPost(request.Method) && request.Path.Value is { } path && InferenceOperations.ContainsKey(path);
+
     public async Task InferenceAsync(HttpContext context, RequestDelegate next, bool localSession)
     {
         var request = context.Request;
@@ -62,7 +66,7 @@ internal sealed partial class PeerNetwork
             }
             var current = Snapshot;
             if (!current.Keys.ContainsKey(id) && current.Self is not null)
-                await LookupAsync(id, context.Connection.RemoteIpAddress ?? IPAddress.None, context.RequestAborted);
+                await LookupAsync(id, InferenceSource.Parse(InferenceSource.Of(context).Address) ?? IPAddress.None, context.RequestAborted);
         }
         using var lease = AcquireLease(id, secret, operation, out var status);
         if (lease is null)

@@ -31,6 +31,25 @@ internal sealed partial class ResourceProtection
             return FindBudget(model, endpoint, operation);
     }
 
+    public (int Complete, int Partial) BenchmarkCounts(Deployment model)
+    {
+        lock (sync)
+        {
+            var configuration = Configuration(model);
+            var complete = 0;
+            var partial = 0;
+            foreach (var operation in model.Model.Operations)
+                if (MatchProfile(model.Id, operation, configuration, model.Instance?.ResourceFingerprint) is { } profile)
+                {
+                    if (profile.Complete)
+                        complete++;
+                    else
+                        partial++;
+                }
+            return (complete, partial);
+        }
+    }
+
     public (double? PromptMilliseconds, double? CacheSavingsMilliseconds) RouteTiming(Deployment model, InferenceOperation operation)
     {
         lock (sync)

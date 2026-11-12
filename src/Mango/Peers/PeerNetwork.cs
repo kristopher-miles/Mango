@@ -25,6 +25,7 @@ internal sealed partial class PeerNetwork(string directory, int port, ProviderCa
     private readonly ConcurrentDictionary<Guid, PeerContact> contacts = new();
     private readonly HttpClient http = CreatePeerClient(8);
     private readonly HttpClient inferenceHttp = CreatePeerClient(MaxIngress);
+    private static readonly string? AppVersion = typeof(PeerNetwork).Assembly.GetName().Version?.ToString();
 
     private static HttpClient CreatePeerClient(int connections) => new(new SocketsHttpHandler
     {
@@ -59,16 +60,24 @@ internal sealed partial class PeerNetwork(string directory, int port, ProviderCa
         var current = Snapshot;
         var status = Volatile.Read(ref tailnet);
         var reconciliationStatus = Volatile.Read(ref lastReconciliation);
-        var contact = current.Others.Select(node => new
+        var members = current.Nodes.Values.Where(node => !node.Removed).OrderBy(node => node.Joined).ThenBy(node => node.Id)
+            .Select((node, index) => (Node: node, JoinOrder: index + 1)).ToArray();
+        var contact = members.Where(item => item.Node.Id != current.Self?.Id).Select(item =>
         {
-            node.Id, node.Name, node.Address, node.Joined,
-            LastContact = contacts.GetValueOrDefault(node.Id)?.LastContact,
-            Current = contacts.GetValueOrDefault(node.Id) is { Reachable: true } last && last.Digest == current.Digest
+            var node = item.Node;
+            var last = contacts.GetValueOrDefault(node.Id);
+            return new
+            {
+                node.Id, node.Name, node.Address, node.Joined, item.JoinOrder, last?.LastContact, last?.LastChecked,
+                ReachableAtLastCheck = last?.Reachable,
+                Current = last is { Reachable: true } && last.Digest == current.Digest
+            };
         });
         return new
         {
             Identity = current.Records.Identity,
-            LocalNode = current.Self is { } self ? new { self.Id, self.Name, self.Address, self.Joined } : null,
+            LocalNode = current.Self is { } self ? new { self.Id, self.Name, self.Address, self.Joined,
+                members.Single(member => member.Node.Id == self.Id).JoinOrder } : null,
             Reenroll = current.Records.Identity is not null && (!IsMember || DeviceChanged(current)),
             Ready, Isolated = reconciliationStatus.Isolated, LastReconciled = reconciliationStatus.At,
             Tailnet = new { status.Message, Addresses = bound.Select(address => Tailnet.Origin(address, port)).ToArray(), Error = listenerError },
@@ -76,6 +85,7 @@ internal sealed partial class PeerNetwork(string directory, int port, ProviderCa
             Nodes = contact.ToArray(),
             Keys = current.Records.Keys.Select(KeyView).ToArray(),
             Models = current.Records.Models.Where(model => !model.Removed).ToArray(),
+            ProviderIntents = current.Records.Providers ?? [],
             Catalogs = current.Records.Catalogs,
             QueueWaitSeconds,
             Unlocked = HasAdmin(current, AdminHeader(request))
@@ -95,8 +105,10 @@ internal sealed partial class PeerNetwork(string directory, int port, ProviderCa
         }
         Volatile.Write(ref snapshot, new(disk, token));
         providers.Changed += QueueCatalog;
+        providers.AdmissionChanged += ProviderSettled;
+        serving.ActivityChanged += SignalRequests;
         if (providers.Resources is { } protection)
-            protection.Changed += QueueCatalog;
+            protection.Changed += ResourceStatusChanged;
         settings.Changed += QueueCatalog;
     }
 
@@ -160,6 +172,12 @@ internal sealed partial class PeerNetwork(string directory, int port, ProviderCa
     {
         Volatile.Write(ref refreshCatalog, 1);
         Wake();
+    }
+
+    private void ResourceStatusChanged()
+    {
+        QueueCatalog();
+        SignalRequests();
     }
 
     private void Wake()
@@ -241,6 +259,11 @@ internal sealed partial class PeerNetwork(string directory, int port, ProviderCa
             var after = new PeerSnapshot(disk, token);
             Volatile.Write(ref snapshot, after);
             AuthorityChanged(before, after);
+            if (before.Self?.Id != after.Self?.Id || before.Records.Models != after.Records.Models ||
+                before.Records.Providers != after.Records.Providers)
+                QueueCatalog();
+            if (before.Digest != after.Digest || before.Self?.Id != after.Self?.Id)
+                SignalNetwork();
             return (before, after);
         }
         finally { writer.Release(); }
@@ -284,71 +307,75 @@ internal sealed partial class PeerNetwork(string directory, int port, ProviderCa
 
     private async Task PublishCatalogAsync(CancellationToken cancellation)
     {
+        var (endpointReports, modelReports) = await ApplyIntentsAsync(cancellation);
         var view = providers.View;
         var protection = providers.Resources;
-        var role = protection is { ServingAllowed: false } ? LocalRole.Leech : settings.Value.Role;
+        var preferences = settings.Value;
+        var role = protection is { ServingAllowed: false } ? LocalRole.Leech : preferences.Role;
         var (before, after) = await ChangeAsync(current =>
         {
             if (current.Self is not { } self || DeviceChanged(current))
                 return current.Disk;
             var observations = view.Models.OrderBy(model => model.Id, StringComparer.Ordinal)
-                .Take(PeerLimits.ModelsPerNode).Select(model => ObserveDeployment(model, view)).ToArray();
+                .Take(PeerLimits.ModelsPerNode).Select(model =>
+                {
+                    var (complete, partial) = protection?.BenchmarkCounts(model) ?? (0, 0);
+                    return ObserveDeployment(model, view) with
+                    {
+                        Endpoint = model.EndpointId, EffectiveAlias = model.Alias, EffectiveRatings = model.Options.Ratings,
+                        EffectiveServing = ModelServing.Of(model.Options), Intent = modelReports.GetValueOrDefault(model.Id),
+                        Busy = model.Busy || model.Instance?.Busy == true, BenchmarksComplete = complete, BenchmarksPartial = partial
+                    };
+                }).ToArray();
             var existing = current.Records.Catalogs.FirstOrDefault(catalog => catalog.Node == self.Id);
+            var endpoints = view.Endpoints.Select(endpoint => new ObservedProvider(endpoint.Id, endpoint.Profile, endpoint.Address,
+                SafeDetail(endpoint.Version, 512), endpoint.ObservedAt, endpoint.ObservedAt is null ? null : endpoint.Online,
+                endpointReports.GetValueOrDefault(endpoint.Id))).Concat(endpointReports
+                .Where(item => view.Endpoints.All(endpoint => endpoint.Id != item.Key))
+                .Select(item => new ObservedProvider(item.Key, null, null, null, null, null, item.Value)))
+                .OrderBy(endpoint => endpoint.Id).ToArray();
             var catalog = new NodeCatalog(self.Id, Next(current, self.Id), self.Name, role, observations,
-                protection?.Status.State, schedulingEpoch);
-            var changed = existing is null || !JsonSerializer.SerializeToUtf8Bytes(catalog with { Revision = existing.Revision }, Json)
+                protection?.Status.State, schedulingEpoch, endpoints,
+                SafeDetail(protection?.Status.Reason, 300) ?? (role != preferences.Role ? "Waiting for local resource qualification." : null),
+                preferences.Role, preferences.BenchmarkPolicy, clock.GetUtcNow(), AppVersion);
+            var changed = existing is null || !JsonSerializer.SerializeToUtf8Bytes(catalog with
+                { Revision = existing.Revision, ObservedAt = existing.ObservedAt }, Json)
                 .AsSpan().SequenceEqual(JsonSerializer.SerializeToUtf8Bytes(existing, Json));
             var existingModels = current.Records.Models.Select(model => model.Id).ToHashSet(StringComparer.Ordinal);
             var created = view.Models.Where(model => !existingModels.Contains(PeerValidation.ModelId(self.Id, model.Id)))
                 .Take(PeerLimits.Models - existingModels.Count).Select(model => ToShared(self.Id, model, catalog.Revision)).ToArray();
-            if (!changed && created.Length == 0)
+            var providerIntents = current.Records.Providers ?? [];
+            var addedEndpoints = view.Endpoints.Where(endpoint => providerIntents.All(item => item.Owner != self.Id || item.Id != endpoint.Id))
+                .Take(PeerLimits.Providers - providerIntents.Length).Select(endpoint => new SharedProvider(endpoint.Id, self.Id,
+                    catalog.Revision, endpoint.Profile, endpoint.Address, true)).ToArray();
+            if (!changed && created.Length == 0 && addedEndpoints.Length == 0)
                 return current.Disk;
             var records = current.Records.Merge(NetworkRecords.Empty with
             {
                 Identity = current.Records.Identity,
                 Catalogs = changed ? [catalog] : [],
-                Models = created
+                Models = created, Providers = addedEndpoints
             });
             return current.Disk with { Records = records };
         }, cancellation);
         await PushChangesAsync(before, after, cancellation);
     }
 
-    public async Task PublishModelSettingsAsync(HttpRequest request, IEnumerable<string> ids, CancellationToken cancellation)
-    {
-        var edited = ids.ToHashSet(StringComparer.Ordinal);
-        var models = providers.View.Models.Where(model => edited.Contains(model.Id)).ToArray();
-        var (before, after) = await ChangeAsync(current =>
-        {
-            if (current.Records.Identity is null)
-                return current.Disk;
-            RequireAdmin(current, AdminHeader(request));
-            var self = RequireMember(current);
-            var revision = Next(current, self.Id);
-            var delta = NetworkRecords.Empty with
-            {
-                Identity = current.Records.Identity,
-                Models = models.Select(model => ToShared(self.Id, model, revision)).Where(model =>
-                    !current.Records.Models.Any(existing => existing.Id == model.Id && !existing.Removed &&
-                        existing.Alias == model.Alias && existing.Ratings.Count == model.Ratings.Count &&
-                        existing.Ratings.All(rating => model.Ratings.TryGetValue(rating.Key, out var value) && value == rating.Value)))
-                    .ToArray()
-            };
-            return current.Disk with { Records = current.Records.Merge(delta) };
-        }, cancellation);
-        await PushChangesAsync(before, after, cancellation);
-    }
+    private static string? SafeDetail(string? text, int maximum) => text is { Length: > 0 } && !text.Any(char.IsControl)
+        ? text[..Math.Min(text.Length, maximum)] : null;
 
     private static SharedModel ToShared(Guid node, Deployment deployment, Revision revision) =>
         new(PeerValidation.ModelId(node, deployment.Id), node, deployment.Id, revision,
-            deployment.Alias, deployment.Options.Ratings);
+            deployment.Alias, deployment.Options.Ratings, Serving: ModelServing.Of(deployment.Options));
 
     public async ValueTask DisposeAsync()
     {
         stopping.Cancel();
         providers.Changed -= QueueCatalog;
+        providers.AdmissionChanged -= ProviderSettled;
+        serving.ActivityChanged -= SignalRequests;
         if (providers.Resources is { } protection)
-            protection.Changed -= QueueCatalog;
+            protection.Changed -= ResourceStatusChanged;
         settings.Changed -= QueueCatalog;
         await StopListenerAsync();
         await serving.DisposeAsync();
@@ -358,6 +385,6 @@ internal sealed partial class PeerNetwork(string directory, int port, ProviderCa
         stopping.Dispose();
     }
 
-    private sealed record PeerContact(DateTimeOffset LastContact, bool Reachable, string? Digest);
+    private sealed record PeerContact(DateTimeOffset? LastContact, bool Reachable, string? Digest, DateTimeOffset? LastChecked = null);
     private sealed record ReconciliationStatus(DateTimeOffset? At, bool Isolated);
 }

@@ -5,8 +5,10 @@ using Mango.Host;
 
 namespace Mango.Peers;
 
-internal sealed record CreateNetworkRequest(string? Name, string? Password, BenchmarkPolicy? BenchmarkPolicy = null);
-internal sealed record JoinNetworkRequest(string? Name, string? Address, Guid Network, string? Password, BenchmarkPolicy? BenchmarkPolicy = null);
+internal sealed record CreateNetworkRequest(string? Name, string? Password, BenchmarkPolicy? BenchmarkPolicy = null,
+    LocalRole? Role = null);
+internal sealed record JoinNetworkRequest(string? Name, string? Address, Guid Network, string? Password, BenchmarkPolicy? BenchmarkPolicy = null,
+    LocalRole? Role = null);
 internal sealed record EnrollmentRequest(Guid Network, Guid Node, string Device, string Name, int Port, string Verifier, string? Password);
 internal sealed record NetworkSetup(NetworkIdentity Identity, Guid Node, string? RecoveryRecord);
 internal sealed record UnlockRequest(string? Password);
@@ -45,7 +47,7 @@ internal sealed partial class PeerNetwork
         var network = Guid.NewGuid();
         if (Snapshot.Records.Identity is not null || Snapshot.Self is not null)
             throw new PeerFailure(409, "This data directory already contains enrollment state.");
-        await SaveBenchmarkChoiceAsync(input.BenchmarkPolicy, cancellation);
+        await SaveEnrollmentPreferencesAsync(input.BenchmarkPolicy, input.Role, cancellation);
         var (_, after) = await ChangeAsync(current =>
         {
             if (current.Records.Identity is not null || current.Self is not null)
@@ -127,7 +129,7 @@ internal sealed partial class PeerNetwork
                     node.Verifier == enrollment.Verifier))
                 throw new PeerFailure(409, "The peer did not return a valid enrollment for this installation.");
 
-            await SaveBenchmarkChoiceAsync(input.BenchmarkPolicy, cancellation);
+            await SaveEnrollmentPreferencesAsync(input.BenchmarkPolicy, input.Role, cancellation);
             ready = false;
             await ChangeAsync(current =>
             {
@@ -143,14 +145,15 @@ internal sealed partial class PeerNetwork
         finally { setup.Release(); }
     }
 
-    private async Task SaveBenchmarkChoiceAsync(BenchmarkPolicy? choice, CancellationToken cancellation)
+    private async Task SaveEnrollmentPreferencesAsync(BenchmarkPolicy? choice, LocalRole? role, CancellationToken cancellation)
     {
-        if (choice is not { } policy)
-            return;
-        if (!Enum.IsDefined(policy))
-            throw new PeerFailure(400, "Choose a local benchmark policy.");
-        if (settings.Value.BenchmarkPolicy != policy)
-            await settings.UpdateAsync(current => current with { BenchmarkPolicy = policy }, cancellation);
+        if (choice is { } policy && !Enum.IsDefined(policy) || role is { } preferred && !Enum.IsDefined(preferred))
+            throw new PeerFailure(400, "Choose a local role and benchmark policy.");
+        if (choice is not null || role is not null)
+            await settings.UpdateAsync(current => current with
+            {
+                BenchmarkPolicy = choice ?? current.BenchmarkPolicy, Role = role ?? current.Role
+            }, cancellation);
     }
 
     public async Task<NetworkRecords> AcceptEnrollmentAsync(EnrollmentRequest input, IPAddress address, CancellationToken cancellation)
@@ -228,13 +231,6 @@ internal sealed partial class PeerNetwork
         finally { passwordChecks.Release(); }
     }
 
-    public void RequireModelAdmin(HttpRequest request)
-    {
-        var current = Snapshot;
-        if (current.Records.Identity is not null)
-            RequireAdmin(current, AdminHeader(request));
-    }
-
     private static string? AdminHeader(HttpRequest request) =>
         request.Headers[AdminSessionHeader].Count == 1 ? request.Headers[AdminSessionHeader][0] : null;
 
@@ -293,7 +289,8 @@ internal sealed partial class PeerNetwork
                 Catalogs = current.Records.Catalogs.Select(catalog => catalog with
                 {
                     Revision = revision,
-                    Models = catalog.Models.Select(model => model with { Online = false, Loaded = false }).ToArray()
+                    Models = catalog.Models.Select(model => model with { Online = false, Loaded = false, Busy = false }).ToArray(),
+                    Providers = catalog.Providers?.Select(provider => provider with { Reachable = null }).ToArray()
                 }).ToArray()
             }, ProtectMembership(self.Id, self.Device, token));
         }, cancellation);
@@ -324,7 +321,8 @@ internal sealed partial class PeerNetwork
                 Retired = [],
                 Catalogs = current.Records.Catalogs.Select(catalog => catalog with
                 {
-                    Models = catalog.Models.Select(model => model with { Online = false, Loaded = false }).ToArray()
+                    Models = catalog.Models.Select(model => model with { Online = false, Loaded = false, Busy = false }).ToArray(),
+                    Providers = catalog.Providers?.Select(provider => provider with { Reachable = null }).ToArray()
                 }).ToArray()
             } : current.Records with { Nodes = current.Records.Nodes.Select(node => node.Id == self.Id ? node with { Removed = true } : node).ToArray() };
             return new(records, current.Local! with { ProtectedSecret = null });

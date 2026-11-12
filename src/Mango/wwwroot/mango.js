@@ -62,6 +62,8 @@ async function loadSettings() {
   inputs.benchmarkPolicy.value = view.settings.benchmarkPolicy;
   for (const choice of document.querySelectorAll("[data-benchmark-choice]"))
     if (!choice.dataset.changed) choice.value = view.settings.benchmarkPolicy;
+  for (const choice of document.querySelectorAll("[data-role-choice]"))
+    if (!choice.dataset.changed) choice.value = view.settings.role;
   for (const key of numbers) inputs[key].value = view.settings[key] ?? "";
   startupForm.hidden = !view.startupAvailable;
   startupForm.elements.enabled.checked = view.startsAtLogin;
@@ -358,7 +360,7 @@ async function loadProviders() {
   document.querySelector("#provider-list").replaceChildren(...catalog.endpoints.map(providerRow));
   const selected = catalog.models.find(model => model.id === catalog.selected);
   document.querySelector("#selection-status").textContent = selected
-    ? `${selected.alias} · ${selected.eligible ? "Ready" : "Unavailable"}` : "Choose an eligible model below.";
+    ? `${selected.alias} · ${selected.eligible ? "Ready" : "Unavailable"}` : "No preferred deployment.";
   document.querySelector("#clear-selection").hidden = !catalog.selected;
   const list = document.querySelector("#deployment-list");
   const expanded = new Set(Array.from(list.querySelectorAll("details[open]"), details => details.dataset.model));
