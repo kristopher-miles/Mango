@@ -1,0 +1,31 @@
+# Runtime state belongs in the user's application-data directory.
+/.mango/
+/data/
+/logs/
+/models/
+/secrets/
+/downloads/
+/mango.local.json
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.pfx
+*.p12
+mango-answers-*.json
+
+# Application builds, editor state, and test output.
+**/bin/
+**/obj/
+/dist/
+/artifacts/
+/TestResults/
+.vs/
+*.user
+*.suo
+__pycache__/
+*.pyc
+node_modules/
+.DS_Store
+Thumbs.db
