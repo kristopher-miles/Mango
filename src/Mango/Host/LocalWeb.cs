@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Mango.Peers;
 using Mango.Providers;
 using Microsoft.AspNetCore.Http.Features;
 
@@ -16,7 +17,7 @@ internal sealed class LocalWeb
     public string BrowserUrl(string origin) => $"{origin}/#session={token}";
 
     public WebApplication Build(int port, string dataDirectory, SnapshotFile<LocalSettings> settings, LoginStartup startup,
-        ProviderCatalog providers)
+        ProviderCatalog providers, PeerNetwork peers)
     {
         var builder = WebApplication.CreateSlimBuilder(new WebApplicationOptions
         {
@@ -47,7 +48,7 @@ internal sealed class LocalWeb
             headers["Referrer-Policy"] = "no-referrer";
             headers["X-Content-Type-Options"] = "nosniff";
             var localApi = context.Request.Path.StartsWithSegments("/api/local");
-            if (localApi || context.Request.Path.StartsWithSegments("/v1"))
+            if (localApi)
             {
                 headers.CacheControl = "no-store";
                 if (!HasSession(context))
@@ -55,8 +56,14 @@ internal sealed class LocalWeb
                     context.Response.StatusCode = StatusCodes.Status401Unauthorized;
                     return;
                 }
-                if (localApi && context.Features.Get<IHttpMaxRequestBodySizeFeature>() is { IsReadOnly: false } bodyLimit)
+                if (context.Features.Get<IHttpMaxRequestBodySizeFeature>() is { IsReadOnly: false } bodyLimit)
                     bodyLimit.MaxRequestBodySize = 16 * 1024;
+            }
+            if (context.Request.Path.StartsWithSegments("/v1"))
+            {
+                headers.CacheControl = "no-store";
+                await peers.InferenceAsync(context, next, HasSession(context));
+                return;
             }
             await next(context);
         });
@@ -125,7 +132,8 @@ internal sealed class LocalWeb
                 return Results.Problem(title: "Mango could not change Windows startup.", detail: error.Message);
             }
         });
-        ProviderRoutes.Map(app, local, providers);
+        PeerRoutes.MapLocal(local, peers);
+        ProviderRoutes.Map(app, local, providers, peers);
         return app;
     }
 

@@ -36,6 +36,7 @@ internal sealed class ProviderCatalog(string directory) : IAsyncDisposable
     private string? activeModel;
     private ProviderExecution? lastExecution;
     private ProviderLifecycle? lastLifecycle;
+    public event Action? Changed;
 
     public CatalogView View
     {
@@ -51,6 +52,7 @@ internal sealed class ProviderCatalog(string directory) : IAsyncDisposable
     }
     public ProviderExecution? LastExecution => Volatile.Read(ref lastExecution);
     public ProviderLifecycle? LastLifecycle => Volatile.Read(ref lastLifecycle);
+    public void ClearPrivateExecution() => Volatile.Write(ref lastExecution, null);
 
     public async Task InitializeAsync()
     {
@@ -333,6 +335,7 @@ internal sealed class ProviderCatalog(string directory) : IAsyncDisposable
             RequireCompatibleAlias(model, snapshot.Models);
             Volatile.Write(ref activeModel, model.Id);
             var execution = await payload.ForwardAsync(model, adapters[model.EndpointId], context, cancellation);
+            cancellation.ThrowIfCancellationRequested();
             Volatile.Write(ref lastExecution, execution);
         }
         catch (ProviderFailure error) when (model is not null && error.Status is >= 500 or 409)
@@ -427,6 +430,7 @@ internal sealed class ProviderCatalog(string directory) : IAsyncDisposable
             }
         }
         Volatile.Write(ref view, new(endpoints.ToArray(), models.ToArray(), value.Selected, store.RecoveryWarning));
+        Changed?.Invoke();
     }
 
     public async ValueTask DisposeAsync()

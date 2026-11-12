@@ -19,6 +19,7 @@ internal sealed class SnapshotFile<T>(string path, Func<T, string?> validate) wh
 
     public T Value => Volatile.Read(ref value) ?? throw new InvalidOperationException("Snapshot has not been loaded.");
     public string? RecoveryWarning { get; private set; }
+    public event Action? Changed;
 
     public async Task LoadAsync(T defaults, CancellationToken cancellationToken = default)
     {
@@ -59,7 +60,10 @@ internal sealed class SnapshotFile<T>(string path, Func<T, string?> validate) wh
         {
             var next = update(Value);
             if (!EqualityComparer<T>.Default.Equals(Value, next))
+            {
                 await WriteAsync(next, cancellationToken);
+                Changed?.Invoke();
+            }
             return Value;
         }
         finally

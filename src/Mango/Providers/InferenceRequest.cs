@@ -3,6 +3,7 @@ using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using Mango.Peers;
 using Microsoft.AspNetCore.Http.Features;
 
 namespace Mango.Providers;
@@ -72,6 +73,7 @@ internal sealed class InferenceRequest(InferenceOperation operation, string alia
                 InferenceOperation.Speech => SpeechFields,
                 _ => DecisionFields
             });
+            RequireMediaScope(request.HttpContext, operation, payload);
             return new(operation, RequireAlias(String(payload["model"])), payload, null);
         }
         catch (JsonException)
@@ -85,6 +87,38 @@ internal sealed class InferenceRequest(InferenceOperation operation, string alia
         catch (InvalidDataException)
         {
             throw new ProviderFailure(400, "The transcription form is invalid or exceeds the upload limits.");
+        }
+    }
+
+    private static void RequireMediaScope(HttpContext context, InferenceOperation operation, JsonObject payload)
+    {
+        if (InferenceAccess.Of(context) is not { KeyId: not null } access)
+            return;
+        if (operation == InferenceOperation.Chat && payload["messages"] is JsonArray messages)
+        {
+            foreach (var message in messages.OfType<JsonObject>())
+                if (message["content"] is JsonArray parts)
+                    foreach (var part in parts.OfType<JsonObject>())
+                        Require(String(part["type"]) switch
+                        {
+                            "image_url" => InferenceScope.ImageInput,
+                            "input_audio" => InferenceScope.AudioInput,
+                            _ => null
+                        });
+        }
+        if (operation == InferenceOperation.SystemOne)
+        {
+            foreach (var field in new[] { "files", "images" })
+                if (payload[field] is JsonArray files)
+                    foreach (var file in files)
+                        Require(String(file)?.StartsWith("data:audio/", StringComparison.OrdinalIgnoreCase) == true
+                            ? InferenceScope.AudioInput : InferenceScope.ImageInput);
+        }
+
+        void Require(InferenceScope? scope)
+        {
+            if (scope.HasValue && !access.Allows(scope.Value))
+                throw new ProviderFailure(403, "The inference credential does not allow this media input.");
         }
     }
 

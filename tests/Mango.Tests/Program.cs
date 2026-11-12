@@ -13,6 +13,7 @@ try
     TestDefaults();
     await TestHostAsync(directory);
     await ProviderChecks.RunAsync();
+    await PeerChecks.RunAsync(directory);
     Console.WriteLine("Mango host checks passed.");
 }
 finally

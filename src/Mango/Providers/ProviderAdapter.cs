@@ -148,20 +148,13 @@ internal static class ProviderJson
 
 internal static class ProviderSecrets
 {
-    public static string Protect(string secret)
-    {
-        var bytes = System.Text.Encoding.UTF8.GetBytes(secret);
-        try { return Convert.ToBase64String(ProtectedData.Protect(bytes, null, DataProtectionScope.CurrentUser)); }
-        finally { System.Security.Cryptography.CryptographicOperations.ZeroMemory(bytes); }
-    }
+    public static string Protect(string secret) => Host.WindowsSecrets.Protect(secret);
 
     public static string Open(string protectedToken)
     {
         try
         {
-            var bytes = ProtectedData.Unprotect(Convert.FromBase64String(protectedToken), null, DataProtectionScope.CurrentUser);
-            try { return System.Text.Encoding.UTF8.GetString(bytes); }
-            finally { System.Security.Cryptography.CryptographicOperations.ZeroMemory(bytes); }
+            return Host.WindowsSecrets.Open(protectedToken);
         }
         catch (Exception error) when (error is System.Security.Cryptography.CryptographicException or FormatException)
         {

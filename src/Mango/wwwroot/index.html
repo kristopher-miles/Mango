@@ -6,6 +6,7 @@
   <title>Mango · Local settings</title>
   <link rel="stylesheet" href="/mango.css">
   <script src="/mango.js" defer></script>
+  <script src="/network.js" defer></script>
 </head>
 <body>
   <main>
@@ -22,10 +23,106 @@
           <div><dt>Setup</dt><dd>Local host ready</dd></div>
           <div><dt>Role preference</dt><dd id="role-status"></dd></div>
           <div><dt>Providers</dt><dd id="provider-count">Not configured</dd></div>
-          <div><dt>Network</dt><dd>Not configured</dd></div>
+          <div><dt>Network</dt><dd id="network-summary">Checking network</dd></div>
           <div class="path"><dt>Data location</dt><dd id="data-directory"></dd></div>
         </dl>
         <p id="recovery" class="warning" hidden></p>
+      </section>
+
+      <section class="card" aria-labelledby="network-title">
+        <h2 id="network-title">Private network</h2>
+        <p id="network-tailnet" class="muted"></p>
+        <p id="network-status" class="action-status" role="status"></p>
+        <p id="network-addresses" class="path"></p>
+        <button id="network-refresh" class="secondary" type="button">Refresh network</button>
+        <div id="network-setup" hidden>
+          <form id="network-discover">
+            <fieldset>
+              <legend>Find a Mango peer</legend>
+              <label>Tailscale address, if known<input name="address" type="text" maxlength="128" placeholder="100.x.x.x:53781"></label>
+              <p class="muted">Choose a discovered network or enter its exact ID and peer address.</p>
+              <button type="submit">Find peers</button>
+            </fieldset>
+          </form>
+          <ul id="network-discovered"></ul>
+          <form id="network-join">
+            <fieldset>
+              <legend>Join the selected network</legend>
+              <div class="inputs">
+                <label>Peer Tailscale address<input name="address" type="text" maxlength="128" required></label>
+                <label>Network ID<input name="network" type="text" maxlength="36" required></label>
+                <label>This node's name<input name="name" type="text" maxlength="120" required></label>
+                <label>Master password<input name="password" type="password" maxlength="256" autocomplete="off" required></label>
+              </div>
+              <button type="submit">Join network</button>
+            </fieldset>
+          </form>
+          <form id="network-create">
+            <fieldset>
+              <legend>Create a new network</legend>
+              <div class="inputs">
+                <label>This node's name<input name="name" type="text" maxlength="120" required></label>
+                <label>Master password<input name="password" type="password" minlength="12" maxlength="256" autocomplete="new-password" required></label>
+              </div>
+              <button type="submit">Create network</button>
+            </fieldset>
+          </form>
+        </div>
+        <div id="network-enrolled" hidden>
+          <p id="network-local"></p>
+          <ul id="network-nodes"></ul>
+          <div id="network-models"></div>
+          <form id="network-unlock">
+            <fieldset>
+              <legend>Unlock network administration</legend>
+              <label>Master password<input name="password" type="password" maxlength="256" autocomplete="off" required></label>
+              <button type="submit">Unlock for 10 minutes</button>
+            </fieldset>
+          </form>
+          <p id="network-unlocked" hidden>Network administration is unlocked.</p>
+          <h3>Inference keys</h3>
+          <p class="muted">Key changes need one other reachable peer when the network has more than one enrolled node.</p>
+          <ul id="network-keys"></ul>
+          <form id="network-issue" hidden>
+            <fieldset>
+              <legend>Issue a key</legend>
+              <div class="inputs">
+                <label>Display name<input name="name" type="text" maxlength="120" required></label>
+                <label>Priority<select name="priority" required><option value="low">Low</option><option value="normal" selected>Normal</option><option value="high">High</option></select></label>
+                <label>Expiry<select name="expiry" required><option value="">Choose expiry</option><option value="never">Never expire</option><option value="date">Expire at a date</option></select></label>
+                <label id="network-expiry" hidden>Expiry date and time<input name="expiresAt" type="datetime-local"></label>
+              </div>
+              <div class="role-options" id="network-scopes"></div>
+              <button type="submit">Issue key</button>
+            </fieldset>
+          </form>
+          <details>
+            <summary>Recover a forgotten password</summary>
+            <form id="network-recover">
+              <p class="muted">Recovery keeps existing keys and configuration. A recovery record cannot recreate data missing from every peer.</p>
+              <label>Recovery record<input name="recoveryRecord" type="password" maxlength="112" autocomplete="off" required></label>
+              <label>New master password<input name="newPassword" type="password" minlength="12" maxlength="256" autocomplete="new-password" required></label>
+              <button type="submit">Replace master password</button>
+            </form>
+          </details>
+          <details id="network-reset-panel" hidden>
+            <summary>Full network reset</summary>
+            <form id="network-reset">
+              <p class="muted">Full reset clears keys and private request state. Peers must enroll again. Model settings and benchmarks are preserved.</p>
+              <label>New master password<input name="newPassword" type="password" minlength="12" maxlength="256" autocomplete="new-password" required></label>
+              <label class="checkbox"><input name="confirm" type="checkbox" required> Confirm full reset</label>
+              <button type="submit">Reset network</button>
+            </form>
+          </details>
+        </div>
+        <div id="network-secret" class="warning" hidden>
+          <label id="network-secret-label" for="network-secret-value"></label>
+          <textarea id="network-secret-value" rows="3" readonly></textarea>
+          <div class="actions">
+            <button id="network-download" class="secondary" type="button">Download recovery record</button>
+            <button id="network-hide-secret" class="secondary" type="button">Hide</button>
+          </div>
+        </div>
       </section>
 
       <section class="card" aria-labelledby="providers-title">

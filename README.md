@@ -58,4 +58,14 @@ The local inference surface includes chat completions, embeddings, images, audio
 
 Network routing and automatic resource protection arrive in later phases. The contributor preference remains local saved intent.
 
+## Set up a private Mango network
+
+Install and sign in to Tailscale separately. Mango binds its peer and keyed inference listener to the Windows Tailscale adapter. The default peer port is `53781`. The browser settings and administrative API use the separate loopback listener.
+
+Open **Private network** in the local UI. On the first node, choose **Create network** and save the recovery record outside the network. On another node, choose **Find peers**, confirm the expected network ID, and join with the master password. A known Tailscale IP and optional port also work for manual enrollment. Mango reuses the enrolled node credential on subsequent launches. Use **Refresh network** to check the listener, reconcile state, or diagnose a failed connection.
+
+Unlock network administration to change shared aliases and ratings or issue and revoke inference keys. Save each newly issued key when it appears. It can access the permitted `/v1` routes over Tailscale or on the local loopback address using `Authorization: Bearer <key>`. Inference uses the ingress node's selected local deployment in this phase. A known key can work from cached authority while that node is isolated. Issuing or revoking keys in an enrolled multi-node network requires another reachable member.
+
+Use **Recover a forgotten password** to replace the master password and keep existing inference keys. **Full network reset** is a separate, confirmed action that removes keys and private request state and requires peers to reenroll. It preserves reusable model settings and benchmarks. A recovery record cannot reconstruct missing data.
+
 Runtime state, credentials, logs, models, and generated application builds do not belong in Git. No remote repository or hosted service is required by this plan.

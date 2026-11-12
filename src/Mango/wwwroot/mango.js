@@ -18,10 +18,12 @@ const numbers = [
 ];
 let view;
 let dirty = false;
+let networkAdmin = null;
 
 async function api(path, body, method = body ? "PUT" : "GET") {
   if (!token) throw new Error("Open Mango again to start a local session.");
   const headers = { Authorization: `Bearer ${token}` };
+  if (networkAdmin) headers["Mango-Admin"] = networkAdmin;
   if (body) headers["Content-Type"] = "application/json";
   const response = await fetch(`/api/local/${path}`, {
     method,
@@ -29,10 +31,10 @@ async function api(path, body, method = body ? "PUT" : "GET") {
     body: body ? JSON.stringify(body) : undefined,
     cache: "no-store"
   });
-  if (response.status === 401) throw new Error("Your local session has ended. Open Mango again.");
   if (!response.ok) {
     const details = await response.json().catch(() => ({}));
-    throw new Error(details.error || details.detail || `Mango returned HTTP ${response.status}.`);
+    throw new Error(details.error || details.detail || (response.status === 401
+      ? "Your local session has ended. Open Mango again." : `Mango returned HTTP ${response.status}.`));
   }
   return response.status === 204 ? undefined : response.json();
 }

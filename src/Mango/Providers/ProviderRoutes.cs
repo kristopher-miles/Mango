@@ -1,12 +1,13 @@
 using System.Security.Cryptography;
 using System.Text.Json.Serialization;
+using Mango.Peers;
 using Microsoft.AspNetCore.Http.Features;
 
 namespace Mango.Providers;
 
 internal static class ProviderRoutes
 {
-    public static void Map(WebApplication app, RouteGroupBuilder local, ProviderCatalog providers)
+    public static void Map(WebApplication app, RouteGroupBuilder local, ProviderCatalog providers, PeerNetwork peers)
     {
         local.MapGet("/providers", () => providers.View);
         local.MapPut("/providers", (EndpointUpdate update, HttpContext context) =>
@@ -19,18 +20,37 @@ internal static class ProviderRoutes
         local.MapPut("/providers/refresh", (RefreshRequest request, HttpContext context) =>
             CommandAsync(context, cancellation => providers.RefreshAsync(request.Id, cancellation)));
         local.MapPut("/providers/models", (ModelUpdate update, HttpContext context) =>
-            CommandAsync(context, cancellation => providers.EditAsync(update, cancellation)));
+            CommandAsync(context, async cancellation =>
+            {
+                peers.RequireModelAdmin(context.Request);
+                await providers.EditAsync(update, cancellation);
+                await peers.PublishModelSettingsAsync(context.Request, [update.Id], cancellation);
+            }));
         local.MapPut("/providers/ratings", (RatingsRequest request, HttpContext context) =>
-            CommandAsync(context, cancellation => providers.ApplyRatingsAsync(request.Alias ?? "", request.Ratings ?? [], cancellation)));
+            CommandAsync(context, async cancellation =>
+            {
+                peers.RequireModelAdmin(context.Request);
+                var ids = providers.View.Models.Where(model => string.Equals(model.Alias, request.Alias,
+                    StringComparison.OrdinalIgnoreCase)).Select(model => model.Id).ToArray();
+                await providers.ApplyRatingsAsync(request.Alias ?? "", request.Ratings ?? [], cancellation);
+                await peers.PublishModelSettingsAsync(context.Request, ids, cancellation);
+            }));
         local.MapPut("/providers/selection", (SelectionRequest request, HttpContext context) =>
             CommandAsync(context, cancellation => providers.SelectAsync(request.Id, cancellation)));
         local.MapPut("/providers/lifecycle", (LifecycleRequest request, HttpContext context) =>
             CommandAsync(context, cancellation => providers.ManageAsync(request.Id, request.Load, cancellation)));
 
-        app.MapGet("/v1/models", () =>
+        MapInference(app, providers);
+    }
+
+    public static void MapInference(WebApplication app, ProviderCatalog providers)
+    {
+        app.MapGet("/v1/models", (HttpContext context) =>
         {
             var view = providers.View;
-            var data = view.Models.Where(model => model.Eligible && model.Id == view.Selected)
+            var access = InferenceAccess.Of(context);
+            var data = view.Models.Where(model => model.Eligible && model.Id == view.Selected &&
+                    (access is null || model.Model.Operations.Any(access.Allows)))
                 .Select(model => new { id = model.Alias, @object = "model", owned_by = "mango" });
             return new { @object = "list", data };
         });
@@ -51,12 +71,21 @@ internal static class ProviderRoutes
     private static async Task HandleAsync(HttpContext context, Func<CancellationToken, Task> handler)
     {
         using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(context.RequestAborted,
-            context.RequestServices.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping);
+            context.RequestServices.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping,
+            InferenceAccess.Of(context)?.Cancelled ?? CancellationToken.None);
         try
         {
             await handler(cancellation.Token);
         }
+        catch (OperationCanceledException) when (InferenceAccess.Of(context)?.Cancelled.IsCancellationRequested == true)
+        {
+            await FailureAsync(context, 401, "The inference credential was revoked.");
+        }
         catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { }
+        catch (PeerFailure error)
+        {
+            await FailureAsync(context, error.Status, error.Message);
+        }
         catch (ProviderFailure error)
         {
             await FailureAsync(context, error.Status, error.Message);

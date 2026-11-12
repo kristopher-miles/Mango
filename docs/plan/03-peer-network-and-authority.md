@@ -48,3 +48,15 @@ Full reset is an explicit separate action: new authority/reset generation, no va
 ## Done
 
 Peers converge through pushes and actual contact, with clear stale states and no continuous membership service. Membership, administration, and inference credentials work without a global lock or verification round trip on every inference request. The protocol cutoff value is carried now; phase 8 supplies release-facing compatibility behavior.
+
+## Qualification
+
+Release builds and host, provider, and peer checks passed on Windows. The peer suite used two Mango instances with independent data directories and ports on the installed Tailscale 1.104.5 interface. It exercised wrong network and password rejection, key and catalog propagation, key-scoped inference through the provider boundary, and isolation of the loopback administration API. A revoked streaming key stopped active provider work. A node restarted from a stale snapshot reconciled a revocation before admitting requests.
+
+A separate two-process smoke check used the normal Release launch path and installed Tailscale CLI. It covered enrollment, peer restart, key propagation, isolation, password recovery, and a stopped peer returning after a full reset. The returning peer learned the reset using its retired node credential, rejected the old key, and required explicit reenrollment. Both live checks ran on one Windows machine. Joining across physically separate networks remains unverified.
+
+The service port is `53781` by default. Isolated test instances can use `--peer-port` with separate data directories. Discovery tries remembered addresses and the installed client's candidates on the service port. Startup checks the oldest known peer first and then contacts other known peers with bounded parallel work. A matching digest skips revision exchange. A reachable peer whose delta could not be reconciled cannot establish readiness by itself. Routine daily refresh leaves previously admitted authority available.
+
+Master-password verification uses salted PBKDF2-HMAC-SHA256 with 600,000 iterations. Local node credentials use DPAPI bound to the data directory. Administrative unlocks expire after 10 minutes. If Mango opens a last-good authority snapshot, it requires authenticated reconciliation or a full reset before using that snapshot for inference keys. Revocation checks and scope matching for known keys use in-memory state. Unknown IDs have a two-second lookup deadline, up to three peers, and bounded per-source and ingress-wide work.
+
+The shared view publishes aliases and ratings alongside host-owned observations. Remote changes to another host's desired serving configuration arrive with the full network GUI. Phase 3 keyed inference uses the selected local deployment. Public ingress and distributed execution are qualified in their own phases.

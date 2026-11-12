@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Diagnostics;
 using Mango.Host;
+using Mango.Peers;
 using Mango.Providers;
 
 namespace Mango;
@@ -80,14 +81,16 @@ internal static class Program
         var settings = new SnapshotFile<LocalSettings>(Path.Combine(directory, "local-settings.json"), LocalSettings.Validate);
         settings.LoadAsync(new LocalSettings()).GetAwaiter().GetResult();
         var providers = new ProviderCatalog(directory);
+        var peers = new PeerNetwork(directory, options.PeerPort, providers, settings);
         var web = new LocalWeb();
         try
         {
             providers.InitializeAsync().GetAwaiter().GetResult();
-            var app = web.Build(options.Port, directory, settings, new LoginStartup(options.DataDirectory), providers);
+            peers.InitializeAsync().GetAwaiter().GetResult();
+            var app = web.Build(options.Port, directory, settings, new LoginStartup(options.DataDirectory), providers, peers);
             try
             {
-                RunHost(app, options, instance, diagnostic, settings, web, providers);
+                RunHost(app, options, instance, diagnostic, settings, web, providers, peers);
             }
             finally
             {
@@ -96,15 +99,17 @@ internal static class Program
         }
         finally
         {
+            peers.DisposeAsync().AsTask().GetAwaiter().GetResult();
             providers.DisposeAsync().AsTask().GetAwaiter().GetResult();
         }
     }
 
     private static void RunHost(WebApplication app, LaunchOptions options, InstanceControl instance, string diagnostic,
-        SnapshotFile<LocalSettings> settings, LocalWeb web, ProviderCatalog providers)
+        SnapshotFile<LocalSettings> settings, LocalWeb web, ProviderCatalog providers, PeerNetwork peers)
     {
         app.StartAsync().GetAwaiter().GetResult();
         var inventory = providers.RunAsync(app.Lifetime.ApplicationStopping);
+        var network = peers.RunAsync(app.Lifetime.ApplicationStopping);
         try
         {
             var url = web.BrowserUrl(app.Urls.Single());
@@ -136,7 +141,7 @@ internal static class Program
         finally
         {
             app.Lifetime.StopApplication();
-            inventory.GetAwaiter().GetResult();
+            Task.WhenAll(inventory, network).GetAwaiter().GetResult();
         }
     }
 
@@ -153,7 +158,7 @@ internal static class Program
         }
     }
 
-    private sealed record LaunchOptions(bool Headless, bool Background, bool Quit, bool PrintUrl, string? DataDirectory, int Port)
+    private sealed record LaunchOptions(bool Headless, bool Background, bool Quit, bool PrintUrl, string? DataDirectory, int Port, int PeerPort)
     {
         public bool ControlOnly => Quit || PrintUrl;
 
@@ -164,6 +169,7 @@ internal static class Program
             var quit = false;
             var printUrl = false;
             var port = 0;
+            var peerPort = PeerLimits.DefaultPort;
             string? directory = null;
             for (var index = 0; index < args.Length; index++)
             {
@@ -179,13 +185,16 @@ internal static class Program
                     case "--port" when index + 1 < args.Length && int.TryParse(args[index + 1], out port) && port is >= 0 and <= 65535:
                         index++;
                         break;
+                    case "--peer-port" when index + 1 < args.Length && int.TryParse(args[index + 1], out peerPort) && peerPort is >= 1 and <= 65535:
+                        index++;
+                        break;
                     default:
-                        throw new ArgumentException($"Invalid option {args[index]}. Use --headless, --background, --quit, --url, --data-dir <path>, or --port <0-65535>.");
+                        throw new ArgumentException($"Invalid option {args[index]}. Use --headless, --background, --quit, --url, --data-dir <path>, --port <0-65535>, or --peer-port <1-65535>.");
                 }
             }
             if ((headless ? 1 : 0) + (background ? 1 : 0) + (quit ? 1 : 0) + (printUrl ? 1 : 0) > 1)
                 throw new ArgumentException("Use only one launch mode at a time.");
-            return new LaunchOptions(headless, background, quit, printUrl, directory, port);
+            return new LaunchOptions(headless, background, quit, printUrl, directory, port, peerPort);
         }
     }
 }
