@@ -28,7 +28,10 @@ internal sealed record ProviderSettings(ProviderEndpoint[] Endpoints, Dictionary
 }
 
 internal sealed record ProviderInstance(string Id, int? Context, int? Slots, string Fingerprint, bool Busy = false,
-    string? NativeGeneration = null);
+    string? NativeGeneration = null, string? ConfigurationFingerprint = null)
+{
+    public string ResourceFingerprint => ConfigurationFingerprint ?? Fingerprint;
+}
 
 internal sealed record ProviderModel(string Id, string NativeId, string ManagementId, string DisplayName,
     string? Variant, string[] Inputs, string[] Outputs, InferenceOperation[] Operations, ProviderInstance[] Instances,
@@ -40,7 +43,7 @@ internal sealed record ProviderInventory(string? Version, ProviderModel[] Models
     bool CanStop, int? OwnedProcessId = null);
 
 internal sealed record Deployment(Guid EndpointId, ProviderModel Model, ModelOptions Options, bool Online, bool Busy,
-    string? Version)
+    string? Version, string? Configuration = null)
 {
     public string Id => Model.Id;
     public string Alias => Options.Alias;
@@ -75,9 +78,10 @@ internal static class ProviderLimits
     public static readonly TimeSpan InventoryInterval = TimeSpan.FromHours(1);
 }
 
-internal sealed class ProviderFailure(int status, string message) : Exception(message)
+internal sealed class ProviderFailure(int status, string message, bool allocationFailure = false) : Exception(message)
 {
     public int Status { get; } = status;
+    public bool AllocationFailure { get; } = allocationFailure;
 }
 
 internal static class ProviderIdentity

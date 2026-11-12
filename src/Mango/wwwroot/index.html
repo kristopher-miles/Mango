@@ -7,6 +7,7 @@
   <link rel="stylesheet" href="/mango.css">
   <script src="/mango.js" defer></script>
   <script src="/network.js" defer></script>
+  <script src="/resources.js" defer></script>
 </head>
 <body>
   <main>
@@ -53,6 +54,10 @@
                 <label>Network ID<input name="network" type="text" maxlength="36" required></label>
                 <label>This node's name<input name="name" type="text" maxlength="120" required></label>
                 <label>Master password<input name="password" type="password" maxlength="256" autocomplete="off" required></label>
+                <label>Benchmark this node<select name="benchmarkPolicy" data-benchmark-choice>
+                  <option value="never">Never</option><option value="now">Now</option>
+                  <option value="whenConvenient">When convenient</option>
+                </select></label>
               </div>
               <button type="submit">Join network</button>
             </fieldset>
@@ -63,6 +68,10 @@
               <div class="inputs">
                 <label>This node's name<input name="name" type="text" maxlength="120" required></label>
                 <label>Master password<input name="password" type="password" minlength="12" maxlength="256" autocomplete="new-password" required></label>
+                <label>Benchmark this node<select name="benchmarkPolicy" data-benchmark-choice>
+                  <option value="never">Never</option><option value="now">Now</option>
+                  <option value="whenConvenient">When convenient</option>
+                </select></label>
               </div>
               <button type="submit">Create network</button>
             </fieldset>
@@ -188,7 +197,6 @@
 
       <form id="settings" class="card" aria-labelledby="settings-title">
         <h2 id="settings-title">Contribution</h2>
-        <p class="muted">Mango saves your preference for future network contribution.</p>
         <fieldset>
           <legend>Local role preference</legend>
           <div class="role-options">
@@ -199,7 +207,6 @@
 
         <fieldset>
           <legend>Activity protection</legend>
-          <p class="muted">Activity protection and benchmarks will take effect once resource management is available.</p>
           <label class="checkbox"><input type="checkbox" name="activityMonitoring"> Monitor local activity</label>
           <div class="inputs">
             <label>Sampling interval (seconds)<input name="sampleSeconds" type="number" min="2" max="3600" required></label>
@@ -237,7 +244,7 @@
           <label>When to benchmark
             <select name="benchmarkPolicy">
               <option value="never">Never</option>
-              <option value="now">Before serving requests</option>
+              <option value="now">Now · before serving requests</option>
               <option value="whenConvenient">When convenient</option>
             </select>
           </label>
@@ -245,6 +252,44 @@
         <button type="submit">Save local settings</button>
         <p id="save-status" class="action-status" role="status"></p>
       </form>
+
+      <section class="card" aria-labelledby="resource-title">
+        <h2 id="resource-title">Resource protection</h2>
+        <p id="resource-state"></p>
+        <p id="resource-observation" class="muted"></p>
+        <p id="resource-benchmark" class="muted"></p>
+        <p id="resource-feedback" class="action-status" role="status"></p>
+        <div class="actions">
+          <button id="resource-refresh" type="button" class="secondary">Refresh resource status</button>
+          <button id="resource-release" type="button" class="secondary" hidden>Verify release again</button>
+        </div>
+        <form id="resource-form" hidden>
+          <fieldset>
+            <legend>Local deployment limits</legend>
+            <label>Deployment and operation<select name="target" required></select></label>
+            <p id="resource-units" class="muted"></p>
+            <div class="inputs">
+              <label>Workload units<input name="units" type="number" min="1" max="67108864" required></label>
+              <label>Items per request<input name="items" type="number" min="1" max="128" required></label>
+              <label>Inline media items<input name="mediaItems" type="number" min="0" max="128" required></label>
+              <label>Load RAM peak (MiB)<input name="loadRamMiB" type="number" min="0" max="1048576" required></label>
+              <label>Additional execution RAM peak (MiB)<input name="executeRamMiB" type="number" min="0" max="1048576" required></label>
+            </div>
+            <div id="resource-gpus" class="inputs"></div>
+            <label id="resource-attached" class="checkbox" hidden>
+              <input name="allowAttached" type="checkbox"> Allow this attached provider. Mango can stop forwarding requests, and its model may remain resident.
+            </label>
+            <label class="checkbox"><input name="allowOverlap" type="checkbox"> I qualified these memory limits for overlapping executions</label>
+            <label>Qualified executions on this deployment<input name="parallelSlots" type="number" min="1" max="64" value="1" required></label>
+            <p id="resource-profile" class="muted"></p>
+            <ul id="resource-passes"></ul>
+            <div class="actions">
+              <button type="submit">Save local limits</button>
+              <button id="resource-retry" type="button" class="secondary">Retry benchmark</button>
+            </div>
+          </fieldset>
+        </form>
+      </section>
 
       <form id="startup" class="card" aria-labelledby="startup-title">
         <h2 id="startup-title">Windows startup</h2>

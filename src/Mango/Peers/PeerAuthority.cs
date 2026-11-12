@@ -1,11 +1,12 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
+using Mango.Host;
 
 namespace Mango.Peers;
 
-internal sealed record CreateNetworkRequest(string? Name, string? Password);
-internal sealed record JoinNetworkRequest(string? Name, string? Address, Guid Network, string? Password);
+internal sealed record CreateNetworkRequest(string? Name, string? Password, BenchmarkPolicy? BenchmarkPolicy = null);
+internal sealed record JoinNetworkRequest(string? Name, string? Address, Guid Network, string? Password, BenchmarkPolicy? BenchmarkPolicy = null);
 internal sealed record EnrollmentRequest(Guid Network, Guid Node, string Device, string Name, int Port, string Verifier, string? Password);
 internal sealed record NetworkSetup(NetworkIdentity Identity, Guid Node, string? RecoveryRecord);
 internal sealed record UnlockRequest(string? Password);
@@ -42,6 +43,9 @@ internal sealed partial class PeerNetwork
         var secret = PeerCredentials.Secret();
         var id = Guid.NewGuid();
         var network = Guid.NewGuid();
+        if (Snapshot.Records.Identity is not null || Snapshot.Self is not null)
+            throw new PeerFailure(409, "This data directory already contains enrollment state.");
+        await SaveBenchmarkChoiceAsync(input.BenchmarkPolicy, cancellation);
         var (_, after) = await ChangeAsync(current =>
         {
             if (current.Records.Identity is not null || current.Self is not null)
@@ -123,6 +127,7 @@ internal sealed partial class PeerNetwork
                     node.Verifier == enrollment.Verifier))
                 throw new PeerFailure(409, "The peer did not return a valid enrollment for this installation.");
 
+            await SaveBenchmarkChoiceAsync(input.BenchmarkPolicy, cancellation);
             ready = false;
             await ChangeAsync(current =>
             {
@@ -136,6 +141,16 @@ internal sealed partial class PeerNetwork
             return new(enrolled.Identity!, pending.Local.Node, null);
         }
         finally { setup.Release(); }
+    }
+
+    private async Task SaveBenchmarkChoiceAsync(BenchmarkPolicy? choice, CancellationToken cancellation)
+    {
+        if (choice is not { } policy)
+            return;
+        if (!Enum.IsDefined(policy))
+            throw new PeerFailure(400, "Choose a local benchmark policy.");
+        if (settings.Value.BenchmarkPolicy != policy)
+            await settings.UpdateAsync(current => current with { BenchmarkPolicy = policy }, cancellation);
     }
 
     public async Task<NetworkRecords> AcceptEnrollmentAsync(EnrollmentRequest input, IPAddress address, CancellationToken cancellation)

@@ -60,6 +60,8 @@ async function loadSettings() {
   inputs.role.value = view.settings.role;
   inputs.activityMonitoring.checked = view.settings.activityMonitoring;
   inputs.benchmarkPolicy.value = view.settings.benchmarkPolicy;
+  for (const choice of document.querySelectorAll("[data-benchmark-choice]"))
+    if (!choice.dataset.changed) choice.value = view.settings.benchmarkPolicy;
   for (const key of numbers) inputs[key].value = view.settings[key] ?? "";
   startupForm.hidden = !view.startupAvailable;
   startupForm.elements.enabled.checked = view.startsAtLogin;

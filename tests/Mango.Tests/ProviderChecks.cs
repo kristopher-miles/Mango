@@ -101,6 +101,12 @@ internal static class ProviderChecks
             "llama receives the same total generation limit through max_tokens");
         var error = await Fails(502, () => Run(InferenceOperation.Chat, ChatBody, chat, refused));
         Check(!error.Message.Contains(NativeSecret), "upstream error body and secrets are excluded");
+        using var allocation = new HttpClient(new Handler(request => Task.FromResult(
+            request.RequestUri!.AbsolutePath.EndsWith("count_tokens", StringComparison.Ordinal)
+                ? Response(HttpStatusCode.OK, """{"input_tokens":10}""")
+                : Response(HttpStatusCode.OK, "data: {\"error\":{\"message\":\"out of memory\"}}\n\n", "text/event-stream"))));
+        var exhausted = await Fails(503, () => Run(InferenceOperation.Chat, ChatBody, chat, new UnslothAdapter(allocation, endpoint)));
+        Check(exhausted.AllocationFailure, "provider streaming allocation errors invalidate the local placement");
         await CheckResidentImageAsync(endpoint);
         Console.WriteLine("Provider fixture checks passed.");
     }

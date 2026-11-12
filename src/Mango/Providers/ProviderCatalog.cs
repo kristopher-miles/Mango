@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using Mango.Host;
+using Mango.Resources;
 
 namespace Mango.Providers;
 
@@ -10,10 +11,12 @@ internal sealed record EndpointStatus(Guid Id, ProviderProfile Profile, Provider
 
 internal sealed record CatalogView(EndpointStatus[] Endpoints, Deployment[] Models, string? Selected, string? RecoveryWarning);
 internal sealed record ProviderLifecycle(string DeploymentId, bool Loading, TimeSpan Elapsed);
+internal sealed record ReleasedEndpoint(Guid Id, int? StoppedProcess);
+internal sealed record ReleaseResult(ReleasedEndpoint[] Released, string? Error = null);
 
-internal sealed class ProviderCatalog(string directory) : IAsyncDisposable
+internal sealed class ProviderCatalog(string directory, ResourceProtection? resources = null) : IAsyncDisposable
 {
-    private sealed record Observation(ProviderInventory Inventory, string? Error, DateTimeOffset ObservedAt);
+    private sealed record Observation(ProviderInventory Inventory, string? Error, DateTimeOffset ObservedAt, bool AllocationFailed = false);
 
     private readonly SnapshotFile<ProviderSettings> store = new(Path.Combine(directory, "providers.json"), Validate);
     private readonly HttpClient http = new(new SocketsHttpHandler
@@ -26,27 +29,42 @@ internal sealed class ProviderCatalog(string directory) : IAsyncDisposable
         PooledConnectionLifetime = TimeSpan.FromMinutes(10)
     }) { Timeout = Timeout.InfiniteTimeSpan };
     private readonly SemaphoreSlim operation = new(1);
+    private readonly SemaphoreSlim input = new(16);
     private readonly SemaphoreSlim wake = new(0, 1);
     private readonly ConcurrentDictionary<Guid, byte> pendingRefreshes = new();
     private readonly Dictionary<Guid, ProviderAdapter> adapters = [];
     private readonly Dictionary<Guid, Observation> observations = [];
     private readonly Dictionary<Guid, (CancellationTokenSource Stop, Task Work)> watchers = [];
-    private readonly Dictionary<string, Guid> uncertainModels = [];
+    private readonly ConcurrentDictionary<string, Guid> uncertainModels = new();
     private CatalogView view = new([], [], null, null);
-    private string? activeModel;
+    private readonly ConcurrentDictionary<string, (Guid Endpoint, int Count)> activeModels = new();
     private ProviderExecution? lastExecution;
     private ProviderLifecycle? lastLifecycle;
     public event Action? Changed;
+    public ResourceProtection? Resources => resources;
+    internal (Guid Endpoint, string Deployment)[] Unsettled =>
+        uncertainModels.Select(item => (item.Value, item.Key)).ToArray();
+
+    internal void RestoreUnsettled(Guid endpoint, string deployment)
+    {
+        if (adapters.ContainsKey(endpoint))
+            uncertainModels[deployment] = endpoint;
+    }
+
+    internal void ConfirmReleased(Guid endpoint)
+    {
+        foreach (var item in uncertainModels.Where(item => item.Value == endpoint))
+            uncertainModels.TryRemove(item.Key, out _);
+    }
 
     public CatalogView View
     {
         get
         {
             var snapshot = Volatile.Read(ref view);
-            var active = Volatile.Read(ref activeModel);
-            return active is null ? snapshot : snapshot with
+            return activeModels.IsEmpty ? snapshot : snapshot with
             {
-                Models = snapshot.Models.Select(model => model.Id == active ? model with { Busy = true } : model).ToArray()
+                Models = snapshot.Models.Select(model => activeModels.ContainsKey(model.Id) ? model with { Busy = true } : model).ToArray()
             };
         }
     }
@@ -117,7 +135,9 @@ internal sealed class ProviderCatalog(string directory) : IAsyncDisposable
             ValidateEndpoint(endpoint);
             if (previous is not null && previous != endpoint && adapters[endpoint.Id].OwnedProcessId.HasValue)
                 throw new ProviderFailure(409, "Stop the process Mango started before changing this registration.");
-            if (previous != endpoint && uncertainModels.ContainsValue(endpoint.Id))
+            if (previous != endpoint && WorkInProgress(endpoint.Id))
+                throw new ProviderFailure(409, "Wait for work on this provider to settle before changing its registration.");
+            if (previous != endpoint && uncertainModels.Values.Contains(endpoint.Id))
                 throw new ProviderFailure(409, "Confirm the provider has stopped the prior request before changing its registration.");
             if (current.Endpoints.Any(existing => existing.Id != endpoint.Id && existing.Address == endpoint.Address))
                 throw new ProviderFailure(409, "This provider address is already registered.");
@@ -147,7 +167,9 @@ internal sealed class ProviderCatalog(string directory) : IAsyncDisposable
                 throw new ProviderFailure(404, "Provider endpoint does not exist.");
             if (adapter.OwnedProcessId.HasValue)
                 throw new ProviderFailure(409, "Stop the process Mango started before removing this registration.");
-            if (uncertainModels.ContainsValue(id))
+            if (WorkInProgress(id))
+                throw new ProviderFailure(409, "Wait for work on this provider to settle before removing it.");
+            if (uncertainModels.Values.Contains(id))
                 throw new ProviderFailure(409, "Confirm the provider has stopped the prior request before removing it.");
             var modelIds = View.Models.Where(model => model.EndpointId == id).Select(model => model.Id).ToHashSet();
             await store.UpdateAsync(value => value with
@@ -239,14 +261,20 @@ internal sealed class ProviderCatalog(string directory) : IAsyncDisposable
         finally { operation.Release(); }
     }
 
-    public async Task ManageAsync(string id, bool load, CancellationToken cancellation)
+    public async Task ManageAsync(string id, bool load, CancellationToken cancellation, InferenceOperation? benchmark = null)
     {
         if (!await operation.WaitAsync(0, cancellation))
             throw new ProviderFailure(409, "A provider operation is in progress.");
+        ResourceReservation? reservation = null;
+        Deployment? target = null;
+        var invoked = false;
         try
         {
             var model = Find(id);
+            target = model;
             var adapter = adapters[model.EndpointId];
+            if (WorkInProgress(model.EndpointId, includeUncertain: load))
+                throw new ProviderFailure(409, "Work on this provider must settle before changing model state.");
             if (load && !model.Model.SupportsLoad || !load && !model.Model.SupportsUnload)
                 throw new ProviderFailure(409, "The provider does not expose this lifecycle operation for the deployment.");
             if (load && uncertainModels.Count > 0)
@@ -257,48 +285,92 @@ internal sealed class ProviderCatalog(string directory) : IAsyncDisposable
                 throw new ProviderFailure(409, "This deployment is already loaded.");
             if (!load && model.Instance is null && !adapter.OwnedProcessId.HasValue)
                 throw new ProviderFailure(409, "The model is already unloaded or its state is unknown.");
+            var endpoint = View.Endpoints.First(item => item.Id == model.EndpointId);
+            if (load && resources is not null)
+            {
+                var operationKind = benchmark ?? resources.LoadOperation(model, endpoint);
+                reservation = resources.TryAdmit(model, endpoint, new(operationKind, 1), ResourceWork.Load,
+                    profiling: benchmark.HasValue).Require();
+            }
+            using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellation,
+                reservation?.Cancellation ?? CancellationToken.None);
             var started = Stopwatch.GetTimestamp();
+            invoked = true;
             if (load)
-                await adapter.LoadAsync(model.Model, model.Options.ServedContext, cancellation);
+            {
+                await adapter.LoadAsync(model.Model, model.Options.ServedContext, linked.Token);
+                if (adapter.OwnedProcessId.HasValue)
+                    Publish();
+            }
             else
                 await adapter.UnloadAsync(model.Model, cancellation);
-            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(linked.Token);
             timeout.CancelAfter(TimeSpan.FromSeconds(40));
             try
             {
                 do
                 {
                     await RefreshOneAsync(model.EndpointId, timeout.Token);
-                    var endpoint = View.Endpoints.First(status => status.Id == model.EndpointId);
+                    if (load && observations.GetValueOrDefault(model.EndpointId)?.AllocationFailed == true)
+                        throw new ProviderFailure(503, "The provider reported a failed memory allocation during load.", true);
+                    var observedEndpoint = View.Endpoints.First(status => status.Id == model.EndpointId);
                     var observed = View.Models.FirstOrDefault(item => item.Id == id);
-                    if (load ? endpoint.Online && observed?.Instance is not null
-                        : endpoint.Online && observed?.Instance is null ||
-                          !endpoint.Online && !adapter.OwnedProcessId.HasValue && endpoint.Profile is ProviderProfile.LlamaSingle or ProviderProfile.LlamaEmbedding)
+                    if (load ? observedEndpoint.Online && observed?.Instance is not null
+                        : observedEndpoint.Online && observed?.Instance is null ||
+                          !observedEndpoint.Online && !adapter.OwnedProcessId.HasValue &&
+                          observedEndpoint.Profile is ProviderProfile.LlamaSingle or ProviderProfile.LlamaEmbedding)
                     {
                         Volatile.Write(ref lastLifecycle, new(id, load, Stopwatch.GetElapsedTime(started)));
+                        reservation?.Complete();
                         return;
                     }
                     await Task.Delay(500, timeout.Token);
                 } while (true);
             }
-            catch (OperationCanceledException) when (!cancellation.IsCancellationRequested)
+            catch (OperationCanceledException) when (!linked.IsCancellationRequested)
             {
                 throw new ProviderFailure(502, "Mango could not confirm the requested model state.");
             }
         }
         catch (ProviderFailure error) when (error.Status is >= 500 or 409)
         {
-            if (View.Models.FirstOrDefault(model => model.Id == id) is { } target)
+            if (target is not null)
                 SignalRefresh(target.EndpointId);
+            if (error.AllocationFailure && reservation is not null)
+            {
+                await resources!.AllocationFailedAsync(reservation);
+                if (View.Endpoints.First(item => item.Id == target!.EndpointId).Executable is not null &&
+                    !adapters[target!.EndpointId].OwnedProcessId.HasValue &&
+                    (resources.Observation?.Workers.GetValueOrDefault(target.EndpointId)?.Processes
+                        .All(pid => !WindowsObservation.ProcessExists(pid)) ?? true))
+                    reservation.Complete();
+            }
             throw;
         }
-        catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+        catch (OperationCanceledException)
         {
-            if (View.Models.FirstOrDefault(model => model.Id == id) is { } target)
+            if (target is not null)
                 SignalRefresh(target.EndpointId);
+            if (!cancellation.IsCancellationRequested && reservation?.Cancellation.IsCancellationRequested == true)
+                throw new ProviderFailure(503, "Mango withdrew local resources during model loading.");
             throw;
         }
-        finally { operation.Release(); }
+        finally
+        {
+            if (reservation is not null)
+            {
+                if (!invoked)
+                    reservation.Complete();
+                else if (reservation.Running)
+                {
+                    uncertainModels[id] = target!.EndpointId;
+                    Publish();
+                    SignalRefresh(target.EndpointId);
+                }
+                reservation.Dispose();
+            }
+            operation.Release();
+        }
     }
 
     public async Task StopAsync(Guid id, CancellationToken cancellation)
@@ -309,6 +381,8 @@ internal sealed class ProviderCatalog(string directory) : IAsyncDisposable
         {
             if (!adapters.TryGetValue(id, out var adapter))
                 throw new ProviderFailure(404, "Provider endpoint does not exist.");
+            if (WorkInProgress(id, includeUncertain: false))
+                throw new ProviderFailure(409, "Wait for active work before stopping this provider.");
             await adapter.StopAsync(cancellation);
             await RefreshOneAsync(id, cancellation);
         }
@@ -317,50 +391,201 @@ internal sealed class ProviderCatalog(string directory) : IAsyncDisposable
 
     public async Task ExecuteAsync(InferenceOperation operationKind, HttpContext context, CancellationToken cancellation)
     {
-        if (!await operation.WaitAsync(0, cancellation))
+        if (resources is not null)
+        {
+            await resources.ClientArrivedAsync(cancellation);
+            resources.RequireServing();
+        }
+        if (!await input.WaitAsync(0, cancellation))
+            throw new ProviderFailure(429, "The local request input limit is busy.");
+        InferenceRequest payload;
+        try { payload = await InferenceRequest.ReadAsync(operationKind, context.Request, cancellation); }
+        finally { input.Release(); }
+        using var request = payload;
+        if (SameAlias(payload.Alias, "best"))
+            throw new ProviderFailure(501, "Automatic best-model selection is not available.");
+        if (!await operation.WaitAsync(TimeSpan.FromMilliseconds(100), cancellation))
+        {
+            resources?.RequireServing();
             throw new ProviderFailure(429, "A local provider operation is in progress.");
-        Deployment? model = null;
-        InferenceRequest? payload = null;
+        }
+        Deployment model;
+        ProviderAdapter adapter;
+        ResourceReservation? reservation = null;
         try
         {
-            if (uncertainModels.Count > 0)
+            if (uncertainModels.Count > 0 && resources is null)
                 throw new ProviderFailure(409, "Mango has not confirmed that the prior request stopped. Refresh or unload the previous deployment.");
-            payload = await InferenceRequest.ReadAsync(operationKind, context.Request, cancellation);
-            if (SameAlias(payload.Alias, "best"))
-                throw new ProviderFailure(501, "Automatic best-model selection is not available.");
             var snapshot = View;
-            model = snapshot.Models.FirstOrDefault(item => item.Id == snapshot.Selected && SameAlias(item.Alias, payload.Alias));
-            if (model is null || !model.Available)
+            var selected = snapshot.Models.FirstOrDefault(item => item.Id == snapshot.Selected && SameAlias(item.Alias, payload.Alias));
+            if (selected is null || !selected.Eligible || selected.Instance?.Busy == true ||
+                uncertainModels.ContainsKey(selected.Id) || resources is null && selected.Busy)
                 throw new ProviderFailure(409, "Select this loaded deployment in the local Mango catalog before sending requests.");
+            model = selected;
+            if (!model.Model.Operations.Contains(operationKind))
+                throw new ProviderFailure(422, "This deployment does not support the requested inference operation.");
             RequireCompatibleAlias(model, snapshot.Models);
-            Volatile.Write(ref activeModel, model.Id);
-            var execution = await payload.ForwardAsync(model, adapters[model.EndpointId], context, cancellation);
-            cancellation.ThrowIfCancellationRequested();
+            adapter = adapters[model.EndpointId];
+            if (resources is not null)
+                reservation = resources.TryAdmit(model, snapshot.Endpoints.First(item => item.Id == model.EndpointId),
+                    payload.ResourceDemand(model), ResourceWork.Execute).Require();
+            else if (!activeModels.IsEmpty)
+                throw new ProviderFailure(429, "A local provider operation is in progress.");
+            MarkActive(model, true);
+        }
+        finally { operation.Release(); }
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellation,
+            reservation?.Cancellation ?? CancellationToken.None);
+        try
+        {
+            var execution = await payload.ForwardAsync(model, adapter, context, linked.Token);
+            linked.Token.ThrowIfCancellationRequested();
             Volatile.Write(ref lastExecution, execution);
         }
-        catch (ProviderFailure error) when (model is not null && error.Status is >= 500 or 409)
+        catch (ProviderFailure error) when (error.Status is >= 500 or 409 || error.AllocationFailure)
         {
             SignalRefresh(model.EndpointId);
+            if (error.AllocationFailure && reservation is not null)
+                await resources!.AllocationFailedAsync(reservation);
             throw;
         }
-        catch (Exception error) when (model is not null && error is IOException or OperationCanceledException)
+        catch (OperationCanceledException) when (!cancellation.IsCancellationRequested && linked.IsCancellationRequested)
+        {
+            SignalRefresh(model.EndpointId);
+            throw new ProviderFailure(503, "Mango withdrew local resources during inference.");
+        }
+        catch (Exception error) when (error is IOException or OperationCanceledException)
         {
             SignalRefresh(model.EndpointId);
             throw;
         }
         finally
         {
-            if (model is not null && payload is { Submitted: true, Settled: false })
+            await FinishExecutionAsync(model, adapter, reservation, !payload.Submitted || payload.Settled);
+        }
+    }
+
+    internal async Task<BenchmarkResult> BenchmarkAsync(string id, Workload workload, string pass, CancellationToken cancellation)
+    {
+        Deployment model;
+        ProviderAdapter adapter;
+        ResourceReservation reservation;
+        await operation.WaitAsync(cancellation);
+        try
+        {
+            model = Find(id);
+            if (!model.Eligible || model.Busy || model.Instance?.Busy == true || uncertainModels.ContainsKey(id))
+                throw new ProviderFailure(409, "The benchmark deployment is not settled and ready.");
+            adapter = adapters[model.EndpointId];
+            reservation = resources!.TryAdmit(model, View.Endpoints.First(item => item.Id == model.EndpointId),
+                workload, ResourceWork.Benchmark, profiling: true).Require();
+            MarkActive(model, true);
+        }
+        finally { operation.Release(); }
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellation, reservation.Cancellation);
+        var submitted = false;
+        var settled = false;
+        try
+        {
+            return await BenchmarkProtocol.RunAsync(model, adapter, workload, pass, () => submitted = true,
+                () => settled = true, linked.Token);
+        }
+        catch (ProviderFailure error) when (error.AllocationFailure)
+        {
+            await resources!.AllocationFailedAsync(reservation);
+            throw;
+        }
+        finally { await FinishExecutionAsync(model, adapter, reservation, !submitted || settled); }
+    }
+
+    private async Task FinishExecutionAsync(Deployment model, ProviderAdapter adapter, ResourceReservation? reservation,
+        bool settled)
+    {
+        settled = settled || await ObserveIdleAsync(adapter, model.Model, wait: true, CancellationToken.None);
+        await operation.WaitAsync(CancellationToken.None);
+        try
+        {
+            MarkActive(model, false);
+            reservation?.Complete(settled);
+            if (!settled)
             {
-                if (!await ObserveIdleAsync(adapters[model.EndpointId], model.Model, wait: true, CancellationToken.None))
-                {
-                    uncertainModels[model.Id] = model.EndpointId;
-                    Publish();
-                }
+                uncertainModels[model.Id] = model.EndpointId;
+                Publish();
+                SignalRefresh(model.EndpointId);
             }
-            payload?.Dispose();
-            Volatile.Write(ref activeModel, null);
-            operation.Release();
+        }
+        finally { operation.Release(); }
+    }
+
+    private bool WorkInProgress(Guid endpoint, bool includeUncertain = true) =>
+        activeModels.Values.Any(item => item.Endpoint == endpoint) ||
+        (includeUncertain ? resources?.HasWork(endpoint) : resources?.HasRunning(endpoint)) == true;
+
+    private void MarkActive(Deployment model, bool active)
+    {
+        var count = activeModels.GetValueOrDefault(model.Id).Count + (active ? 1 : -1);
+        if (count > 0)
+            activeModels[model.Id] = (model.EndpointId, count);
+        else
+            activeModels.TryRemove(model.Id, out _);
+    }
+
+    internal async Task<ReleaseResult> ReleaseManagedAsync(CancellationToken cancellation)
+    {
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
+        deadline.CancelAfter(TimeSpan.FromSeconds(25));
+        var released = new List<ReleasedEndpoint>();
+        try
+        {
+            while (!activeModels.IsEmpty || View.Endpoints.Any(item => resources?.HasRunning(item.Id) == true))
+                await Task.Delay(100, deadline.Token);
+            await operation.WaitAsync(deadline.Token);
+            try
+            {
+                foreach (var endpoint in View.Endpoints.Where(item => item.Mode == ProviderMode.Managed).ToArray())
+                {
+                    var adapter = adapters[endpoint.Id];
+                    var ownedPid = adapter.OwnedProcessId;
+                    var owned = ownedPid.HasValue;
+                    if (uncertainModels.Values.Contains(endpoint.Id) && !owned)
+                        await RefreshOneAsync(endpoint.Id, deadline.Token);
+                    var models = View.Models.Where(item => item.EndpointId == endpoint.Id && item.Instance is not null).ToArray();
+                    if (models.Length == 0 && !owned && !uncertainModels.Values.Contains(endpoint.Id))
+                        continue;
+                    using var unload = CancellationTokenSource.CreateLinkedTokenSource(deadline.Token);
+                    unload.CancelAfter(TimeSpan.FromSeconds(6));
+                    try
+                    {
+                        foreach (var model in models)
+                            await adapter.UnloadAsync(model.Model, unload.Token);
+                    }
+                    catch (Exception error) when (error is ProviderFailure or OperationCanceledException or System.ComponentModel.Win32Exception)
+                    {
+                        if (!adapter.OwnedProcessId.HasValue)
+                            return new(released.ToArray(), "A managed provider did not confirm unload.");
+                    }
+                    if (adapter.OwnedProcessId.HasValue)
+                        await adapter.StopAsync(deadline.Token);
+                    await RefreshOneAsync(endpoint.Id, deadline.Token, settleOwnedExit: !owned);
+                    var refreshed = View;
+                    if ((!owned && !refreshed.Endpoints.Any(item => item.Id == endpoint.Id && item.Online)) ||
+                        refreshed.Models.Any(item => item.EndpointId == endpoint.Id && item.Instance is not null) ||
+                        !owned && uncertainModels.Values.Contains(endpoint.Id))
+                        return new(released.ToArray(), "Mango could not verify that the managed provider released its models.");
+                    released.Add(new(endpoint.Id, ownedPid));
+                }
+                var remaining = uncertainModels.Values.Distinct().Except(released.Select(item => item.Id)).ToArray();
+                foreach (var endpoint in remaining)
+                    await RefreshOneAsync(endpoint, deadline.Token);
+                if (uncertainModels.Values.Except(released.Select(item => item.Id)).Any())
+                    return new(released.ToArray(), "An attached provider has not confirmed that its request stopped.");
+                return new(released.ToArray());
+            }
+            finally { operation.Release(); }
+        }
+        catch (Exception error) when (error is ProviderFailure or IOException or OperationCanceledException or System.ComponentModel.Win32Exception)
+        {
+            return new(released.ToArray(), "Mango could not settle and release every managed provider before the cancellation deadline.");
         }
     }
 
@@ -371,7 +596,7 @@ internal sealed class ProviderCatalog(string directory) : IAsyncDisposable
         catch (SemaphoreFullException) { }
     }
 
-    private async Task RefreshOneAsync(Guid id, CancellationToken cancellation)
+    private async Task RefreshOneAsync(Guid id, CancellationToken cancellation, bool settleOwnedExit = true)
     {
         try
         {
@@ -388,7 +613,10 @@ internal sealed class ProviderCatalog(string directory) : IAsyncDisposable
                 var model = result.Models.FirstOrDefault(model => model.Id == key);
                 if (model is null || model.Instances.Length == 0 ||
                     await ObserveIdleAsync(adapter, model, wait: false, cancellation))
-                    uncertainModels.Remove(key);
+                {
+                    uncertainModels.TryRemove(key, out _);
+                    resources?.ConfirmSettled(key);
+                }
             }
         }
         catch (ProviderFailure error)
@@ -399,10 +627,14 @@ internal sealed class ProviderCatalog(string directory) : IAsyncDisposable
                 ? new ProviderInventory(previous?.Version, [configured], true, adapter.OwnedProcessId.HasValue,
                     adapter.OwnedProcessId.HasValue, adapter.OwnedProcessId)
                 : previous ?? new ProviderInventory(null, [], false, false, false);
-            observations[id] = new(fallback, error.Message, DateTimeOffset.UtcNow);
-            if (fallback.CanLoad && !adapter.OwnedProcessId.HasValue && previous?.CanStop == true)
+            observations[id] = new(fallback, error.Message, DateTimeOffset.UtcNow, error.AllocationFailure);
+            if (settleOwnedExit && fallback.CanLoad && !adapter.OwnedProcessId.HasValue && previous?.CanStop == true &&
+                (resources?.Observation?.Workers.GetValueOrDefault(id)?.Processes.All(pid => !WindowsObservation.ProcessExists(pid)) ?? true))
                 foreach (var key in uncertainModels.Where(pair => pair.Value == id).Select(pair => pair.Key).ToArray())
-                    uncertainModels.Remove(key);
+                {
+                    uncertainModels.TryRemove(key, out _);
+                    resources?.ConfirmSettled(key);
+                }
         }
         Publish();
     }
@@ -422,11 +654,15 @@ internal sealed class ProviderCatalog(string directory) : IAsyncDisposable
                 online, inventory?.Version, observation?.Error, observation?.ObservedAt,
                 inventory?.CanLoad == true && (online || endpoint.Executable is not null),
                 inventory?.CanUnload == true && (online || inventory.CanStop),
-                inventory?.CanStop == true, inventory?.OwnedProcessId));
+                inventory?.CanStop == true, adapters.GetValueOrDefault(endpoint.Id)?.OwnedProcessId ?? inventory?.OwnedProcessId));
             foreach (var model in inventory?.Models ?? [])
             {
                 var options = value.Models.GetValueOrDefault(model.Id) ?? new ModelOptions(DefaultAlias(model), [], null, null, null, null, 0);
-                models.Add(new(endpoint.Id, model, options, online, uncertainModels.ContainsKey(model.Id), inventory?.Version));
+                var configuration = ProviderIdentity.Hash(endpoint.Profile.ToString(), endpoint.Mode.ToString(), endpoint.Address,
+                    FileStamp(endpoint.Executable), FileStamp(endpoint.ModelFile), options.ServedContext?.ToString(),
+                    options.EmbeddingDimensions?.ToString(), options.MediaTokensPerItem?.ToString());
+                models.Add(new(endpoint.Id, model, options, online, uncertainModels.ContainsKey(model.Id), inventory?.Version,
+                    configuration));
             }
         }
         Volatile.Write(ref view, new(endpoints.ToArray(), models.ToArray(), value.Selected, store.RecoveryWarning));
@@ -448,6 +684,7 @@ internal sealed class ProviderCatalog(string directory) : IAsyncDisposable
         }
         http.Dispose();
         operation.Dispose();
+        input.Dispose();
         wake.Dispose();
     }
 
@@ -534,6 +771,18 @@ internal sealed class ProviderCatalog(string directory) : IAsyncDisposable
 
     private static bool LocalPath(string? path) => path is { Length: >= 3 and <= 1024 } && char.IsAsciiLetter(path[0]) &&
         path[1] == ':' && path[2] is '\\' or '/' && Path.IsPathFullyQualified(path);
+
+    private static string? FileStamp(string? path)
+    {
+        if (path is null)
+            return null;
+        try
+        {
+            var file = new FileInfo(path);
+            return file.Exists ? $"{path}|{file.Length}|{file.LastWriteTimeUtc.Ticks}" : path;
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException) { return path; }
+    }
 
     private static string? Validate(ProviderSettings value)
     {

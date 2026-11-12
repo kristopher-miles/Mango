@@ -54,9 +54,13 @@ Invoke-RestMethod "$base/v1/chat/completions" -Method Post -Headers $headers -Co
 
 For the already-loaded workflow, disable just-in-time model loading in LM Studio and automatic switching and downloading in Unsloth. Start `unsloth run` with `--disable-tools`. Mango accepts client-executed function tools on deployments that report support and disables Unsloth host-side tool execution in forwarded requests.
 
-The local inference surface includes chat completions, embeddings, images, audio transcriptions, speech, and System One decisions when the selected deployment advertises that protocol. Image generation returns inline base64. Transcriptions accept a multipart audio file. The current implementation limits local inference to one request at a time and checks provider state after an interrupted response. See the [provider plan and qualification results](docs/plan/02-provider-integration.md) for tested versions and runtime limits.
+The local inference surface includes chat completions, embeddings, images, audio transcriptions, speech, and System One decisions when the selected deployment advertises that protocol. Image generation returns inline base64. Transcriptions accept a multipart audio file. Mango serializes execution unless the local policy, qualified limits, and provider slots allow overlap. See the [provider plan and qualification results](docs/plan/02-provider-integration.md) for tested versions and runtime limits.
 
-Network routing and automatic resource protection arrive in later phases. The contributor preference remains local saved intent.
+### Enable local inference
+
+1. In **Contribution**, select **Contributor** and save. Choose **Never** for owner-configured limits, **Now** to finish benchmarks before serving, or **When convenient** to benchmark after five minutes without client work. You can also choose the local benchmark policy when creating or joining a network.
+2. In **Resource protection**, select the deployment and operation and save the workload and incremental RAM limits. On hosts with discrete GPUs, enter the load and execution VRAM allowance for each GPU. To use an attached provider, confirm that its model may remain resident after Mango withdraws.
+3. In **Providers and models**, load the deployment if needed and select it for inference. With **Now**, the resource panel shows benchmark progress or the reason it is waiting. Mango withdraws and verifies release of managed resources when Windows reports pressure or sustained external activity. See the [Windows qualification and limits](docs/plan/04-resource-protection.md#windows-qualification).
 
 ## Set up a private Mango network
 

@@ -50,7 +50,10 @@ internal static class PeerChecks
         Host? second = null;
         try
         {
-            var created = await Local(http, first, "network/create", new { name = "First", password = Password });
+            var created = await Local(http, first, "network/create", new
+            {
+                name = "First", password = Password, benchmarkPolicy = BenchmarkPolicy.WhenConvenient
+            });
             var network = created.GetProperty("identity").GetProperty("id").GetGuid();
             var recovery = created.GetProperty("recoveryRecord").GetString()!;
             var firstAdmin = await Unlock(http, first, Password);
@@ -71,11 +74,14 @@ internal static class PeerChecks
             Check(discovered.GetArrayLength() == 1 &&
                 discovered[0].GetProperty("peer").GetProperty("identity").GetProperty("id").GetGuid() == network,
                 "discovery identifies the selected network");
-            var join = new JoinNetworkRequest("Second", first.TailAddress, network, Password);
+            var join = new JoinNetworkRequest("Second", first.TailAddress, network, Password, BenchmarkPolicy.Now);
             await Local(http, second, "network/join", join with { Network = Guid.NewGuid() }, expected: 409);
             await Local(http, second, "network/join", join with { Password = "incorrect password" }, expected: 401);
             var joined = await Local(http, second, "network/join", join);
             var secondId = joined.GetProperty("node").GetGuid();
+            Check((await Local(http, first, "settings")).GetProperty("settings").GetProperty("benchmarkPolicy").GetString() == "whenConvenient" &&
+                (await Local(http, second, "settings")).GetProperty("settings").GetProperty("benchmarkPolicy").GetString() == "now",
+                "create and join persist each host's own benchmark choice without replication");
             await Request(http, HttpMethod.Get, second.LocalAddress + "/v1/models", key);
 
             await Local(http, first, "providers", new { profile = "llamaSingle", mode = "attached", address = provider.Urls.Single() });

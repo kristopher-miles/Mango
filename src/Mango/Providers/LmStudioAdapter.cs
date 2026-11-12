@@ -31,9 +31,12 @@ internal sealed class LmStudioAdapter(HttpClient http, ProviderEndpoint endpoint
                 {
                     var config = instance.Get("config");
                     var id = instance.Text("id")!;
+                    var configuration = ProviderIdentity.Hash(Endpoint.Id.ToString("N"), key, version, variant,
+                        row.Long("size_bytes")?.ToString(), config.ValueKind == JsonValueKind.Undefined ? null : config.GetRawText());
                     return new ProviderInstance(id, config.Number("context_length"), config.Number("parallel"),
                         ProviderIdentity.Hash(Endpoint.Id.ToString("N"), key, id, version, variant,
-                            config.ValueKind == JsonValueKind.Undefined ? null : config.GetRawText()));
+                            config.ValueKind == JsonValueKind.Undefined ? null : config.GetRawText()),
+                        ConfigurationFingerprint: configuration);
                 }).ToArray();
             var (outputs, operations) = type switch
             {

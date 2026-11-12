@@ -4,6 +4,8 @@ const networkFeedback = document.querySelector("#network-status");
 const networkForms = Object.fromEntries(
   ["discover", "join", "create", "unlock", "issue", "recover", "reset"].map(name => [name, document.querySelector(`#network-${name}`)])
 );
+for (const choice of document.querySelectorAll("[data-benchmark-choice]"))
+  choice.addEventListener("change", () => choice.dataset.changed = "true");
 const networkScopes = { ...operationNames, imageInput: "Image input", audioInput: "Audio input" };
 const networkSecretPanel = document.querySelector("#network-secret");
 const networkSecret = document.querySelector("#network-secret-value");
@@ -104,7 +106,7 @@ async function loadNetwork() {
   const aliases = new Map(network.models.map(model => [`${model.owner}/${model.deployment}`, model.alias]));
   networkList("models", network.catalogs.map(catalog => {
     const details = element("details", null, "deployment");
-    details.append(element("summary", `${catalog.name} · ${catalog.models.length} deployments`));
+    details.append(element("summary", `${catalog.name} · ${catalog.role === "contributor" ? "Contributor" : "Leech"} · ${catalog.models.length} deployments`));
     for (const model of catalog.models) {
       const alias = aliases.get(`${catalog.node}/${model.id}`) || model.displayName;
       details.append(element("p", `${alias} · ${model.loaded ? "Last reported loaded" : "Last reported unloaded"}${model.context ? ` · ${model.context} tokens` : ""}`));
@@ -139,12 +141,14 @@ networkForm("discover", async fields => {
 });
 networkForm("create", async fields => {
   const result = await api("network/create", fields);
+  if (!dirty) await loadSettings();
   await loadNetwork();
   showNetworkSecret(result.recoveryRecord, true);
   return "Network created.";
 });
 networkForm("join", async fields => {
   await api("network/join", fields);
+  if (!dirty) await loadSettings();
   await loadNetwork();
   return "Joined the selected network.";
 });

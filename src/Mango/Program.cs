@@ -3,6 +3,7 @@ using System.Diagnostics;
 using Mango.Host;
 using Mango.Peers;
 using Mango.Providers;
+using Mango.Resources;
 
 namespace Mango;
 
@@ -80,12 +81,15 @@ internal static class Program
     {
         var settings = new SnapshotFile<LocalSettings>(Path.Combine(directory, "local-settings.json"), LocalSettings.Validate);
         settings.LoadAsync(new LocalSettings()).GetAwaiter().GetResult();
-        var providers = new ProviderCatalog(directory);
+        using var resources = new ResourceProtection(directory, settings);
+        var providers = new ProviderCatalog(directory, resources);
         var peers = new PeerNetwork(directory, options.PeerPort, providers, settings);
         var web = new LocalWeb();
         try
         {
+            resources.InitializeAsync().GetAwaiter().GetResult();
             providers.InitializeAsync().GetAwaiter().GetResult();
+            resources.RestoreUnsettled(providers);
             peers.InitializeAsync().GetAwaiter().GetResult();
             var app = web.Build(options.Port, directory, settings, new LoginStartup(options.DataDirectory), providers, peers);
             try
@@ -110,6 +114,7 @@ internal static class Program
         app.StartAsync().GetAwaiter().GetResult();
         var inventory = providers.RunAsync(app.Lifetime.ApplicationStopping);
         var network = peers.RunAsync(app.Lifetime.ApplicationStopping);
+        var protection = providers.Resources!.RunAsync(providers, app.Lifetime.ApplicationStopping);
         try
         {
             var url = web.BrowserUrl(app.Urls.Single());
@@ -141,7 +146,7 @@ internal static class Program
         finally
         {
             app.Lifetime.StopApplication();
-            Task.WhenAll(inventory, network).GetAwaiter().GetResult();
+            Task.WhenAll(inventory, network, protection).GetAwaiter().GetResult();
         }
     }
 

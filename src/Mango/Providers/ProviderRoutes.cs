@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text.Json.Serialization;
 using Mango.Peers;
+using Mango.Resources;
 using Microsoft.AspNetCore.Http.Features;
 
 namespace Mango.Providers;
@@ -40,6 +41,21 @@ internal static class ProviderRoutes
         local.MapPut("/providers/lifecycle", (LifecycleRequest request, HttpContext context) =>
             CommandAsync(context, cancellation => providers.ManageAsync(request.Id, request.Load, cancellation)));
 
+        if (providers.Resources is { } resources)
+        {
+            local.MapGet("/resources", () => resources.View(providers));
+            local.MapPut("/resources/budget", (BudgetUpdate update, HttpContext context) =>
+                CommandAsync(context, cancellation => resources.SaveBudgetAsync(update, providers, cancellation)));
+            local.MapPut("/resources/retry", (BenchmarkRequest request, HttpContext context) =>
+                CommandAsync(context, cancellation => resources.RetryBenchmarkAsync(request.Deployment, request.Operation,
+                    providers, cancellation)));
+            local.MapPut("/resources/release", () =>
+            {
+                resources.RetryRelease();
+                return Results.NoContent();
+            });
+        }
+
         MapInference(app, providers);
     }
 
@@ -50,7 +66,8 @@ internal static class ProviderRoutes
             var view = providers.View;
             var access = InferenceAccess.Of(context);
             var data = view.Models.Where(model => model.Eligible && model.Id == view.Selected &&
-                    (access is null || model.Model.Operations.Any(access.Allows)))
+                    model.Model.Operations.Any(operation => (access is null || access.Allows(operation)) &&
+                        (providers.Resources?.IsAvailable(model, view.Endpoints.First(item => item.Id == model.EndpointId), operation) ?? true)))
                 .Select(model => new { id = model.Alias, @object = "model", owned_by = "mango" });
             return new { @object = "list", data };
         });
@@ -120,4 +137,5 @@ internal static class ProviderRoutes
     private sealed record RatingsRequest(string? Alias, Dictionary<string, int?>? Ratings);
     private sealed record SelectionRequest([property: JsonRequired] string? Id);
     private sealed record LifecycleRequest(string Id, [property: JsonRequired] bool Load);
+    private sealed record BenchmarkRequest(string Deployment, InferenceOperation Operation);
 }

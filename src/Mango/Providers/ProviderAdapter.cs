@@ -46,7 +46,7 @@ internal abstract class ProviderAdapter(HttpClient http, ProviderEndpoint endpoi
             if (optional && response.StatusCode is HttpStatusCode.NotFound or HttpStatusCode.MethodNotAllowed or
                 HttpStatusCode.NotImplemented or HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden)
                 return default;
-            RequireSuccess(response);
+            await RequireInferenceSuccessAsync(response, timeout.Token);
             var bytes = await ReadBoundedAsync(response.Content, ProviderLimits.MaxControlBytes, timeout.Token);
             if (bytes.Length == 0 && lifecycle)
                 return default;
@@ -115,6 +115,44 @@ internal abstract class ProviderAdapter(HttpClient http, ProviderEndpoint endpoi
             _ => $"The provider returned HTTP {status}."
         });
     }
+
+    internal static async Task RequireInferenceSuccessAsync(HttpResponseMessage response, CancellationToken cancellation)
+    {
+        if (response.IsSuccessStatusCode)
+            return;
+        if ((int)response.StatusCode == 507)
+            throw new ProviderFailure(503, "The provider could not allocate model memory.", allocationFailure: true);
+        if ((int)response.StatusCode is 400 or 409 or 422 or >= 500)
+        {
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
+            timeout.CancelAfter(TimeSpan.FromSeconds(2));
+            var buffer = new byte[4096];
+            var read = 0;
+            try
+            {
+                await using var stream = await response.Content.ReadAsStreamAsync(timeout.Token);
+                while (read < buffer.Length)
+                {
+                    var chunk = await stream.ReadAsync(buffer.AsMemory(read), timeout.Token);
+                    if (chunk == 0)
+                        break;
+                    read += chunk;
+                }
+            }
+            catch (OperationCanceledException) when (!cancellation.IsCancellationRequested) { }
+            var message = System.Text.Encoding.UTF8.GetString(buffer, 0, read);
+            if (IsAllocationFailure(message))
+                throw new ProviderFailure(503, "The provider could not allocate model memory.", allocationFailure: true);
+        }
+        RequireSuccess(response);
+    }
+
+    internal static bool IsAllocationFailure(string message) =>
+        message.Contains("out of memory", StringComparison.OrdinalIgnoreCase) ||
+        message.Contains("out_of_memory", StringComparison.OrdinalIgnoreCase) ||
+        message.Contains("failed to allocate", StringComparison.OrdinalIgnoreCase) ||
+        message.Contains("allocation failed", StringComparison.OrdinalIgnoreCase) ||
+        message.Contains("cannot allocate memory", StringComparison.OrdinalIgnoreCase);
 
     protected ProviderModel Model(string nativeId, string displayName, string? variant, string[] inputs, string[] outputs,
         InferenceOperation[] operations, ProviderInstance[] instances, int? theoreticalContext, bool tools = false,

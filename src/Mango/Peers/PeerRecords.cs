@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text.Json;
 using Mango.Host;
 using Mango.Providers;
+using Mango.Resources;
 
 namespace Mango.Peers;
 
@@ -32,8 +33,10 @@ internal sealed record SharedModel(string Id, Guid Owner, string Deployment, Rev
     Dictionary<string, int?> Ratings, bool Removed = false);
 internal sealed record ObservedDeployment(string Id, string DisplayName, string? Variant, string? ProviderVersion,
     string[] Inputs, string[] Outputs, InferenceOperation[] Operations, int? Context, LimitSource? ContextSource,
-    bool Online, bool Loaded, string? Fingerprint, int? Slots, int? EmbeddingDimensions, string EmbeddingSpace);
-internal sealed record NodeCatalog(Guid Node, Revision Revision, string Name, LocalRole Role, ObservedDeployment[] Models);
+    bool Online, bool Loaded, string? Fingerprint, int? Slots, int? EmbeddingDimensions, string EmbeddingSpace,
+    bool? LocallyAvailable = null);
+internal sealed record NodeCatalog(Guid Node, Revision Revision, string Name, LocalRole Role, ObservedDeployment[] Models,
+    ContributionState? ResourceState = null);
 internal sealed record RetiredNode(string Verifier, Guid Node, Revision Revision);
 internal sealed record LocalMembership(Guid Node, string Device, string? ProtectedSecret,
     Guid? JoiningNetwork = null, string? Issuer = null);
@@ -213,7 +216,9 @@ internal static class PeerValidation
                 model.Ratings is { Count: <= 128 } && model.Ratings.All(item => Text(item.Key, 100) && item.Value is null or >= 0 and <= 5)) &&
             records.Models.Select(model => model.Id).Distinct(StringComparer.Ordinal).Count() == records.Models.Length &&
             records.Catalogs.All(catalog => catalog is not null && catalog.Node != Guid.Empty && Text(catalog.Name, 120) &&
-                Valid(catalog.Revision) && Enum.IsDefined(catalog.Role) && catalog.Models is { Length: <= PeerLimits.ModelsPerNode } &&
+                Valid(catalog.Revision) && Enum.IsDefined(catalog.Role) &&
+                (catalog.ResourceState is null || Enum.IsDefined(catalog.ResourceState.Value)) &&
+                catalog.Models is { Length: <= PeerLimits.ModelsPerNode } &&
                 catalog.Models.All(model => model is not null && Text(model.Id, 128) && Text(model.DisplayName, 512) &&
                     model.Inputs is { Length: <= 16 } && model.Outputs is { Length: <= 16 } &&
                     model.Operations is { Length: <= 6 } && model.Operations.All(Enum.IsDefined))) &&

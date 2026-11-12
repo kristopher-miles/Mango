@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Mango.Peers;
+using Mango.Resources;
 using Microsoft.AspNetCore.Http.Features;
 
 namespace Mango.Providers;
@@ -23,6 +24,39 @@ internal sealed class InferenceRequest(InferenceOperation operation, string alia
     public string Alias { get; } = alias;
     public bool Submitted { get; private set; }
     public bool Settled { get; private set; }
+
+    public Workload ResourceDemand(Deployment deployment)
+    {
+        var context = deployment.Context ?? ProviderLimits.MaxContext;
+        return operation switch
+        {
+            InferenceOperation.Chat => new(operation, context, BoundedInt(json?["n"], 1, 8),
+                json?["messages"] is JsonArray messages ? messages.OfType<JsonObject>()
+                    .SelectMany(message => message["content"] is JsonArray parts ? parts.OfType<JsonObject>() : [])
+                    .Count(part => String(part["type"]) is "image_url" or "input_audio") : 0),
+            InferenceOperation.Embeddings => new(operation, context,
+                json?["input"] is JsonArray { Count: > 0 } rows && !rows.All(IsToken) ? rows.Count : 1),
+            InferenceOperation.SystemOne => new(operation, context, 1,
+                ((json?["files"] as JsonArray)?.Count ?? 0) + ((json?["images"] as JsonArray)?.Count ?? 0)),
+            InferenceOperation.Transcription => new(operation, form!.Files[0].Length),
+            InferenceOperation.Speech => new(operation, Math.Max(1, String(json?["input"])?.Length ?? 0)),
+            InferenceOperation.Images => ImageDemand(json!),
+            _ => throw new ArgumentOutOfRangeException(nameof(operation))
+        };
+    }
+
+    private static Workload ImageDemand(JsonObject payload)
+    {
+        var width = BoundedInt(payload["width"], 4096, 4096);
+        var height = BoundedInt(payload["height"], 4096, 4096);
+        if (String(payload["size"])?.Split('x') is [var wide, var high] && int.TryParse(wide, out var w) &&
+            int.TryParse(high, out var h) && w is > 0 and <= 4096 && h is > 0 and <= 4096)
+            (width, height) = (w, h);
+        return new(InferenceOperation.Images, (long)width * height, BoundedInt(payload["n"], 1, 10));
+    }
+
+    private static int BoundedInt(JsonNode? value, int fallback, int max) =>
+        value is JsonValue item && item.TryGetValue<int>(out var number) && number is > 0 && number <= max ? number : fallback;
 
     private static readonly string[] ChatFields = ("model messages stream stream_options max_tokens max_completion_tokens " +
         "temperature top_p top_k min_p typical_p frequency_penalty presence_penalty repetition_penalty repeat_penalty " +
@@ -191,7 +225,7 @@ internal sealed class InferenceRequest(InferenceOperation operation, string alia
         var headers = Stopwatch.GetElapsedTime(send);
         if (!response.IsSuccessStatusCode)
             Settled = true;
-        ProviderAdapter.RequireSuccess(response);
+        await ProviderAdapter.RequireInferenceSuccessAsync(response, cancellation);
         var target = context.Response;
         target.StatusCode = (int)response.StatusCode;
         target.ContentType = response.Content.Headers.ContentType?.ToString() ?? "application/octet-stream";
@@ -209,17 +243,65 @@ internal sealed class InferenceRequest(InferenceOperation operation, string alia
         {
             await using var stream = await response.Content.ReadAsStreamAsync(cancellation);
             var buffer = new byte[16 * 1024];
+            var events = operation == InferenceOperation.Chat &&
+                response.Content.Headers.ContentType?.MediaType == "text/event-stream" ? new InferenceEvents() : null;
             int count;
             while ((count = await stream.ReadAsync(buffer, cancellation)) != 0)
             {
                 firstOutput ??= Stopwatch.GetElapsedTime(send);
+                events?.Read(buffer.AsSpan(0, count));
                 await target.Body.WriteAsync(buffer.AsMemory(0, count), cancellation);
                 await target.Body.FlushAsync(cancellation);
             }
-            Settled = true;
+            events?.FinishLine();
+            Settled = events?.Completed ?? true;
+            if (!Settled)
+                throw new ProviderFailure(502, "The provider stream ended before reporting completion.");
         }
         return new(deployment.Id, instance.Fingerprint, operation, deployment.Options.Revision,
             promptTokens, promptCountSource, headers, firstOutput, Stopwatch.GetElapsedTime(started));
+    }
+
+    private sealed class InferenceEvents
+    {
+        private readonly byte[] line = new byte[4096];
+        private int length;
+        public bool Completed { get; private set; }
+
+        public void Read(ReadOnlySpan<byte> bytes)
+        {
+            foreach (var value in bytes)
+            {
+                if (value == (byte)'\n')
+                    FinishLine();
+                else if (length < line.Length)
+                    line[length++] = value;
+            }
+        }
+
+        public void FinishLine()
+        {
+            var row = line.AsSpan(0, length);
+            length = 0;
+            if (!row.StartsWith("data:"u8))
+                return;
+            var start = row.Length > 5 && row[5] == (byte)' ' ? 6 : 5;
+            var data = row[start..];
+            if (!data.IsEmpty && data[^1] == (byte)'\r')
+                data = data[..^1];
+            if (data.SequenceEqual("[DONE]"u8))
+                Completed = true;
+            if (data.IndexOf("\"error\""u8) < 0)
+                return;
+            try
+            {
+                using var document = JsonDocument.Parse(line.AsMemory(start, data.Length));
+                var error = document.RootElement.Get("error");
+                if (error.ValueKind != JsonValueKind.Undefined && ProviderAdapter.IsAllocationFailure(error.GetRawText()))
+                    throw new ProviderFailure(503, "The provider could not allocate model memory.", allocationFailure: true);
+            }
+            catch (JsonException) { }
+        }
     }
 
     private static async Task<(int, string)> PrepareChatAsync(JsonObject payload, Deployment deployment,

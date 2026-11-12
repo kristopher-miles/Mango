@@ -8,6 +8,7 @@ namespace Mango.Providers;
 internal sealed class LlamaAdapter(HttpClient http, ProviderEndpoint endpoint) : ProviderAdapter(http, endpoint)
 {
     private Process? owned;
+    private int allocationFailure;
     private bool Router => Endpoint.Profile == ProviderProfile.LlamaRouter;
     public bool HasInventoryEvents => Router;
     private bool CanLaunch => Managed && !Router && Endpoint.Executable is not null && Endpoint.ModelFile is not null;
@@ -21,6 +22,8 @@ internal sealed class LlamaAdapter(HttpClient http, ProviderEndpoint endpoint) :
 
     public override async Task<ProviderInventory> InspectAsync(CancellationToken cancellation)
     {
+        if (owned is { HasExited: true } && Volatile.Read(ref allocationFailure) != 0)
+            throw new ProviderFailure(503, "llama-server could not allocate model memory.", allocationFailure: true);
         var root = await JsonAsync("/props", cancellation);
         if ((root.Text("role") == "router") != Router || root.Get("default_generation_settings").ValueKind == JsonValueKind.Undefined)
             throw new ProviderFailure(502, "llama-server does not match the selected single-model or router profile.");
@@ -167,7 +170,8 @@ internal sealed class LlamaAdapter(HttpClient http, ProviderEndpoint endpoint) :
         {
             WorkingDirectory = Path.GetDirectoryName(Endpoint.Executable)!,
             UseShellExecute = false,
-            CreateNoWindow = true
+            CreateNoWindow = true,
+            RedirectStandardError = true
         };
         foreach (var argument in new[] { "--host", uri.Host, "--port", uri.Port.ToString(),
                      "--model", Endpoint.ModelFile!, "--alias", model.NativeId, "--parallel", "1",
@@ -183,7 +187,14 @@ internal sealed class LlamaAdapter(HttpClient http, ProviderEndpoint endpoint) :
         if (Endpoint.ProtectedToken is { } protectedToken)
             start.Environment["LLAMA_ARG_API_KEY"] = ProviderSecrets.Open(protectedToken);
         owned?.Dispose();
+        Volatile.Write(ref allocationFailure, 0);
         owned = Process.Start(start) ?? throw new ProviderFailure(502, "The authorized llama-server could not start.");
+        owned.ErrorDataReceived += (_, item) =>
+        {
+            if (item.Data is { } line && IsAllocationFailure(line))
+                Volatile.Write(ref allocationFailure, 1);
+        };
+        owned.BeginErrorReadLine();
     }
 
     public override async Task UnloadAsync(ProviderModel model, CancellationToken cancellation)

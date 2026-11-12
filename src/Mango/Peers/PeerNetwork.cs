@@ -91,6 +91,8 @@ internal sealed partial class PeerNetwork(string directory, int port, ProviderCa
         }
         Volatile.Write(ref snapshot, new(disk, token));
         providers.Changed += QueueCatalog;
+        if (providers.Resources is { } protection)
+            protection.Changed += QueueCatalog;
         settings.Changed += QueueCatalog;
     }
 
@@ -279,7 +281,8 @@ internal sealed partial class PeerNetwork(string directory, int port, ProviderCa
     private async Task PublishCatalogAsync(CancellationToken cancellation)
     {
         var view = providers.View;
-        var role = settings.Value.Role;
+        var protection = providers.Resources;
+        var role = protection is { ServingAllowed: false } ? LocalRole.Leech : settings.Value.Role;
         var (before, after) = await ChangeAsync(current =>
         {
             if (current.Self is not { } self || DeviceChanged(current))
@@ -289,9 +292,11 @@ internal sealed partial class PeerNetwork(string directory, int port, ProviderCa
                     model.Id, DisplayName(model.Model.DisplayName), model.Model.Variant, model.Version,
                     model.Model.Inputs, model.Model.Outputs, model.Model.Operations, model.Context, model.ContextSource,
                     model.Online, model.Instance is not null, model.Instance?.Fingerprint, model.Instance?.Slots,
-                    model.EmbeddingDimensions, model.EmbeddingSpace)).ToArray();
+                    model.EmbeddingDimensions, model.EmbeddingSpace,
+                    protection?.IsAvailable(model, view.Endpoints.First(endpoint => endpoint.Id == model.EndpointId)))).ToArray();
             var existing = current.Records.Catalogs.FirstOrDefault(catalog => catalog.Node == self.Id);
-            var catalog = new NodeCatalog(self.Id, Next(current, self.Id), self.Name, role, observations);
+            var catalog = new NodeCatalog(self.Id, Next(current, self.Id), self.Name, role, observations,
+                protection?.Status.State);
             var changed = existing is null || !JsonSerializer.SerializeToUtf8Bytes(catalog with { Revision = existing.Revision }, Json)
                 .AsSpan().SequenceEqual(JsonSerializer.SerializeToUtf8Bytes(existing, Json));
             var existingModels = current.Records.Models.Select(model => model.Id).ToHashSet(StringComparer.Ordinal);
@@ -343,6 +348,8 @@ internal sealed partial class PeerNetwork(string directory, int port, ProviderCa
     {
         stopping.Cancel();
         providers.Changed -= QueueCatalog;
+        if (providers.Resources is { } protection)
+            protection.Changed -= QueueCatalog;
         settings.Changed -= QueueCatalog;
         await StopListenerAsync();
         http.Dispose();
