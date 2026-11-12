@@ -16,7 +16,8 @@ internal sealed record AttemptReply(AttemptState State, int Status = 503, string
 internal sealed record AlternateProbe(Guid? Key, InferenceShape Shape);
 
 internal sealed record AttemptTicket(Guid Request, Guid Attempt, Guid? Key, string Deployment,
-    DateTimeOffset Arrived, DateTimeOffset QueueUntil, string? Session, string ServingEpoch, InferenceSource? Source = null);
+    DateTimeOffset Arrived, DateTimeOffset QueueUntil, string? Session, string ServingEpoch, InferenceSource? Source = null,
+    Revision? LogGeneration = null);
 
 internal sealed record PlacementChoice(Guid Node, string Deployment, string? Epoch, bool Loaded, int Slots,
     double? PromptMilliseconds, double? CacheSavingsMilliseconds, int Scarcity, string ServingEpoch, bool VerifiedFit);

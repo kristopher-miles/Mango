@@ -118,6 +118,7 @@ internal sealed class PublicIngress(string directory, PeerNetwork peers) : IAsyn
     {
         var builder = WebApplication.CreateSlimBuilder(new WebApplicationOptions { Args = [], ContentRootPath = AppContext.BaseDirectory });
         builder.Configuration.Sources.Clear();
+        builder.Logging.ClearProviders();
         builder.WebHost.ConfigureKestrel(options =>
         {
             options.AddServerHeader = false;

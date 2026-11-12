@@ -377,7 +377,21 @@ internal sealed class ServingQueue : IAsyncDisposable
                 _ = preparation.ContinueWith(_ => Wake(), TaskScheduler.Default);
             }
         }
-        return blocked.Where(entry => entry.Work is not null).Min(entry => (DateTimeOffset?)entry.Work!.Ticket.QueueUntil);
+        var next = blocked.Where(entry => entry.Work is not null).Min(entry => (DateTimeOffset?)entry.Work!.Ticket.QueueUntil);
+        lock (sync)
+        {
+            var cutoff = clock.GetUtcNow().AddMinutes(-5);
+            var expired = false;
+            while (recentActivity.TryPeek(out var item) && item.Finished <= cutoff)
+            {
+                recentActivity.Dequeue();
+                expired = true;
+            }
+            if (expired)
+                ActivityChanged?.Invoke();
+            var expiry = recentActivity.TryPeek(out var oldest) ? oldest.Finished?.AddMinutes(5) : null;
+            return expiry.HasValue && (!next.HasValue || expiry < next) ? expiry : next;
+        }
     }
 
     private IEnumerable<Work> Higher(Work work, ServingPlacement placement, IEnumerable<Entry> contenders) => contenders

@@ -10,6 +10,7 @@
   <script src="/network.js" defer></script>
   <script src="/dashboard.js" defer></script>
   <script src="/resources.js" defer></script>
+  <script src="/logs.js" defer></script>
 </head>
 <body>
   <main>
@@ -25,6 +26,7 @@
         <a href="#providers">Providers</a>
         <a href="#live-requests">Live requests</a>
         <a href="#public-inference">Public inference</a>
+        <a href="#logging">Logs</a>
         <a href="#settings">Contribution</a>
       </nav>
       <section class="card" aria-labelledby="host-title">
@@ -380,6 +382,71 @@
               <button type="submit">Save local limits</button>
               <button id="resource-retry" type="button" class="secondary">Retry benchmark</button>
             </div>
+          </fieldset>
+        </form>
+      </section>
+
+      <section id="logging" class="card" aria-labelledby="logs-title">
+        <h2 id="logs-title">Logs and retention</h2>
+        <p id="logs-feedback" class="action-status" role="status"></p>
+        <form id="logs-query">
+          <fieldset>
+            <legend>View a day</legend>
+            <div class="inputs">
+              <label>Day<input name="day" type="date"></label>
+              <label>Key name<input name="key" type="text" maxlength="120"></label>
+              <label>Source address<input name="source" type="text" maxlength="64"></label>
+            </div>
+            <div class="actions">
+              <button type="submit">View available logs</button>
+              <button id="logs-collect" type="button" class="secondary">Collect from network</button>
+              <button id="logs-export" type="button" class="secondary">Download day</button>
+            </div>
+          </fieldset>
+        </form>
+        <p id="logs-coverage-note" class="muted"></p>
+        <ul id="logs-coverage" class="activity-list"></ul>
+        <p id="logs-storage" class="muted"></p>
+        <div class="inputs">
+          <div><h3>Usage by key name</h3><ul id="logs-keys" class="activity-list"></ul></div>
+          <div><h3>Usage by client address</h3><ul id="logs-sources" class="activity-list"></ul></div>
+        </div>
+        <p id="logs-count"></p>
+        <div class="log-table" tabindex="0" role="region" aria-label="Request and operation details">
+          <table>
+            <thead><tr><th scope="col">Time</th><th scope="col">Work</th><th scope="col">Destination and outcome</th><th scope="col">Timing</th></tr></thead>
+            <tbody id="logs-entries"></tbody>
+          </table>
+        </div>
+        <form id="logs-settings">
+          <fieldset>
+            <legend>Retention policy</legend>
+            <p id="logs-policy-help" class="muted"></p>
+            <div class="inputs">
+              <label>Request logging
+                <select name="mode">
+                  <option value="off">Off</option>
+                  <option value="sparse">Sparse · metadata</option>
+                  <option value="verbose">Verbose · metadata and request bodies</option>
+                  <option value="everything">Everything · request and response bodies</option>
+                </select>
+              </label>
+              <label>IANA timezone<input name="timeZone" type="text" maxlength="128" placeholder="America/Los_Angeles" required></label>
+              <label>Raw retention (days)<input name="rawDays" type="number" min="1" max="365" required></label>
+              <label>Aggregate retention (days)<input name="aggregateDays" type="number" min="1" max="365" required></label>
+              <label>Storage cap per node (MiB)<input name="capMiB" type="number" min="1" max="16384" required></label>
+            </div>
+            <label class="checkbox"><input name="operational" type="checkbox"> Retain operational events</label>
+            <p class="muted">Saved payloads can contain private model content.</p>
+            <button type="submit">Save retention policy</button>
+          </fieldset>
+        </form>
+        <form id="logs-clear">
+          <fieldset>
+            <legend>Clear retained logs</legend>
+            <p id="logs-clear-status" class="muted"></p>
+            <label class="checkbox"><input name="confirm" type="checkbox" required> Clear Mango’s retained records and payloads</label>
+            <button type="submit" class="secondary">Clear logs</button>
           </fieldset>
         </form>
       </section>

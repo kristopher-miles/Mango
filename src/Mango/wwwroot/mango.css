@@ -31,7 +31,7 @@ fieldset { min-inline-size: 0; padding: 1rem 0 0; margin: 1.4rem 0; border: 0; b
 legend { font-weight: 700; padding: 0 .65rem 0 0; }
 label { display: block; font-weight: 600; }
 input, select, button { font: inherit; }
-input:is([type="number"], [type="text"], [type="url"], [type="password"], [type="datetime-local"]), select, textarea { width: 100%; padding: .5rem .7rem; border: 1px solid #818a7c; border-radius: .35rem; color: inherit; background: #fff; margin: .25rem 0 0; }
+input:is([type="number"], [type="text"], [type="url"], [type="password"], [type="datetime-local"], [type="date"]), select, textarea { width: 100%; padding: .5rem .7rem; border: 1px solid #818a7c; border-radius: .35rem; color: inherit; background: #fff; margin: .25rem 0 0; }
 input:is([type="radio"], [type="checkbox"]) { width: 1.05rem; height: 1.05rem; accent-color: var(--accent); margin: 0; }
 label:is(.checkbox, :has(input[type="radio"])) { display: flex; align-items: center; gap: .55rem; min-height: 2.25rem; }
 .role-options { display: flex; flex-wrap: wrap; column-gap: 1.5rem; }
@@ -60,6 +60,9 @@ button.secondary { background: #ecf1e8; color: #294232; }
 .activity-list li { margin-block: .65rem; }
 .activity-list p { margin-block: .18rem; }
 .request-attempts { padding-inline-start: 1.2rem; color: var(--muted); }
+.log-table { max-inline-size: 100%; overflow-x: auto; margin-top: .65rem; }
+.log-table table { width: 100%; min-width: 34rem; border-collapse: collapse; }
+.log-table th, .log-table td { padding: .45rem; text-align: start; vertical-align: top; border-bottom: 1px solid var(--border); overflow-wrap: anywhere; }
 
 @media (max-width: 36rem) {
   main { margin-top: 1.25rem; }

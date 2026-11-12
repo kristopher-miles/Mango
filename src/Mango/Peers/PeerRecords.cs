@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text.Json;
 using Mango.Host;
+using Mango.Logging;
 using Mango.Providers;
 using Mango.Resources;
 
@@ -8,7 +9,7 @@ namespace Mango.Peers;
 
 internal enum KeyPriority { Low, Normal, High }
 internal enum InferenceScope { Chat, Embeddings, Images, Transcription, Speech, SystemOne, ImageInput, AudioInput }
-internal enum RecordKind { Authority, Node, Key, Model, Catalog, RetiredNode, QueuePolicy, Provider }
+internal enum RecordKind { Authority, Node, Key, Model, Catalog, RetiredNode, QueuePolicy, Provider, LogPolicy, LogDeletion }
 internal enum IntentState { Applied, Pending, LocalAction, Rejected }
 
 internal readonly record struct Revision(long Time, Guid Writer) : IComparable<Revision>
@@ -53,11 +54,12 @@ internal sealed record ObservedWorkload(Workload Limit, double? PromptMillisecon
 internal sealed record NodeCatalog(Guid Node, Revision Revision, string Name, LocalRole Role, ObservedDeployment[] Models,
     ContributionState? ResourceState = null, string? SchedulingEpoch = null, ObservedProvider[]? Providers = null,
     string? ContributionReason = null, LocalRole? PreferredRole = null, BenchmarkPolicy? LocalBenchmarkPolicy = null,
-    DateTimeOffset? ObservedAt = null, string? AppVersion = null);
+    DateTimeOffset? ObservedAt = null, string? AppVersion = null, Revision? AppliedLogGeneration = null);
 internal sealed record RetiredNode(string Verifier, Guid Node, Revision Revision);
 internal sealed record LocalMembership(Guid Node, string Device, string? ProtectedSecret,
     Guid? JoiningNetwork = null, string? Issuer = null);
-internal sealed record PeerDisk(NetworkRecords Records, LocalMembership? Local, long LastObserved = 0)
+internal sealed record PeerDisk(NetworkRecords Records, LocalMembership? Local, long LastObserved = 0,
+    LogPolicy? LocalLogPolicy = null, Revision? LocalLogDeletion = null)
 {
     public static readonly PeerDisk Empty = new(NetworkRecords.Empty, null);
 }
@@ -73,7 +75,7 @@ internal readonly record struct RecordVersion(RecordKind Kind, string Id, Revisi
 
 internal sealed record NetworkRecords(NetworkIdentity? Identity, AuthorityRecord? Authority, PeerNode[] Nodes,
     InferenceKey[] Keys, SharedModel[] Models, NodeCatalog[] Catalogs, RetiredNode[] Retired, QueuePolicy? Queue = null,
-    SharedProvider[]? Providers = null)
+    SharedProvider[]? Providers = null, LogPolicy? Logs = null, Revision? LogDeletion = null)
 {
     public static readonly NetworkRecords Empty = new(null, null, [], [], [], [], []);
 
@@ -83,6 +85,8 @@ internal sealed record NetworkRecords(NetworkIdentity? Identity, AuthorityRecord
         .Concat(Catalogs.Select(Version)).Concat(Retired.Select(Version))
         .Concat(Queue is { } queue ? [Version(queue)] : [])
         .Concat((Providers ?? []).Select(Version))
+        .Concat(Logs is { } logs ? [new(RecordKind.LogPolicy, "", logs.Revision)] : [])
+        .Concat(LogDeletion is { } clear ? [new(RecordKind.LogDeletion, "", clear)] : [])
         .OrderBy(record => record.Kind).ThenBy(record => record.Id, StringComparer.Ordinal).ToArray();
 
     public NetworkRecords Delta(RecordVersion[] known)
@@ -95,7 +99,9 @@ internal sealed record NetworkRecords(NetworkIdentity? Identity, AuthorityRecord
             Keys.Where(key => Newer(Version(key))).ToArray(), Models.Where(model => Newer(Version(model))).ToArray(),
             Catalogs.Where(catalog => Newer(Version(catalog))).ToArray(), Retired.Where(node => Newer(Version(node))).ToArray(),
             Queue is { } queue && Newer(Version(queue)) ? queue : null,
-            Providers?.Where(provider => Newer(Version(provider))).ToArray());
+            Providers?.Where(provider => Newer(Version(provider))).ToArray(),
+            Logs is { } logs && Newer(new(RecordKind.LogPolicy, "", logs.Revision)) ? logs : null,
+            LogDeletion is { } clear && Newer(new(RecordKind.LogDeletion, "", clear)) ? clear : null);
     }
 
     public NetworkRecords Merge(NetworkRecords incoming)
@@ -112,9 +118,13 @@ internal sealed record NetworkRecords(NetworkIdentity? Identity, AuthorityRecord
         var queue = incoming.Queue is { } policy &&
             (Queue is null || policy.Revision.CompareTo(Queue.Revision) > 0) ? policy : Queue;
         var providers = incoming.Providers is { Length: > 0 } desired ? Merge(Providers ?? [], desired, Version) : Providers;
+        var logs = incoming.Logs is { } logPolicy &&
+            (Logs is null || logPolicy.Revision.CompareTo(Logs.Revision) > 0) ? logPolicy : Logs;
+        var clear = incoming.LogDeletion is { } deletion &&
+            (LogDeletion is null || deletion.CompareTo(LogDeletion.Value) > 0) ? deletion : LogDeletion;
         return authority == Authority && nodes == Nodes && keys == Keys && models == Models && catalogs == Catalogs &&
-            retired == Retired && queue == Queue && providers == Providers
-            ? this : new(Identity, authority, nodes, keys, models, catalogs, retired, queue, providers);
+            retired == Retired && queue == Queue && providers == Providers && logs == Logs && clear == LogDeletion
+            ? this : new(Identity, authority, nodes, keys, models, catalogs, retired, queue, providers, logs, clear);
     }
 
     private static T[] Merge<T>(T[] current, T[] incoming, Func<T, RecordVersion> version)
@@ -144,7 +154,8 @@ internal sealed record NetworkRecords(NetworkIdentity? Identity, AuthorityRecord
         new(RecordKind.Provider, $"{provider.Owner:N}/{provider.Id:N}", provider.Revision);
 
     public bool IsEmptyDelta => Authority is null && Nodes.Length == 0 && Keys.Length == 0 && Models.Length == 0 &&
-        Catalogs.Length == 0 && Retired.Length == 0 && Queue is null && Providers is null or { Length: 0 };
+        Catalogs.Length == 0 && Retired.Length == 0 && Queue is null && (Providers is null or { Length: 0 }) &&
+        Logs is null && LogDeletion is null;
 }
 
 internal sealed class PeerSnapshot
@@ -191,7 +202,7 @@ internal static class PeerLimits
     public const int ModelsPerNode = 256;
     public const int Retired = 512;
     public const int Providers = 512;
-    public const int Versions = Nodes * 2 + Keys + Models + Retired + Providers + 2;
+    public const int Versions = Nodes * 2 + Keys + Models + Retired + Providers + 4;
     public const int ControlBytes = 8 * 1024 * 1024;
     public const int DiscoveryCandidates = 128;
     public const int UnknownPeers = 3;
@@ -257,6 +268,8 @@ internal static class PeerValidation
         if (records.Identity is null)
             return records.IsEmptyDelta;
         return Valid(records.Identity) &&
+            (records.Logs is null || records.Logs.Valid && Valid(records.Logs.Revision)) &&
+            (records.LogDeletion is null || Valid(records.LogDeletion.Value)) &&
             (records.Queue is not { } queue || Valid(queue.Revision) && queue.WaitSeconds is > 0 and <= QueuePolicy.MaxWaitSeconds) &&
             (records.Authority is not { } authority ||
              Valid(authority.Revision) && authority.Salt is { Length: 32 } && authority.Salt.All(char.IsAsciiHexDigit) &&
@@ -275,6 +288,7 @@ internal static class PeerValidation
                 (catalog.PreferredRole is null || Enum.IsDefined(catalog.PreferredRole.Value)) &&
                 (catalog.LocalBenchmarkPolicy is null || Enum.IsDefined(catalog.LocalBenchmarkPolicy.Value)) &&
                 (catalog.AppVersion is null || Text(catalog.AppVersion, 64)) &&
+                (catalog.AppliedLogGeneration is null || Valid(catalog.AppliedLogGeneration.Value)) &&
                 (catalog.ContributionReason is null || Text(catalog.ContributionReason, 300)) &&
                 (catalog.Providers is null || catalog.Providers.Length <= PeerLimits.Providers &&
                     catalog.Providers.All(provider => provider is not null && provider.Id != Guid.Empty &&
@@ -301,6 +315,8 @@ internal static class PeerValidation
     }
 
     public static string? Disk(PeerDisk disk) => Valid(disk.Records) && disk.LastObserved is >= 0 and < 253402300799999 &&
+        (disk.LocalLogPolicy is null || disk.LocalLogPolicy.Valid) &&
+        (disk.LocalLogDeletion is null || Valid(disk.LocalLogDeletion.Value)) &&
         (disk.Local is not { } local || local.Node != Guid.Empty && Text(local.Device, 128) &&
             (local.ProtectedSecret is null || local.ProtectedSecret.Length is > 0 and <= 4096) &&
             (local.JoiningNetwork is null && local.Issuer is null ||

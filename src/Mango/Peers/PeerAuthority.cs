@@ -57,7 +57,8 @@ internal sealed partial class PeerNetwork
             var authority = PeerCredentials.Password(input.Password, PeerCredentials.Digest(recovery), revision);
             var node = new PeerNode(id, status.Device!, name, Tailnet.Origin(bound[0], port), revision, revision,
                 PeerCredentials.Digest(secret));
-            return new(NetworkRecords.Empty with { Identity = identity, Authority = authority, Nodes = [node] },
+            return new(NetworkRecords.Empty with { Identity = identity, Authority = authority, Nodes = [node],
+                Logs = (current.Disk.LocalLogPolicy ?? Mango.Logging.LogPolicy.Default) with { Revision = revision } },
                 ProtectMembership(id, status.Device!, secret));
         }, cancellation);
         QueueCatalog();
@@ -283,7 +284,7 @@ internal sealed partial class PeerNetwork
                 .OrderByDescending(node => node.Revision).Take(PeerLimits.Retired).ToArray();
             return new(current.Records with
             {
-                Identity = identity, Authority = authority, Keys = [],
+                Identity = identity, Authority = authority, Keys = [], LogDeletion = revision,
                 Nodes = [self with { Verifier = PeerCredentials.Digest(token), Revision = revision }],
                 Retired = retired,
                 Catalogs = current.Records.Catalogs.Select(catalog => catalog with
@@ -297,6 +298,7 @@ internal sealed partial class PeerNetwork
         var identity = after.Records.Identity!;
         needsPeerConfirmation = false;
         ready = true;
+        await Logs.PrepareAsync(stopping.Token);
         var delivery = await PushAsync(before, before.Others, "notice", new PeerNotice(identity.Id, identity.Generation), stopping.Token);
         QueueCatalog();
         return new { Identity = identity, RecoveryRecord = PeerCredentials.Recovery(identity.Id, recovery), Delivery = delivery };
@@ -304,7 +306,7 @@ internal sealed partial class PeerNetwork
 
     public async Task ApplyNoticeAsync(PeerNotice notice, CancellationToken cancellation)
     {
-        await ChangeAsync(current =>
+        var (before, after) = await ChangeAsync(current =>
         {
             if (current.Self is not { } self || current.Records.Identity is not { } identity ||
                 notice.Network != identity.Id || !PeerValidation.Valid(notice.Generation))
@@ -327,6 +329,8 @@ internal sealed partial class PeerNetwork
             } : current.Records with { Nodes = current.Records.Nodes.Select(node => node.Id == self.Id ? node with { Removed = true } : node).ToArray() };
             return new(records, current.Local! with { ProtectedSecret = null });
         }, cancellation);
+        if (LogConfigurationFor(before).Epoch != LogConfigurationFor(after).Epoch)
+            await Logs.PrepareAsync(stopping.Token);
     }
 
     public async Task<PushResult> RemoveAsync(HttpRequest request, Guid id, CancellationToken cancellation)

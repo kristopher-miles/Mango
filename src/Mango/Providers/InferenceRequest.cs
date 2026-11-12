@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Buffers.Binary;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text;
@@ -6,6 +7,7 @@ using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Mango.Peers;
+using Mango.Logging;
 using Mango.Resources;
 using Microsoft.AspNetCore.Http.Features;
 
@@ -13,7 +15,9 @@ namespace Mango.Providers;
 
 internal sealed record ProviderExecution(string DeploymentId, string InstanceFingerprint, InferenceOperation Operation,
     long AliasRevision, int? PromptTokens, string? PromptCountSource, TimeSpan ProviderHeaders,
-    TimeSpan? FirstOutput, TimeSpan Elapsed);
+    TimeSpan? FirstOutput, TimeSpan Elapsed, TimeSpan? Preparation = null, TimeSpan? FirstToken = null,
+    int? ContextTokens = null, int? OutputTokens = null, double? TokensPerSecond = null, long? OutputBytes = null,
+    double? AudioSeconds = null);
 
 internal sealed record InferenceShape(string Alias, InferenceOperation Operation, string[] Inputs, bool Tools,
     bool Structured, long PromptUnits, int OutputUnits, int MediaItems, int Items, long WorkUnits,
@@ -296,12 +300,15 @@ internal sealed class InferenceRequest(InferenceOperation operation, string alia
         target.ContentType = response.Content.Headers.ContentType?.ToString() ?? "application/octet-stream";
         target.Headers.CacheControl = "no-store";
         TimeSpan? firstOutput = null;
+        var statistics = context.Items.ContainsKey(typeof(LogConfiguration)) ? new OutputMetrics(operation, send,
+            response.Content.Headers.ContentType?.MediaType) : null;
         if (embeddingEncoding is not null)
         {
             var bytes = await ProviderAdapter.ReadBoundedAsync(response.Content, ProviderLimits.MaxRequestBytes, cancellation);
             Settled = true;
             CheckEmbeddingResult(bytes, deployment.EmbeddingDimensions!.Value, embeddingEncoding, embeddingCount);
             firstOutput = Stopwatch.GetElapsedTime(send);
+            statistics?.Add(bytes);
             for (var offset = 0; offset < bytes.Length; offset += 16 * 1024)
                 await WriteOutputAsync(context, bytes.AsMemory(offset, Math.Min(16 * 1024, bytes.Length - offset)), cancellation);
         }
@@ -310,11 +317,12 @@ internal sealed class InferenceRequest(InferenceOperation operation, string alia
             await using var stream = await response.Content.ReadAsStreamAsync(cancellation);
             var buffer = new byte[16 * 1024];
             var events = operation == InferenceOperation.Chat &&
-                response.Content.Headers.ContentType?.MediaType == "text/event-stream" ? new InferenceEvents() : null;
+                response.Content.Headers.ContentType?.MediaType == "text/event-stream" ? new InferenceEvents(statistics) : null;
             int count;
             while ((count = await stream.ReadAsync(buffer, cancellation)) != 0)
             {
                 firstOutput ??= Stopwatch.GetElapsedTime(send);
+                statistics?.Add(buffer.AsSpan(0, count));
                 events?.Read(buffer.AsSpan(0, count));
                 await WriteOutputAsync(context, buffer.AsMemory(0, count), cancellation);
             }
@@ -323,8 +331,24 @@ internal sealed class InferenceRequest(InferenceOperation operation, string alia
             if (!Settled)
                 throw new ProviderFailure(502, "The provider stream ended before reporting completion.");
         }
+        var providerElapsed = Stopwatch.GetElapsedTime(send);
+        statistics?.Complete(providerElapsed);
+        double? inputAudio = null;
+        if (statistics is not null && operation == InferenceOperation.Transcription)
+        {
+            try
+            {
+                using var audio = form!.Files[0].OpenReadStream();
+                var header = new byte[4096];
+                var read = await audio.ReadAtLeastAsync(header, 44, false, cancellation);
+                inputAudio = WavSeconds(header.AsSpan(0, read), form.Files[0].Length);
+            }
+            catch (Exception error) when (error is IOException or OperationCanceledException) { }
+        }
         return new(deployment.Id, instance.Fingerprint, operation, deployment.Options.Revision,
-            promptTokens, promptCountSource, headers, firstOutput, Stopwatch.GetElapsedTime(started));
+            statistics?.PromptTokens ?? promptTokens, statistics?.PromptTokens is not null ? "provider usage" : promptCountSource,
+            headers, firstOutput, Stopwatch.GetElapsedTime(started), Stopwatch.GetElapsedTime(started, send), statistics?.FirstToken,
+            deployment.Context, statistics?.OutputTokens, statistics?.Rate, statistics?.Bytes, inputAudio ?? statistics?.AudioSeconds);
     }
 
     internal static async Task WriteOutputAsync(HttpContext context, ReadOnlyMemory<byte> bytes, CancellationToken cancellation)
@@ -343,9 +367,9 @@ internal sealed class InferenceRequest(InferenceOperation operation, string alia
         }
     }
 
-    private sealed class InferenceEvents
+    private sealed class InferenceEvents(OutputMetrics? statistics)
     {
-        private readonly byte[] line = new byte[4096];
+        private readonly byte[] line = new byte[statistics is null ? 4096 : 16 * 1024];
         private int length;
         public bool Completed { get; private set; }
 
@@ -372,17 +396,93 @@ internal sealed class InferenceRequest(InferenceOperation operation, string alia
                 data = data[..^1];
             if (data.SequenceEqual("[DONE]"u8))
                 Completed = true;
-            if (data.IndexOf("\"error\""u8) < 0)
+            var hasError = data.IndexOf("\"error\""u8) >= 0;
+            if (!hasError && (statistics is null || statistics.FirstToken is not null &&
+                data.IndexOf("\"usage\""u8) < 0 && data.IndexOf("\"timings\""u8) < 0))
                 return;
             try
             {
                 using var document = JsonDocument.Parse(line.AsMemory(start, data.Length));
+                statistics?.Observe(document.RootElement, streaming: true);
                 var error = document.RootElement.Get("error");
                 if (error.ValueKind != JsonValueKind.Undefined && ProviderAdapter.IsAllocationFailure(error.GetRawText()))
                     throw new ProviderFailure(503, "The provider could not allocate model memory.", allocationFailure: true);
             }
             catch (JsonException) { }
         }
+    }
+
+    private sealed class OutputMetrics(InferenceOperation operation, long sent, string? mediaType)
+    {
+        private readonly byte[]? sample = mediaType == "application/json" &&
+            operation is InferenceOperation.Chat or InferenceOperation.Embeddings or InferenceOperation.SystemOne ? new byte[64 * 1024] :
+            operation == InferenceOperation.Speech ? new byte[4096] : null;
+        private int length;
+        public long Bytes { get; private set; }
+        public int? PromptTokens { get; private set; }
+        public int? OutputTokens { get; private set; }
+        public TimeSpan? FirstToken { get; private set; }
+        public double? Rate { get; private set; }
+        public double? AudioSeconds { get; private set; }
+
+        public void Add(ReadOnlySpan<byte> data)
+        {
+            Bytes += data.Length;
+            if (sample is null || length == sample.Length)
+                return;
+            var copied = Math.Min(data.Length, sample.Length - length);
+            data[..copied].CopyTo(sample.AsSpan(length));
+            length += copied;
+        }
+
+        public void Observe(JsonElement body, bool streaming)
+        {
+            (PromptTokens, OutputTokens, _, Rate, _) = BenchmarkProtocol.ReadMetrics(body, (PromptTokens, OutputTokens, null, Rate, null));
+            if (streaming && FirstToken is null && body.Get("choices").Items().Any(choice =>
+                choice.Get("delta").Text("content") is { Length: > 0 } ||
+                choice.Get("delta").Text("reasoning_content") is { Length: > 0 } ||
+                choice.Get("delta").Get("tool_calls").Items().Any()))
+                FirstToken = Stopwatch.GetElapsedTime(sent);
+        }
+
+        public void Complete(TimeSpan elapsed)
+        {
+            if (sample is not null && mediaType == "application/json" && length == Bytes)
+            {
+                try
+                {
+                    using var document = JsonDocument.Parse(sample.AsMemory(0, length));
+                    Observe(document.RootElement, streaming: false);
+                }
+                catch (JsonException) { }
+            }
+            else if (sample is not null && operation == InferenceOperation.Speech)
+                AudioSeconds = WavSeconds(sample.AsSpan(0, length), Bytes);
+            if (Rate is null && OutputTokens is > 1 && FirstToken is { } first && elapsed > first)
+                Rate = (OutputTokens - 1) / (elapsed - first).TotalSeconds;
+        }
+    }
+
+    private static double? WavSeconds(ReadOnlySpan<byte> header, long length)
+    {
+        if (header.Length < 12 || !header[..4].SequenceEqual("RIFF"u8) || !header[8..12].SequenceEqual("WAVE"u8))
+            return null;
+        uint rate = 0;
+        for (var position = 12; position + 8 <= header.Length;)
+        {
+            var id = header.Slice(position, 4);
+            var size = BinaryPrimitives.ReadUInt32LittleEndian(header.Slice(position + 4, 4));
+            var start = position + 8;
+            if (id.SequenceEqual("fmt "u8) && size >= 16 && start + 16 <= header.Length)
+                rate = BinaryPrimitives.ReadUInt32LittleEndian(header.Slice(start + 8, 4));
+            if (id.SequenceEqual("data"u8))
+                return rate == 0 || start + (long)size > length ? null : (double)size / rate;
+            var next = start + (long)size + (size & 1);
+            if (next > header.Length)
+                break;
+            position = (int)next;
+        }
+        return null;
     }
 
     private static InferenceShape ChatShape(JsonObject payload, string alias)

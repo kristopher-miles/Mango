@@ -5,6 +5,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Mango.Host;
+using Mango.Logging;
 using Mango.Providers;
 
 namespace Mango.Peers;
@@ -104,8 +105,13 @@ internal sealed partial class PeerNetwork(string directory, int port, ProviderCa
             catch (Exception error) when (error is CryptographicException or FormatException) { }
         }
         Volatile.Write(ref snapshot, new(disk, token));
+        await Logs.InitializeAsync(LogConfigurationFor(Snapshot));
+        recentRoutingExpiry = clock.CreateTimer(_ => ExpireRoutingMemory(), null, Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
+        Logs.Applied += QueueCatalog;
         providers.Changed += QueueCatalog;
         providers.AdmissionChanged += ProviderSettled;
+        providers.LifecycleFailed += LogLifecycleFailure;
+        providers.BeginBenchmarkLog = BeginBenchmarkLog;
         serving.ActivityChanged += SignalRequests;
         if (providers.Resources is { } protection)
             protection.Changed += ResourceStatusChanged;
@@ -116,6 +122,7 @@ internal sealed partial class PeerNetwork(string directory, int port, ProviderCa
     {
         using var registration = hostStopping.Register(stopping.Cancel);
         var cancellation = stopping.Token;
+        Task? logs = null;
         NetworkChange.NetworkAddressChanged += AddressChanged;
         try
         {
@@ -127,6 +134,7 @@ internal sealed partial class PeerNetwork(string directory, int port, ProviderCa
                 await ReconcileAsync(cancellation, gate: true);
             }
             QueueCatalog();
+            logs = RunLogDaysAsync(cancellation);
             var daily = NextDaily();
             while (!cancellation.IsCancellationRequested)
             {
@@ -149,6 +157,7 @@ internal sealed partial class PeerNetwork(string directory, int port, ProviderCa
                 }
                 catch (Exception error) when (error is IOException or UnauthorizedAccessException or PeerFailure)
                 {
+                    LogOperation("reconciliation", "Mango could not persist or reconcile the latest network change.");
                     listenerError = "Mango could not persist or reconcile the latest network change. Use Refresh to retry.";
                 }
             }
@@ -157,6 +166,8 @@ internal sealed partial class PeerNetwork(string directory, int port, ProviderCa
         finally
         {
             NetworkChange.NetworkAddressChanged -= AddressChanged;
+            if (logs is not null)
+                await logs;
         }
     }
 
@@ -176,6 +187,7 @@ internal sealed partial class PeerNetwork(string directory, int port, ProviderCa
 
     private void ResourceStatusChanged()
     {
+        ObserveResourceLog();
         QueueCatalog();
         SignalRequests();
     }
@@ -257,6 +269,7 @@ internal sealed partial class PeerNetwork(string directory, int port, ProviderCa
                 encrypted == before.Local?.ProtectedSecret ? before.Token : WindowsSecrets.Open(encrypted, credentialContext);
             await store.UpdateAsync(_ => disk, cancellation);
             var after = new PeerSnapshot(disk, token);
+            ConfigureLogs(before, after);
             Volatile.Write(ref snapshot, after);
             AuthorityChanged(before, after);
             if (before.Self?.Id != after.Self?.Id || before.Records.Models != after.Records.Models ||
@@ -337,7 +350,8 @@ internal sealed partial class PeerNetwork(string directory, int port, ProviderCa
             var catalog = new NodeCatalog(self.Id, Next(current, self.Id), self.Name, role, observations,
                 protection?.Status.State, schedulingEpoch, endpoints,
                 SafeDetail(protection?.Status.Reason, 300) ?? (role != preferences.Role ? "Waiting for local resource qualification." : null),
-                preferences.Role, preferences.BenchmarkPolicy, clock.GetUtcNow(), AppVersion);
+                preferences.Role, preferences.BenchmarkPolicy, clock.GetUtcNow(), AppVersion,
+                Logs.Available(LogConfigurationFor(current).Epoch) ? Logs.AppliedEpoch?.Generation : null);
             var changed = existing is null || !JsonSerializer.SerializeToUtf8Bytes(catalog with
                 { Revision = existing.Revision, ObservedAt = existing.ObservedAt }, Json)
                 .AsSpan().SequenceEqual(JsonSerializer.SerializeToUtf8Bytes(existing, Json));
@@ -371,14 +385,24 @@ internal sealed partial class PeerNetwork(string directory, int port, ProviderCa
     public async ValueTask DisposeAsync()
     {
         stopping.Cancel();
+        Logs.Applied -= QueueCatalog;
         providers.Changed -= QueueCatalog;
         providers.AdmissionChanged -= ProviderSettled;
+        providers.LifecycleFailed -= LogLifecycleFailure;
+        providers.BeginBenchmarkLog = null;
         serving.ActivityChanged -= SignalRequests;
         if (providers.Resources is { } protection)
             protection.Changed -= ResourceStatusChanged;
         settings.Changed -= QueueCatalog;
         await StopListenerAsync();
         await serving.DisposeAsync();
+        lock (routing)
+        {
+            recentRoutingExpiry?.Dispose();
+            recentRoutingExpiry = null;
+        }
+        await StopLogCollectionAsync();
+        await Logs.DisposeAsync();
         affinity.Dispose();
         inferenceHttp.Dispose();
         http.Dispose();

@@ -79,6 +79,8 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
         }
     }
     public ProviderExecution? LastExecution => Volatile.Read(ref lastExecution);
+    internal event Action<string, bool, int>? LifecycleFailed;
+    internal Func<string, Workload, string, Action<BenchmarkResult?>?>? BeginBenchmarkLog { get; set; }
     public ProviderLifecycle? LastLifecycle => Volatile.Read(ref lastLifecycle);
     public void ClearPrivateExecution() => Volatile.Write(ref lastExecution, null);
 
@@ -358,6 +360,8 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
         }
         catch (ProviderFailure error) when (error.Status is >= 500 or 409)
         {
+            if (invoked)
+                LifecycleFailed?.Invoke(id, load, error.Status);
             if (target is not null)
                 SignalRefresh(target.EndpointId);
             if (error.AllocationFailure && reservation is not null)
@@ -376,7 +380,22 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
             if (target is not null)
                 SignalRefresh(target.EndpointId);
             if (!cancellation.IsCancellationRequested && reservation?.Cancellation.IsCancellationRequested == true)
+            {
+                if (invoked)
+                    LifecycleFailed?.Invoke(id, load, 503);
                 throw new ProviderFailure(503, "Mango withdrew local resources during model loading.");
+            }
+            throw;
+        }
+        catch (ProviderFailure error) when (invoked)
+        {
+            LifecycleFailed?.Invoke(id, load, error.Status);
+            throw;
+        }
+        catch (Exception error) when (invoked && error is IOException or UnauthorizedAccessException or
+            System.ComponentModel.Win32Exception or System.Security.Cryptography.CryptographicException)
+        {
+            LifecycleFailed?.Invoke(id, load, 502);
             throw;
         }
         finally
@@ -577,17 +596,24 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellation, reservation.Cancellation);
         var submitted = false;
         var settled = false;
+        BenchmarkResult? result = null;
+        var log = BeginBenchmarkLog?.Invoke(id, workload, pass);
         try
         {
-            return await BenchmarkProtocol.RunAsync(model, adapter, workload, pass, () => submitted = true,
+            result = await BenchmarkProtocol.RunAsync(model, adapter, workload, pass, () => submitted = true,
                 () => settled = true, linked.Token);
+            return result;
         }
         catch (ProviderFailure error) when (error.AllocationFailure)
         {
             await resources!.AllocationFailedAsync(reservation);
             throw;
         }
-        finally { await FinishExecutionAsync(model, adapter, reservation, !submitted || settled); }
+        finally
+        {
+            log?.Invoke(result);
+            await FinishExecutionAsync(model, adapter, reservation, !submitted || settled);
+        }
     }
 
     private async Task<bool> FinishExecutionAsync(Deployment model, ProviderAdapter adapter, ResourceReservation? reservation,

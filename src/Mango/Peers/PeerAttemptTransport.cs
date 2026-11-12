@@ -57,13 +57,14 @@ internal sealed partial class PeerNetwork
     }
 
     private sealed record ForwardTicket(Guid Request, Guid Attempt, Guid? Key, string Deployment,
-        int AgeMilliseconds, int RemainingMilliseconds, string? Session, string ServingEpoch, InferenceSource? Source = null)
+        int AgeMilliseconds, int RemainingMilliseconds, string? Session, string ServingEpoch, InferenceSource? Source = null,
+        Revision? LogGeneration = null)
     {
         public bool Valid => Request != Guid.Empty && Attempt != Guid.Empty && Key != Guid.Empty &&
             Deployment is { Length: > 0 and <= 128 } && AgeMilliseconds >= 0 && RemainingMilliseconds > 0 &&
             (long)AgeMilliseconds + RemainingMilliseconds <= MaxQueueMilliseconds &&
             (Session is null || PeerCredentials.IsSecret(Session)) && Guid.TryParseExact(ServingEpoch, "N", out _) &&
-            Source is null or { Valid: true };
+            (Source is null or { Valid: true }) && (LogGeneration is null || PeerValidation.Valid(LogGeneration.Value));
     }
 
     public void MapAttemptRoutes(RouteGroupBuilder routes)
@@ -135,7 +136,8 @@ internal sealed partial class PeerNetwork
         using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(context.RequestAborted, stopping.Token, lease.Access.Cancelled);
         var allowed = Math.Clamp(QueueWaitSeconds * 1000 - forward.AgeMilliseconds, 0, forward.RemainingMilliseconds);
         var ticket = new AttemptTicket(forward.Request, forward.Attempt, forward.Key, forward.Deployment,
-            received.AddMilliseconds(-forward.AgeMilliseconds), received.AddMilliseconds(allowed), forward.Session, schedulingEpoch, forward.Source);
+            received.AddMilliseconds(-forward.AgeMilliseconds), received.AddMilliseconds(allowed), forward.Session, schedulingEpoch,
+            forward.Source, forward.LogGeneration);
         context.Response.OnStarting(() =>
         {
             if (context.Items[typeof(ServingQueue)] is string epoch)
@@ -193,7 +195,7 @@ internal sealed partial class PeerNetwork
         if (origin is null || remaining.TotalMilliseconds < 1)
             return new(AttemptState.Rejected, 503, "The selected peer cannot be reached within the queue deadline.", Unreachable: origin is null);
         var metadata = new ForwardTicket(ticket.Request, ticket.Attempt, ticket.Key, ticket.Deployment,
-            (int)elapsed.TotalMilliseconds, (int)remaining.TotalMilliseconds, ticket.Session, ticket.ServingEpoch, ticket.Source);
+            (int)elapsed.TotalMilliseconds, (int)remaining.TotalMilliseconds, ticket.Session, ticket.ServingEpoch, ticket.Source, ticket.LogGeneration);
         var body = new TrackedSubmission(payload.CreateBody());
         try
         {

@@ -135,7 +135,7 @@ internal static class BenchmarkProtocol
         }
     }
 
-    private static (int?, int?, double?, double?, int?) ReadMetrics(JsonElement body,
+    internal static (int?, int?, double?, double?, int?) ReadMetrics(JsonElement body,
         (int? Prompt, int? Output, double? Milliseconds, double? Rate, int? Cache) previous)
     {
         var usage = body.Get("usage");

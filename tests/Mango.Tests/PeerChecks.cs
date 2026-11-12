@@ -20,6 +20,7 @@ internal static partial class PeerChecks
     public static async Task RunAsync(string root)
     {
         TestMerge();
+        await TestLogStoreAsync(root);
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(8));
         var status = await Tailnet.ReadAsync(timeout.Token);
         if (status.LocalAddresses.FirstOrDefault() is not { } address)
@@ -34,10 +35,12 @@ internal static partial class PeerChecks
         {
             await TestTailnetAsync(root, status, address);
             await TestPhaseSixAsync(root, status, address);
+            await TestPhaseSevenAsync(root, status, address);
         }
         finally { Console.SetOut(output); }
         Console.WriteLine("Peer checks passed on the live Windows Tailscale interface with two Mango instances.");
         Console.WriteLine("Shared host intent, local dashboard and TLS public ingress checks passed.");
+        Console.WriteLine("Log capture, partial collection, retention and offline deletion checks passed.");
     }
 
     private static async Task TestTailnetAsync(string root, TailnetStatus status, IPAddress address)
@@ -405,6 +408,22 @@ internal static partial class PeerChecks
         using (var response = await http.SendAsync(request))
             Check(response.StatusCode == HttpStatusCode.BadGateway && fallbackCalls == 1,
                 "unknown provider outcome returns failure without running duplicate inference");
+
+        await Local(http, serving, "logs/settings", LogSettings(Mango.Logging.RequestLogMode.Sparse), firstAdmin);
+        var ingressId = ingress.Network.Snapshot.Self!.Id;
+        var retried = (await WaitForLogEntries(ingress.Network.Logs, ingressId, entries => entries.Any(item =>
+            item.Kind == Mango.Logging.LogKind.Request && item.Routes is { Length: 2 })))
+            .Single(item => item.Kind == Mango.Logging.LogKind.Request && item.Routes is { Length: 2 });
+        await CollectLogDay(http, serving);
+        await CollectLogDay(http, serving);
+        var retryExport = await ReadLogZip(http, serving);
+        var related = System.Text.Encoding.UTF8.GetString(retryExport.Entries["records.ndjson"]).Split('\n',
+                StringSplitOptions.RemoveEmptyEntries)
+            .Select(line => JsonSerializer.Deserialize<Mango.Logging.LogEntry>(line, Json))
+            .Where(item => item?.Request == retried.Request).ToArray();
+        Check(related.Count(item => item?.Kind == Mango.Logging.LogKind.Request) == 1 &&
+            related.Count(item => item?.Kind == Mango.Logging.LogKind.Attempt) == 2,
+            "a live reroute counts one original request and two attempts after repeated collection");
 
         await fallback.StopAsync();
 

@@ -291,6 +291,8 @@ internal sealed partial class PeerNetwork
             if (synchronized > 0)
                 needsPeerConfirmation = false;
             Volatile.Write(ref lastReconciliation, new(clock.GetUtcNow(), others.Length > 0 && synchronized == 0 && incomplete == 0));
+            if (current.Self is not null && others.Length != 0)
+                LogOperation("reconciliation", $"Synchronized with {synchronized} peers. {incomplete} contacts were incomplete.");
         }
         finally
         {

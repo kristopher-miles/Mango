@@ -1,4 +1,5 @@
 using Mango.Host;
+using Mango.Logging;
 using Mango.Providers;
 using Mango.Resources;
 using Mango.Scheduling;
@@ -19,6 +20,7 @@ internal sealed partial class PeerNetwork
     private readonly Dictionary<(Guid, string), HostUse> hostUse = [];
     private readonly Queue<RecentService> recentServices = new();
     private readonly Queue<IngressActivity> recentIngress = new();
+    private ITimer? recentRoutingExpiry;
     private int schedulingGeneration;
     private readonly object discoveryLock = new();
     private Task? discovery;
@@ -56,10 +58,40 @@ internal sealed partial class PeerNetwork
             advice.Clear();
             recentServices.Clear();
             recentIngress.Clear();
+            ArmRoutingExpiry();
             foreach (var key in hostUse.Where(item => item.Value.Active == 0).Select(item => item.Key).ToArray())
                 hostUse.Remove(key);
         }
         SignalRequests();
+    }
+
+    private void ArmRoutingExpiry()
+    {
+        if (recentRoutingExpiry is null)
+            return;
+        var lastIngress = recentIngress.TryPeek(out var ingressItem) ? ingressItem.Finished : DateTimeOffset.MaxValue;
+        var lastService = recentServices.TryPeek(out var serviceItem) ? serviceItem.At : DateTimeOffset.MaxValue;
+        var first = lastIngress < lastService ? lastIngress : lastService;
+        var delay = first == DateTimeOffset.MaxValue ? Timeout.InfiniteTimeSpan : first.AddMinutes(5) - clock.GetUtcNow();
+        recentRoutingExpiry.Change(delay >= TimeSpan.Zero || delay == Timeout.InfiniteTimeSpan ? delay : TimeSpan.Zero,
+            Timeout.InfiniteTimeSpan);
+    }
+
+    private void ExpireRoutingMemory()
+    {
+        bool changed;
+        lock (routing)
+        {
+            var cutoff = clock.GetUtcNow().AddMinutes(-5);
+            changed = recentIngress.TryPeek(out var item) && item.Finished <= cutoff;
+            while (recentIngress.TryPeek(out var ingressItem) && ingressItem.Finished <= cutoff)
+                recentIngress.Dequeue();
+            while (recentServices.TryPeek(out var serviceItem) && serviceItem.At <= cutoff)
+                recentServices.Dequeue();
+            ArmRoutingExpiry();
+        }
+        if (changed)
+            SignalRequests();
     }
 
     public async Task SetQueuePolicyAsync(HttpRequest request, int seconds, CancellationToken cancellation)
@@ -109,10 +141,15 @@ internal sealed partial class PeerNetwork
     {
         var arrived = clock.GetUtcNow();
         var age = clock.GetTimestamp();
+        var log = LogCapture.Of(context);
+        var logGeneration = log is null ? Logs.Configuration.Epoch.Generation : log.Generation;
         var limit = TimeSpan.FromSeconds(QueueWaitSeconds);
         if (providers.Resources is { } resources)
             await resources.ClientArrivedAsync(cancellation);
         using var payload = await providers.ReadInferenceAsync(operation, context, cancellation);
+        log?.AcceptedInput();
+        if (log?.Entry is { } captured)
+            log.Entry = captured with { Alias = payload.Alias };
         if (string.Equals(payload.Alias, "best", StringComparison.OrdinalIgnoreCase))
             throw new ProviderFailure(501, "Automatic best-model selection is not available.");
         var access = InferenceAccess.Of(context) ?? throw new ProviderFailure(401, "The inference credential is required.");
@@ -123,7 +160,7 @@ internal sealed partial class PeerNetwork
         session = session.Length == 0 ? null : ProviderIdentity.Hash(session);
         var prefixes = session is null ? payload.Prefixes() : [];
         var identity = access.KeyId ?? Guid.Empty;
-        var item = new IngressRequest(Guid.NewGuid(), arrived, arrived + limit, access, source, payload.Alias, operation);
+        var item = new IngressRequest(log?.Id ?? Guid.NewGuid(), arrived, arrived + limit, access, source, payload.Alias, operation);
         int generation;
         lock (routing)
         {
@@ -191,7 +228,7 @@ internal sealed partial class PeerNetwork
                 var here = Snapshot.Self?.Id ?? Guid.Empty;
                 var address = Snapshot.Nodes.GetValueOrDefault(choice.Node)?.Address;
                 var ticket = new AttemptTicket(item.Id, attempt, access.KeyId, choice.Deployment,
-                    clock.GetUtcNow() - elapsed, clock.GetUtcNow() + remaining, session, choice.ServingEpoch, source);
+                    clock.GetUtcNow() - elapsed, clock.GetUtcNow() + remaining, session, choice.ServingEpoch, source, logGeneration);
                 var started = clock.GetTimestamp();
                 var result = new AttemptReply(AttemptState.Uncertain, 503, "The attempt ended without a confirmed result.");
                 try
@@ -269,6 +306,7 @@ internal sealed partial class PeerNetwork
         }
         finally
         {
+            RecordRoute(log, item, payload);
             lock (routing)
             {
                 ingress.Remove(item.Id);
@@ -280,6 +318,7 @@ internal sealed partial class PeerNetwork
                         recentIngress.Dequeue();
                     recentIngress.Enqueue(new(item.Id, item.Alias, item.Operation, item.Source, item.Access.KeyName, item.Access.Priority,
                         item.Arrived, clock.GetUtcNow(), item.Attempts.ToArray(), item.OutputStarted, item.Reason));
+                    ArmRoutingExpiry();
                 }
             }
             SignalRequests();
@@ -341,8 +380,14 @@ internal sealed partial class PeerNetwork
         InferenceAccess access, HttpContext context, CancellationToken cancellation)
     {
         var generation = Volatile.Read(ref schedulingGeneration);
+        var log = Logs.Configuration;
+        var received = clock.GetUtcNow();
+        var started = clock.GetTimestamp();
+        if (log.Policy.Mode != RequestLogMode.Off && log.Epoch.Generation == ticket.LogGeneration)
+            context.Items[typeof(LogConfiguration)] = log;
         var result = await serving.SubmitAsync(new(origin, ticket, payload, access, context, FindAlternateAsync, Advise, DisplaceAsync,
             () => Snapshot.Digest, Suggest), cancellation);
+        RecordServing(log, origin, ticket, payload, access, result, received, started);
         if (result.State == AttemptState.Completed)
             lock (routing)
             {
@@ -351,6 +396,7 @@ internal sealed partial class PeerNetwork
                     if (recentServices.Count == 512)
                         recentServices.Dequeue();
                     recentServices.Enqueue(new(origin, ticket, payload.Shape, clock.GetUtcNow()));
+                    ArmRoutingExpiry();
                 }
             }
         return result;

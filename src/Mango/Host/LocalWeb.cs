@@ -26,6 +26,7 @@ internal sealed class LocalWeb
             WebRootPath = Path.Combine(AppContext.BaseDirectory, "wwwroot")
         });
         builder.Configuration.Sources.Clear();
+        builder.Logging.ClearProviders();
         builder.WebHost.ConfigureKestrel(options =>
         {
             options.AddServerHeader = false;

@@ -139,7 +139,7 @@ internal static partial class PeerChecks
             await Local(http, ingress, "public-ingress", new PublicIngressSettings(true, port, null, origin), expected: 204);
             var check = await Local(http, ingress, "public-ingress/check", new { }, method: HttpMethod.Post);
             Check(!check.GetProperty("reached").GetBoolean(), "reachability check rejects the fixture CA outside the configured client trust");
-            foreach (var path in new[] { "/", "/api/local/settings", "/api/local/network/events", "/peer/info", "/v1/responses" })
+            foreach (var path in new[] { "/", "/api/local/settings", "/api/local/network/events", "/api/local/logs", "/peer/info", "/v1/responses" })
                 await Request(https, HttpMethod.Get, origin + path, key, expected: 404);
             foreach (var path in Enum.GetValues<InferenceOperation>().Select(InferencePaths.Path))
                 await Request(https, HttpMethod.Post, origin + path, expected: 401);

@@ -1,6 +1,7 @@
 using System.Net;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Microsoft.Extensions.Logging;
 using Mango.Providers;
 using Microsoft.AspNetCore.Http.Features;
 
@@ -11,6 +12,7 @@ internal static class PeerRoutes
     public static void MapLocal(RouteGroupBuilder local, PeerNetwork peers)
     {
         var network = local.MapGroup("/network");
+        peers.MapLocalLogs(local);
         network.MapGet("", (HttpRequest request) => peers.View(request));
         network.MapGet("/scheduling", () => peers.SchedulingView());
         network.MapGet("/events", (HttpContext context) => HandleAsync(context,
@@ -46,6 +48,7 @@ internal static class PeerRoutes
     {
         var builder = WebApplication.CreateSlimBuilder(new WebApplicationOptions { Args = [], ContentRootPath = AppContext.BaseDirectory });
         builder.Configuration.Sources.Clear();
+        builder.Logging.ClearProviders();
         builder.WebHost.ConfigureKestrel(options =>
         {
             options.AddServerHeader = false;
@@ -123,6 +126,7 @@ internal static class PeerRoutes
             HandleAsync(context, token => peers.ApplyNoticeAsync(notice, token)));
         peer.MapGet("/key/{id:guid}", (Guid id) => new PeerKeyReply(peers.Snapshot.Keys.GetValueOrDefault(id)));
         peers.MapAttemptRoutes(peer);
+        peers.MapPeerLogs(peer);
         ProviderRoutes.MapInference(app, peers);
         try
         {

@@ -114,4 +114,16 @@ The public upstream serves these methods and paths.
 - `POST /v1/audio/speech`
 - `POST /v1/systemone`
 
+## Logs and retention
+
+Open **Logs and retention** to view the available history for a day, filter by key name or source address, and see original requests separately from serving attempts. **Collect from network** refreshes coverage and retrieves new records. The lowest reachable enrolled node collects at the end of the day in the shared IANA timezone. The view remains available with partial results while collection runs or a peer is offline.
+
+Unlock network administration to set the shared policy. Sparse is the default and keeps metadata. Off stops recording new inference requests. Verbose also retains validated request bodies, and Everything also retains delivered response bodies. The chosen mode applies when the request starts. The independent **Retain operational events** setting covers events such as resource withdrawal and provider lifecycle failures. The default limits are seven days of raw records, thirty days of aggregate metadata, and 1 GiB of log storage per node. The oldest eligible files are evicted first when the cap shortens retention.
+
+New networks use the first host's IANA timezone. Existing networks with no saved logging policy use UTC until a network administrator sets the timezone.
+
+**Download day** exports a ZIP with `records.ndjson`, retained body files, and a coverage manifest. Check the manifest for unavailable peers, expired or incomplete bodies, and storage limits. Transport credentials and known credential-bearing fields are excluded. Model content can still contain private information. Coverage can improve on a later collection when peers return. If a collector is lost, its aggregate may be recoverable from original records still within retention.
+
+**Clear logs** advances a network deletion generation. Reachable nodes clear their Mango-managed records and payloads, and offline nodes remain pending until they apply the deletion on reconnect or are removed. A full network reset also clears logs. Password recovery preserves them. Exported ZIP files are outside Mango's managed storage.
+
 Runtime state, credentials, logs, models, and generated application builds do not belong in Git. No remote repository or hosted service is required by this plan.

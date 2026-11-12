@@ -46,3 +46,12 @@ Add mode, operational-log enablement, retention, timezone, collection and clear 
 ## Done
 
 The owner can inspect or export useful network logs with known coverage, choose how much to retain, and clear them across intermittent peers. Logging consumes bounded storage and memory and remains optional. No new inference-time peer calls are introduced by logging.
+
+## Windows qualification
+
+- Two enrolled Mango instances on the live Windows Tailscale interface sent SSE chat, binary WAV speech, and multipart WAV transcription through all four modes. The fixture checked exact retained body bytes, key name and source address, destination and attempt correlation, token counts and provider-reported speed, WAV duration, and exclusion of transport and rejected body credentials. Request logging Off left no request or serving history while independent operational logging remained available.
+- An exported ZIP contained exact binary bytes and reported incomplete bodies. Repeated collection counted a live fallback as one original request and two attempts. A separate offline test exposed local totals immediately, merged a peer's late records on its return, and transferred the elected collector's result to another node.
+- A one-MiB test cap evicted the oldest retained material and preserved the shortened-retention state across restart. Deterministic checks covered 23- and 25-hour days in America/Los_Angeles, aggregate metadata after raw payload expiry, a torn final journal record, ordered late imports, and queued writes fenced by a new deletion generation.
+- In the live clear test, an offline peer remained pending until reconnect. It deleted its old files and acknowledged the generation before any old records could return through collection. Password recovery preserved the retained log generation, and full reset removed history and invalidated the old key.
+- On the Windows Ryzen 5 7640HS qualification host, the backpressure fixture forwarded 540 KiB in about 3 ms with its log writer paused. A failing writer also left response bytes flowing. The status reported dropped bytes and marked the retained prefix incomplete.
+- The local Edge page showed the expected retention defaults, source and key summaries, and the fixture request's timing and reason. Submitting the source filter by keyboard hid the row for a nonmatching address and showed it for the observed loopback address. Qualification used one physical Windows machine and deterministic provider responses.

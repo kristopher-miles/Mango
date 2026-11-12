@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text.Json.Serialization;
 using Mango.Peers;
+using Mango.Logging;
 using Mango.Resources;
 using Microsoft.AspNetCore.Http.Features;
 
@@ -53,7 +54,8 @@ internal static class ProviderRoutes
         foreach (var operation in Enum.GetValues<InferenceOperation>())
         {
             app.MapPost(InferencePaths.Path(operation), (HttpContext context) =>
-                HandleAsync(context, cancellation => peers.RouteAsync(operation, context, cancellation)));
+                peers.CaptureInferenceAsync(operation, context,
+                    () => HandleAsync(context, cancellation => peers.RouteAsync(operation, context, cancellation))));
         }
     }
 
@@ -99,6 +101,8 @@ internal static class ProviderRoutes
 
     private static async Task FailureAsync(HttpContext context, int status, string message)
     {
+        if (LogCapture.Of(context) is { } capture)
+            capture.Failure = message;
         if (context.Response.HasStarted)
         {
             context.Abort();
