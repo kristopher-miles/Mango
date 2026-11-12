@@ -189,7 +189,7 @@ internal sealed partial class PeerNetwork
     {
         var current = Snapshot;
         if (!Ready || current.Self is not { } self || current.Records.Identity is not { } identity || current.Token is null ||
-            DeviceChanged(current) || !current.Nodes.TryGetValue(destination, out var peer) || peer.Removed)
+            DeviceChanged(current) || !current.Nodes.TryGetValue(destination, out var peer) || peer.Removed || Incompatible(destination))
             return new(AttemptState.Rejected, 503, "The selected peer is no longer eligible.");
         var origin = Origins(peer).FirstOrDefault();
         if (origin is null || remaining.TotalMilliseconds < 1)
@@ -205,11 +205,16 @@ internal sealed partial class PeerNetwork
             request.Headers.Add(NetworkHeader, identity.Id.ToString("N"));
             request.Headers.Add(DigestHeader, current.Digest);
             request.Headers.Add(RevisionHeader, current.Latest.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            request.Headers.Add(ReleaseHeader, Release.Wire);
             request.Headers.Add(AttemptHeader, Convert.ToBase64String(JsonSerializer.SerializeToUtf8Bytes(metadata, Json)));
             Interlocked.Increment(ref submissions);
             using var response = await inferenceHttp.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellation);
             if (Header(response, NodeHeader) != destination.ToString("N") || Header(response, NetworkHeader) != identity.Id.ToString("N"))
                 return await StopPeerAsync(current, peer, ticket, remaining);
+            if (!ObserveRelease(peer.Id, Header(response, ReleaseHeader)))
+                return response.StatusCode == HttpStatusCode.UpgradeRequired
+                    ? new(AttemptState.Rejected, 503, "The selected peer uses an incompatible Mango protocol window.")
+                    : await StopPeerAsync(current, peer, ticket, remaining);
             var digest = Header(response, DigestHeader);
             RecordContact(peer.Id, true, digest);
             QueueMismatch(peer.Id, digest);

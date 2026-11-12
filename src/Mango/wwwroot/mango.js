@@ -10,6 +10,7 @@ const workspace = document.querySelector("#workspace");
 const status = document.querySelector("#status");
 const settingsForm = document.querySelector("#settings");
 const startupForm = document.querySelector("#startup");
+const maintenanceForm = document.querySelector("#maintenance");
 const reserveWarning = document.querySelector("#reserve-warning");
 const reserveConsent = settingsForm.elements.acceptReducedReserve;
 const numbers = [
@@ -121,6 +122,19 @@ startupForm.addEventListener("submit", event => {
   event.preventDefault();
   submit(startupForm, document.querySelector("#startup-status"), () =>
     api("startup", { enabled: startupForm.elements.enabled.checked }));
+});
+
+async function loadRelease() {
+  const state = await api("release");
+  maintenanceForm.elements.deferred.checked = state.maintenanceDeferred;
+  document.querySelector("#release-status").textContent =
+    `${state.release.version} · Protocol window ${state.release.window} · ${state.updates}${state.draining ? " Serving is draining for maintenance." : ""}`;
+}
+
+maintenanceForm.addEventListener("submit", event => {
+  event.preventDefault();
+  submit(maintenanceForm, document.querySelector("#maintenance-status"), () =>
+    api("release/deferral", { deferred: maintenanceForm.elements.deferred.checked }));
 });
 
 function showSessionError(error) {
@@ -380,3 +394,4 @@ aliasRatingForm.addEventListener("submit", event => {
 });
 
 loadSettings().then(loadProviders).catch(showSessionError);
+loadRelease().catch(error => document.querySelector("#release-status").textContent = error.message);

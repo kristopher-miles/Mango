@@ -107,6 +107,37 @@ internal sealed class ServingQueue : IAsyncDisposable
         Wake();
     }
 
+    private volatile bool draining;
+    public bool Draining => draining;
+
+    public async Task<bool> DrainAsync(TimeSpan timeout, CancellationToken cancellation)
+    {
+        Task<AttemptReply>[] attempts;
+        Task? preparing;
+        lock (sync)
+        {
+            draining = true;
+            attempts = entries.Values.Where(entry => entry.Work is not null).Select(entry => entry.Complete.Task).ToArray();
+            preparing = loading?.Work;
+        }
+        Wake();
+        try
+        {
+            await Task.WhenAll(preparing is null ? attempts : attempts.Cast<Task>().Append(preparing)).WaitAsync(timeout, cancellation);
+        }
+        catch (TimeoutException) { return false; }
+        lock (sync)
+            return draining && attempts.All(attempt => attempt.Result.State != AttemptState.Uncertain) &&
+                !entries.Values.Any(entry => entry.AwaitingSettlement && ConfirmSettlement(entry).State == AttemptState.Uncertain);
+    }
+
+    public void ResumeAdmissions()
+    {
+        lock (sync)
+            draining = false;
+        Wake();
+    }
+
     public Task<AttemptReply> SubmitAsync(Work work, CancellationToken cancellation)
     {
         lock (sync)
@@ -120,6 +151,8 @@ internal sealed class ServingQueue : IAsyncDisposable
                 return Task.FromResult(known.State is AttemptState.Waiting or AttemptState.Running or AttemptState.Completed
                     ? new AttemptReply(AttemptState.Uncertain, 409, "This attempt was already submitted.") : known);
             }
+            if (draining)
+                return Task.FromResult(Maintenance());
             if (entries.Values.Any(item => item.Work is { } prior && prior.Origin == work.Origin && prior.Ticket.Request == work.Ticket.Request))
                 return Task.FromResult(new AttemptReply(AttemptState.Uncertain, 409, "The original request still has a serving owner."));
             if (now >= work.Ticket.QueueUntil)
@@ -290,7 +323,9 @@ internal sealed class ServingQueue : IAsyncDisposable
         foreach (var entry in pending)
         {
             var work = entry.Work!;
-            if (Expired(entry))
+            if (draining)
+                Finish(entry, Maintenance());
+            else if (Expired(entry))
                 Finish(entry, Expiration(entry));
             else if ((entry.Placement = providers.Placement(work.Payload.Shape, work.Ticket.Deployment)) is null)
                 Finish(entry, Rejected("The local deployment no longer has eligible resources."));
@@ -328,12 +363,21 @@ internal sealed class ServingQueue : IAsyncDisposable
             var reason = "Waiting for work that reserved the same resources.";
             if (ahead.Length == 0)
             {
-                var start = providers.TryStart(work.Payload, work.Ticket.Deployment);
-                if (start.Execute is { } execute)
+                StartExecution start;
+                lock (sync)
                 {
-                    Start(entry, execute, start.Epoch);
-                    active.Add(entry);
-                    continue;
+                    if (draining)
+                    {
+                        Finish(entry, Maintenance());
+                        continue;
+                    }
+                    start = providers.TryStart(work.Payload, work.Ticket.Deployment);
+                    if (start.Execute is { } execute)
+                    {
+                        Start(entry, execute, start.Epoch);
+                        active.Add(entry);
+                        continue;
+                    }
                 }
                 if (start.Status == AdmissionStatus.Unavailable)
                 {
@@ -365,16 +409,18 @@ internal sealed class ServingQueue : IAsyncDisposable
             if (ahead.Length == 0 && placement.Model.Instance is null && loading is null && entry.LastLoadRevision != revision &&
                 !active.Any(other => other.Work is not null && providers.Conflicts(placement, other.Placement!)))
             {
-                entry.LastLoadRevision = revision;
                 lock (sync)
                 {
+                    if (draining)
+                        continue;
+                    entry.LastLoadRevision = revision;
                     entry.LoadingAt = clock.GetTimestamp();
                     entry.WaitingReason = "Preparing or loading the model.";
                     ActivityChanged?.Invoke();
+                    var preparation = PrepareAsync(entry.Placement!, work, entry.Stop!.Token);
+                    loading = (entry, preparation);
+                    _ = preparation.ContinueWith(_ => Wake(), TaskScheduler.Default);
                 }
-                var preparation = PrepareAsync(entry.Placement!, work, entry.Stop!.Token);
-                loading = (entry, preparation);
-                _ = preparation.ContinueWith(_ => Wake(), TaskScheduler.Default);
             }
         }
         var next = blocked.Where(entry => entry.Work is not null).Min(entry => (DateTimeOffset?)entry.Work!.Ticket.QueueUntil);
@@ -516,6 +562,8 @@ internal sealed class ServingQueue : IAsyncDisposable
         ? new(AttemptState.Rejected, 401, "The inference credential was revoked or expired.") : Rejected("Inference was cancelled.");
 
     private static AttemptReply Deadline() => new(AttemptState.Rejected, 504, "The request expired while waiting for inference.");
+
+    private static AttemptReply Maintenance() => Rejected("This serving node is draining for maintenance.");
 
     private static AttemptReply Rejected(string reason) => new(AttemptState.Rejected, 503, reason);
 

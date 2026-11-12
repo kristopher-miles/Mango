@@ -22,7 +22,29 @@ internal static class SchedulingChecks
         await ChangedScarcityAsync(changeCatalog: true);
         await ChangedScarcityAsync(changeCatalog: false);
         await CancellationAsync();
+        await MaintenanceDrainAsync();
         Console.WriteLine("Scheduling, queue ownership and cancellation checks passed.");
+    }
+
+    private static async Task MaintenanceDrainAsync()
+    {
+        var backend = new Backend();
+        await using var queue = new ServingQueue(backend);
+        var active = await Submit(queue, "active at maintenance", "small");
+        await backend.Started("active at maintenance");
+        var waiting = await Submit(queue, "waiting at maintenance", "small");
+        var drain = queue.DrainAsync(TimeSpan.FromMilliseconds(150), default);
+        var refused = await (await Submit(queue, "new at maintenance", "independent")).WaitAsync(Timeout);
+        Check((await waiting.WaitAsync(Timeout)).Retryable && refused.Retryable &&
+            !await drain && !active.IsCompleted && queue.Draining, "maintenance reroutes queued work and times out without aborting active work");
+        backend.Release("active at maintenance");
+        Check((await active.WaitAsync(Timeout)).State == AttemptState.Completed && await queue.DrainAsync(Timeout, default),
+            "active work completes normally and settles maintenance");
+        queue.ResumeAdmissions();
+        var resumed = await Submit(queue, "after maintenance", "small");
+        await backend.Started("after maintenance");
+        backend.Release("after maintenance");
+        Check((await resumed.WaitAsync(Timeout)).State == AttemptState.Completed, "admissions resume without changing role");
     }
 
     private static async Task IndependentAndFifoAsync()

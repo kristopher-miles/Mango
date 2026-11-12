@@ -214,6 +214,12 @@ function renderNetworkCatalog(network) {
     const reachability = local ? "Local host" : node.reachableAtLastCheck == null ? "Reachability unobserved"
       : node.reachableAtLastCheck ? `Reached ${timeLabel(node.lastChecked)}` : `Unreachable when checked ${timeLabel(node.lastChecked)}`;
     details.append(element("p", `${reachability} · ${node.address}${node.current ? " · Catalog matched at last contact" : ""}`, "path"));
+    if (node.compatible === false) {
+      const advertised = node.release ? `Mango ${node.release.version}, window ${node.release.window}` : "Release descriptor unavailable";
+      details.append(element("p", `Incompatible protocol window. ${advertised}. This host uses window ${network.release.window}.`, "warning"));
+    } else if (!local && node.release && node.release.version !== network.release.version) {
+      details.append(element("p", `Mango ${node.release.version} shares protocol window ${node.release.window}.`, "muted"));
+    }
     if (catalog) details.append(element("p", `Observed ${timeLabel(catalog.observedAt)} · Mango ${catalog.appVersion ?? "version unobserved"} · Role preference ${catalog.preferredRole || catalog.role} · Benchmark policy ${benchmarkNames[catalog.localBenchmarkPolicy] ?? "unobserved"}`, "muted"));
     if (catalog?.contributionReason) details.append(element("p", catalog.contributionReason, "muted"));
     for (const desired of network.providerIntents.filter(item => item.owner === node.id))

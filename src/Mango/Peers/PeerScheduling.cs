@@ -407,12 +407,13 @@ internal sealed partial class PeerNetwork
         var view = providers.View;
         var current = Snapshot;
         var here = current.Self?.Id ?? Guid.Empty;
-        foreach (var deployment in view.Models)
-            yield return (here, deployment.Alias, ObserveDeployment(deployment, view), schedulingEpoch);
+        if (!serving.Draining)
+            foreach (var deployment in view.Models)
+                yield return (here, deployment.Alias, ObserveDeployment(deployment, view), schedulingEpoch);
         if (!Ready || current.Self is null)
             yield break;
         var sharedModels = current.Records.Models.Where(model => !model.Removed).ToDictionary(model => (model.Owner, model.Deployment));
-        foreach (var catalog in current.Records.Catalogs.Where(item => item.Node != here && item.SchedulingEpoch is not null && item.Role == LocalRole.Contributor &&
+        foreach (var catalog in current.Records.Catalogs.Where(item => item.Node != here && !Incompatible(item.Node) && item.SchedulingEpoch is not null && item.Role == LocalRole.Contributor &&
             (item.ResourceState is null or ContributionState.Contributor) && current.Nodes.TryGetValue(item.Node, out var node) && !node.Removed))
             foreach (var model in catalog.Models)
                 if (sharedModels.TryGetValue((catalog.Node, model.Id), out var shared))
@@ -568,7 +569,7 @@ internal sealed partial class PeerNetwork
             var identity = current.Records.Identity;
             if (identity is null)
                 return;
-            await Parallel.ForEachAsync(results.Where(item => item.Peer.Identity == identity), new ParallelOptions
+            await Parallel.ForEachAsync(results.Where(item => item.Compatible && item.Peer.Identity == identity), new ParallelOptions
             {
                 MaxDegreeOfParallelism = 8, CancellationToken = stopping.Token
             }, async (result, token) =>

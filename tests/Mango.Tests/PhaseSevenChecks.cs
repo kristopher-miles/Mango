@@ -5,6 +5,7 @@ using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
 using Mango.Logging;
+using Mango.Host;
 using Mango.Peers;
 using Mango.Providers;
 using Microsoft.AspNetCore.Builder;
@@ -75,6 +76,7 @@ internal static partial class PeerChecks
                 forbidden.Headers.Add(PeerNetwork.NodeHeader, node.ToString("N"));
                 forbidden.Headers.Add(PeerNetwork.NetworkHeader, network.ToString("N"));
                 forbidden.Headers.Add(PeerNetwork.DigestHeader, foreign.Digest);
+                forbidden.Headers.Add(PeerNetwork.ReleaseHeader, MangoRelease.Current.Wire);
                 forbidden.Content = System.Net.Http.Json.JsonContent.Create(logTransfer, options: Json);
                 using var reply = await http.SendAsync(forbidden);
                 Check(reply.StatusCode == HttpStatusCode.BadRequest, "a peer cannot request standalone records");

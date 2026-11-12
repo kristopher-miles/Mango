@@ -10,6 +10,11 @@ using Mango.Host;
 var directory = Directory.CreateTempSubdirectory("mango-check-").FullName;
 try
 {
+    if (args is ["--qualify-release", var executable])
+    {
+        await PeerChecks.QualifyReleaseAsync(directory, Path.GetFullPath(executable));
+        return;
+    }
     TestDefaults();
     await TestHostAsync(directory);
     await ProviderChecks.RunAsync();

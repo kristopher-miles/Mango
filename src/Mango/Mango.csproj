@@ -6,9 +6,12 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Version>0.1.0</Version>
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
   </PropertyGroup>
   <ItemGroup>
     <Content Update="wwwroot/**/*" CopyToOutputDirectory="PreserveNewest" />
     <InternalsVisibleTo Include="Mango.Tests" />
+    <AssemblyMetadata Include="MangoProtocolWindow" Value="1" />
   </ItemGroup>
 </Project>

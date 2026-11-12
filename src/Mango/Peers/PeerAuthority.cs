@@ -53,7 +53,7 @@ internal sealed partial class PeerNetwork
             if (current.Records.Identity is not null || current.Self is not null)
                 throw new PeerFailure(409, "This data directory already contains enrollment state.");
             var revision = Next(current, id);
-            var identity = new NetworkIdentity(network, revision, NetworkIdentity.CurrentProtocolWindow);
+            var identity = new NetworkIdentity(network, revision, Release.Window);
             var authority = PeerCredentials.Password(input.Password, PeerCredentials.Digest(recovery), revision);
             var node = new PeerNode(id, status.Device!, name, Tailnet.Origin(bound[0], port), revision, revision,
                 PeerCredentials.Digest(secret));
@@ -78,9 +78,8 @@ internal sealed partial class PeerNetwork
                 throw new PeerFailure(400, "Enter the selected network ID and master password.");
             if (bound.Any(ip => target == new Uri(Tailnet.Origin(ip, port))))
                 throw new PeerFailure(400, "Select a different Mango peer.");
-            var intro = await GetIntroAsync(target, cancellation);
-            if (intro is null || intro.Identity.Id != input.Network ||
-                intro.Identity.ProtocolWindow != NetworkIdentity.CurrentProtocolWindow)
+            var intro = (await GetIntroAsync(target, cancellation, enrollment: true))?.Peer;
+            if (intro is null || intro.Identity.Id != input.Network)
                 throw new PeerFailure(409, "The selected address did not identify the expected Mango network.");
 
             var (_, pending) = await ChangeAsync(current =>
@@ -109,7 +108,15 @@ internal sealed partial class PeerNetwork
             {
                 using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellation, stopping.Token);
                 timeout.CancelAfter(PeerLimits.ReconcileTimeout);
-                using var response = await http.PostAsJsonAsync(new Uri(target, "/peer/enroll"), enrollment, Json, timeout.Token);
+                using var request = new HttpRequestMessage(HttpMethod.Post, new Uri(target, "/peer/enroll"))
+                {
+                    Content = JsonContent.Create(enrollment, options: Json)
+                };
+                request.Headers.Add(ReleaseHeader, Release.Wire);
+                using var response = await http.SendAsync(request, timeout.Token);
+                if (response.StatusCode == HttpStatusCode.UpgradeRequired ||
+                    MangoRelease.Parse(Header(response, ReleaseHeader))?.Window != Release.Window)
+                    throw new PeerFailure(426, "The selected peer has an incompatible Mango protocol window.");
                 if (response.StatusCode == HttpStatusCode.Unauthorized)
                     throw new PeerFailure(401, "The selected peer rejected the master password.");
                 if (response.StatusCode == HttpStatusCode.TooManyRequests)

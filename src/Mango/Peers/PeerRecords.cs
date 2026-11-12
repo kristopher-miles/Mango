@@ -21,10 +21,7 @@ internal readonly record struct Revision(long Time, Guid Writer) : IComparable<R
     }
 }
 
-internal sealed record NetworkIdentity(Guid Id, Revision Generation, int ProtocolWindow)
-{
-    public const int CurrentProtocolWindow = 1;
-}
+internal sealed record NetworkIdentity(Guid Id, Revision Generation, int ProtocolWindow);
 
 internal sealed record AuthorityRecord(Revision Revision, string Salt, string PasswordVerifier, string RecoveryVerifier);
 internal sealed record QueuePolicy(Revision Revision, int WaitSeconds)

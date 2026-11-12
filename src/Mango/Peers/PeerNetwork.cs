@@ -12,7 +12,7 @@ namespace Mango.Peers;
 
 internal sealed partial class PeerNetwork(string directory, int port, ProviderCatalog providers,
     SnapshotFile<LocalSettings> settings, Func<CancellationToken, Task<TailnetStatus>>? inspectTailnet = null,
-    TimeProvider? time = null) : IAsyncDisposable
+    TimeProvider? time = null, MangoRelease? build = null) : IAsyncDisposable
 {
     private readonly SnapshotFile<PeerDisk> store = new(Path.Combine(directory, "network.json"), PeerValidation.Disk);
     private readonly byte[] credentialContext = SHA256.HashData(Encoding.UTF8.GetBytes(
@@ -26,7 +26,7 @@ internal sealed partial class PeerNetwork(string directory, int port, ProviderCa
     private readonly ConcurrentDictionary<Guid, PeerContact> contacts = new();
     private readonly HttpClient http = CreatePeerClient(8);
     private readonly HttpClient inferenceHttp = CreatePeerClient(MaxIngress);
-    private static readonly string? AppVersion = typeof(PeerNetwork).Assembly.GetName().Version?.ToString();
+    internal MangoRelease Release { get; } = build ?? MangoRelease.Current;
 
     private static HttpClient CreatePeerClient(int connections) => new(new SocketsHttpHandler
     {
@@ -54,7 +54,23 @@ internal sealed partial class PeerNetwork(string directory, int port, ProviderCa
     public bool Ready => ready;
     public bool IsMember => Snapshot.Self is not null && !DeviceChanged(Snapshot);
     public bool AllowsLocalInference => Snapshot.Self is null || Ready;
+    internal bool Draining => serving.Draining;
     internal static JsonSerializerOptions Json => SnapshotFile<PeerDisk>.Json;
+
+    internal async Task<bool> DrainForMaintenanceAsync(TimeSpan timeout, CancellationToken cancellation)
+    {
+        if (settings.Value.MaintenanceDeferred)
+            return false;
+        var drain = serving.DrainAsync(timeout, cancellation);
+        QueueCatalog();
+        return await drain;
+    }
+
+    internal void ResumeAdmissions()
+    {
+        serving.ResumeAdmissions();
+        QueueCatalog();
+    }
 
     public object View(HttpRequest request)
     {
@@ -71,11 +87,14 @@ internal sealed partial class PeerNetwork(string directory, int port, ProviderCa
             {
                 node.Id, node.Name, node.Address, node.Joined, item.JoinOrder, last?.LastContact, last?.LastChecked,
                 ReachableAtLastCheck = last?.Reachable,
-                Current = last is { Reachable: true } && last.Digest == current.Digest
+                Release = peerReleases.GetValueOrDefault(node.Id)?.Release,
+                Compatible = peerReleases.GetValueOrDefault(node.Id)?.Compatible,
+                Current = last is { Reachable: true } && last.Digest == current.Digest && !Incompatible(node.Id)
             };
         });
         return new
         {
+            Release,
             Identity = current.Records.Identity,
             LocalNode = current.Self is { } self ? new { self.Id, self.Name, self.Address, self.Joined,
                 members.Single(member => member.Node.Id == self.Id).JoinOrder } : null,
@@ -324,7 +343,7 @@ internal sealed partial class PeerNetwork(string directory, int port, ProviderCa
         var view = providers.View;
         var protection = providers.Resources;
         var preferences = settings.Value;
-        var role = protection is { ServingAllowed: false } ? LocalRole.Leech : preferences.Role;
+        var role = serving.Draining || protection is { ServingAllowed: false } ? LocalRole.Leech : preferences.Role;
         var (before, after) = await ChangeAsync(current =>
         {
             if (current.Self is not { } self || DeviceChanged(current))
@@ -350,7 +369,7 @@ internal sealed partial class PeerNetwork(string directory, int port, ProviderCa
             var catalog = new NodeCatalog(self.Id, Next(current, self.Id), self.Name, role, observations,
                 protection?.Status.State, schedulingEpoch, endpoints,
                 SafeDetail(protection?.Status.Reason, 300) ?? (role != preferences.Role ? "Waiting for local resource qualification." : null),
-                preferences.Role, preferences.BenchmarkPolicy, clock.GetUtcNow(), AppVersion,
+                preferences.Role, preferences.BenchmarkPolicy, clock.GetUtcNow(), Release.Version,
                 Logs.Available(LogConfigurationFor(current).Epoch) ? Logs.AppliedEpoch?.Generation : null);
             var changed = existing is null || !JsonSerializer.SerializeToUtf8Bytes(catalog with
                 { Revision = existing.Revision, ObservedAt = existing.ObservedAt }, Json)

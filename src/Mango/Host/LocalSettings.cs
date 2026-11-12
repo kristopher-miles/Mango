@@ -27,6 +27,7 @@ internal sealed record LocalSettings
     public int? VramReserveMiB { get; init; }
     [JsonRequired] public bool ReducedReserveConsent { get; init; }
     [JsonRequired] public BenchmarkPolicy BenchmarkPolicy { get; init; } = BenchmarkPolicy.Never;
+    public bool MaintenanceDeferred { get; init; }
 
     public static string? Validate(LocalSettings settings)
     {

@@ -2,6 +2,7 @@ using System.Net;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.Extensions.Logging;
+using Mango.Host;
 using Mango.Providers;
 using Microsoft.AspNetCore.Http.Features;
 
@@ -84,9 +85,16 @@ internal static class PeerRoutes
                 context.Response.StatusCode = 404;
                 return;
             }
+            context.Response.Headers[PeerNetwork.ReleaseHeader] = peers.Release.Wire;
             if (request.Path.Equals("/peer/info", StringComparison.OrdinalIgnoreCase) ||
                 request.Path.Equals("/peer/enroll", StringComparison.OrdinalIgnoreCase))
             {
+                if (request.Path.Equals("/peer/enroll", StringComparison.OrdinalIgnoreCase) &&
+                    MangoRelease.Parse(request.Headers[PeerNetwork.ReleaseHeader].ToString())?.Window != peers.Release.Window)
+                {
+                    context.Response.StatusCode = 426;
+                    return;
+                }
                 if (context.Features.Get<IHttpMaxRequestBodySizeFeature>() is { IsReadOnly: false } limit)
                     limit.MaxRequestBodySize = 4096;
                 await next(context);
@@ -99,6 +107,11 @@ internal static class PeerRoutes
                 return;
             }
             peers.SetResponseHeaders(context.Response);
+            if (!peers.ObserveRelease(access.Node, request.Headers[PeerNetwork.ReleaseHeader].ToString()))
+            {
+                context.Response.StatusCode = 426;
+                return;
+            }
             if (access.Notice is { } notice)
             {
                 context.Response.StatusCode = 409;

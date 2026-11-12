@@ -6,7 +6,17 @@ Start with the [eight-phase implementation plan](docs/plan/00-shared-foundation.
 
 The [original HTML questionnaire](docs/requirements/mango-questionnaire.html) and [submitted JSON](docs/requirements/decisions/2026-11-11-answers.json) are retained against their original baseline for reference and import compatibility.
 
-## Run the Windows host
+## Install the Windows package
+
+Build `dist/Mango-win-x64.zip` from PowerShell 7 using the SDK pinned in `global.json`. The ZIP includes the Windows x64 runtime, static UI, and installation guide. [Windows install and removal](docs/windows-install.md)
+
+```powershell
+./scripts/package-windows.ps1
+```
+
+The script prints the archive path and SHA-256. Use `-Dotnet <full path>` if the pinned SDK is outside `PATH`. The package uses fixed archive timestamps, ordinal entry order, and pinned runtime 10.0.15. Use the same Windows tooling and source for repeat builds.
+
+## Build and run from source
 
 Install the .NET 10 SDK pinned in `global.json`. From PowerShell at the checkout root, build, run the host checks, and launch the desktop app.
 

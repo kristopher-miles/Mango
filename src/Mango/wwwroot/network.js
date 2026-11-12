@@ -138,7 +138,8 @@ function networkForm(name, work) {
 networkForm("discover", async fields => {
   const results = await api("network/discover", fields);
   networkList("discovered", results.map(result => {
-    const row = element("li", `${result.address} · ${result.peer.identity.id}`);
+    const row = element("li", `${result.address} · ${result.peer.identity.id} · Mango ${result.release.version}${result.compatible ? "" : " · Incompatible protocol window"}`);
+    if (!result.compatible) return row;
     row.append(action("Select", () => {
       networkForms.join.elements.address.value = result.address;
       networkForms.join.elements.network.value = result.peer.identity.id;

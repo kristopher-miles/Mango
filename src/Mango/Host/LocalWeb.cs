@@ -103,7 +103,8 @@ internal sealed class LocalWeb
                         throw new ArgumentException("Confirm the reduced memory reserve warning before saving.");
                     return next with
                     {
-                        ReducedReserveConsent = current.ReducedReserveConsent || (reduced && update.AcceptReducedReserve)
+                        ReducedReserveConsent = current.ReducedReserveConsent || (reduced && update.AcceptReducedReserve),
+                        MaintenanceDeferred = current.MaintenanceDeferred
                     };
                 }, cancellationToken);
                 return Results.NoContent();
@@ -133,6 +134,14 @@ internal sealed class LocalWeb
                 return Results.Problem(title: "Mango could not change Windows startup.", detail: error.Message);
             }
         });
+        local.MapGet("/release", () => new
+        {
+            peers.Release, Updates = "Automatic updates are unavailable.", settings.Value.MaintenanceDeferred, peers.Draining
+        });
+        local.MapPut("/release/deferral", (MaintenanceUpdate update, HttpContext context) => PeerRoutes.HandleAsync(context, async token =>
+        {
+            await settings.UpdateAsync(current => current with { MaintenanceDeferred = update.Deferred }, token);
+        }));
         PeerRoutes.MapLocal(local, peers);
         ingress?.Map(local);
         ProviderRoutes.Map(app, local, providers, peers);
@@ -167,4 +176,5 @@ internal sealed class LocalWeb
 
     private sealed record SettingsUpdate(LocalSettings? Settings, bool AcceptReducedReserve);
     private sealed record StartupUpdate([property: JsonRequired] bool Enabled);
+    private sealed record MaintenanceUpdate([property: JsonRequired] bool Deferred);
 }

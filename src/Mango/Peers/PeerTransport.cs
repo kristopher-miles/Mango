@@ -2,11 +2,12 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
+using Mango.Host;
 
 namespace Mango.Peers;
 
 internal sealed record PeerIntro(NetworkIdentity Identity, Guid Node, string Device);
-internal sealed record DiscoveryResult(string Address, PeerIntro Peer);
+internal sealed record DiscoveryResult(string Address, PeerIntro Peer, MangoRelease Release, bool Compatible);
 internal sealed record PeerNotice(Guid Network, Revision Generation, Guid? Removed = null);
 internal sealed record PeerAuthentication(Guid Node, PeerNotice? Notice);
 internal sealed record PeerVersions(RecordVersion[] Records);
@@ -19,10 +20,26 @@ internal sealed partial class PeerNetwork
     internal const string NetworkHeader = "Mango-Network";
     internal const string DigestHeader = "Mango-Digest";
     internal const string RevisionHeader = "Mango-Revision";
+    internal const string ReleaseHeader = "Mango-Release";
     private const string PeerRoot = "/peer/";
 
     private sealed record PeerReply<T>(T? Body, string? Digest, bool Authenticated = true);
     private enum ReconcileResult { Unavailable, Synchronized, Incomplete }
+    private sealed record PeerRelease(string? Wire, MangoRelease? Release, bool Compatible);
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<Guid, PeerRelease> peerReleases = new();
+
+    private bool Incompatible(Guid peer) => peerReleases.GetValueOrDefault(peer)?.Compatible == false;
+
+    internal bool ObserveRelease(Guid peer, string? wire)
+    {
+        if (peerReleases.TryGetValue(peer, out var previous) && previous.Wire == wire)
+            return previous.Compatible;
+        var release = MangoRelease.Parse(wire);
+        var compatible = release?.Window == Release.Window;
+        peerReleases[peer] = new(wire, release, compatible);
+        SignalNetwork();
+        return compatible;
+    }
 
     public PeerIntro? Introduction()
     {
@@ -41,7 +58,7 @@ internal sealed partial class PeerNetwork
         {
             var target = Tailnet.Address(address, port) ?? throw new PeerFailure(400, "Enter a Tailscale IP address and optional service port.");
             var found = await GetIntroAsync(target, cancellation);
-            return found is null ? [] : [new(target.GetLeftPart(UriPartial.Authority), found)];
+            return found is null ? [] : [found];
         }
         var foundPeers = new System.Collections.Concurrent.ConcurrentBag<DiscoveryResult>();
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellation, stopping.Token);
@@ -52,8 +69,8 @@ internal sealed partial class PeerNetwork
             await Parallel.ForEachAsync(addresses, new ParallelOptions { MaxDegreeOfParallelism = 8, CancellationToken = deadline.Token },
                 async (target, token) =>
                 {
-                    if (await GetIntroAsync(target, token) is { } info && info.Node != current.Self?.Id)
-                        foundPeers.Add(new(target.GetLeftPart(UriPartial.Authority), info));
+                    if (await GetIntroAsync(target, token) is { } info && info.Peer.Node != current.Self?.Id)
+                        foundPeers.Add(info);
                 });
         }
         try
@@ -68,7 +85,7 @@ internal sealed partial class PeerNetwork
             .OrderBy(item => item.Peer.Identity.Id).ThenBy(item => item.Peer.Node).ToArray();
     }
 
-    private async Task<PeerIntro?> GetIntroAsync(Uri target, CancellationToken cancellation)
+    private async Task<DiscoveryResult?> GetIntroAsync(Uri target, CancellationToken cancellation, bool enrollment = false)
     {
         try
         {
@@ -76,9 +93,17 @@ internal sealed partial class PeerNetwork
             using var response = await http.GetAsync(new Uri(target, PeerRoot + "info"), timeout.Token);
             if (!response.IsSuccessStatusCode)
                 return null;
+            var release = MangoRelease.Parse(Header(response, ReleaseHeader));
+            if (release is null || enrollment && release.Window != Release.Window)
+            {
+                if (enrollment)
+                    throw new PeerFailure(426, "The selected peer has an incompatible Mango protocol window.");
+                return null;
+            }
             var reply = await response.Content.ReadFromJsonAsync<PeerIntro>(Json, timeout.Token);
             return reply is not null && PeerValidation.Valid(reply.Identity) && reply.Node != Guid.Empty &&
-                reply.Device is { Length: > 0 and <= 128 } && MatchesDevice(target, reply.Device) ? reply : null;
+                reply.Device is { Length: > 0 and <= 128 } && MatchesDevice(target, reply.Device)
+                ? new(target.GetLeftPart(UriPartial.Authority), reply, release, release.Window == Release.Window) : null;
         }
         catch (Exception error) when (Unavailable(error, cancellation)) { return null; }
     }
@@ -150,7 +175,8 @@ internal sealed partial class PeerNetwork
     private async Task<PeerReply<T>?> SendAsync<T>(PeerSnapshot from, PeerNode peer, string route, object? body,
         CancellationToken cancellation, bool refresh = false, TimeSpan? timeout = null)
     {
-        if (from.Self is not { } self || from.Records.Identity is not { } identity || from.Token is null || DeviceChanged(from))
+        if (from.Self is not { } self || from.Records.Identity is not { } identity || from.Token is null || DeviceChanged(from) ||
+            route != "ping" && Incompatible(peer.Id))
             return null;
         foreach (var target in Origins(peer).Take(2))
         {
@@ -163,13 +189,16 @@ internal sealed partial class PeerNetwork
                 request.Headers.Add(NetworkHeader, identity.Id.ToString("N"));
                 request.Headers.Add(DigestHeader, from.Digest);
                 request.Headers.Add(RevisionHeader, from.Latest.ToString(System.Globalization.CultureInfo.InvariantCulture));
+                request.Headers.Add(ReleaseHeader, Release.Wire);
                 if (body is not null)
                     request.Content = JsonContent.Create(body, options: Json);
                 using var response = await http.SendAsync(request, deadline.Token);
                 if (route == "ping" && response.StatusCode == HttpStatusCode.Unauthorized &&
-                    await GetIntroAsync(target, deadline.Token) is { } intro && intro.Node == peer.Id &&
+                    await GetIntroAsync(target, deadline.Token) is { Peer: var intro, Release: var advertised } && intro.Node == peer.Id &&
                     intro.Device == peer.Device && intro.Identity.Id == identity.Id)
                 {
+                    if (!ObserveRelease(peer.Id, advertised.Wire))
+                        return null;
                     if (intro.Identity.Generation.CompareTo(identity.Generation) > 0)
                         await ApplyNoticeAsync(new(identity.Id, intro.Identity.Generation), cancellation);
                     return new(default, null, Authenticated: false);
@@ -177,6 +206,11 @@ internal sealed partial class PeerNetwork
                 if (Header(response, NodeHeader) != peer.Id.ToString("N") ||
                     Header(response, NetworkHeader) != identity.Id.ToString("N"))
                     continue;
+                if (!ObserveRelease(peer.Id, Header(response, ReleaseHeader)))
+                {
+                    RecordContact(peer.Id, true, null);
+                    return null;
+                }
                 if (response.StatusCode == HttpStatusCode.Conflict)
                 {
                     var notice = await response.Content.ReadFromJsonAsync<PeerNotice>(Json, deadline.Token);

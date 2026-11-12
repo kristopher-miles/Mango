@@ -36,11 +36,13 @@ internal static partial class PeerChecks
             await TestTailnetAsync(root, status, address);
             await TestPhaseSixAsync(root, status, address);
             await TestPhaseSevenAsync(root, status, address);
+            await TestPhaseEightAsync(root, status, address);
         }
         finally { Console.SetOut(output); }
         Console.WriteLine("Peer checks passed on the live Windows Tailscale interface with two Mango instances.");
         Console.WriteLine("Shared host intent, local dashboard and TLS public ingress checks passed.");
         Console.WriteLine("Log capture, partial collection, retention and offline deletion checks passed.");
+        Console.WriteLine("Release window and host-local maintenance checks passed.");
     }
 
     private static async Task TestTailnetAsync(string root, TailnetStatus status, IPAddress address)
@@ -446,6 +448,7 @@ internal static partial class PeerChecks
             request.Headers.Add(PeerNetwork.NodeHeader, from.Self!.Id.ToString("N"));
             request.Headers.Add(PeerNetwork.NetworkHeader, from.Records.Identity!.Id.ToString("N"));
             request.Headers.Add(PeerNetwork.DigestHeader, from.Digest);
+            request.Headers.Add(PeerNetwork.ReleaseHeader, MangoRelease.Current.Wire);
             request.Content = JsonContent.Create(new { attempt = controlId, fenceMilliseconds = 15000, servingEpoch }, options: Json);
             return request;
         }
@@ -466,14 +469,14 @@ internal static partial class PeerChecks
         public string TailAddress { get; } = tailAddress;
         public string Session { get; } = session;
 
-        public static async Task<Host> StartAsync(string directory, TailnetStatus tailnet, int port)
+        public static async Task<Host> StartAsync(string directory, TailnetStatus tailnet, int port, MangoRelease? release = null)
         {
             Directory.CreateDirectory(directory);
             var settings = new SnapshotFile<LocalSettings>(Path.Combine(directory, "local-settings.json"), LocalSettings.Validate);
             await settings.LoadAsync(new LocalSettings());
             var providers = new ProviderCatalog(directory);
             await providers.InitializeAsync();
-            var peers = new PeerNetwork(directory, port, providers, settings, _ => Task.FromResult(tailnet));
+            var peers = new PeerNetwork(directory, port, providers, settings, _ => Task.FromResult(tailnet), build: release);
             await peers.InitializeAsync();
             var ingress = new PublicIngress(directory, peers);
             await ingress.InitializeAsync();
