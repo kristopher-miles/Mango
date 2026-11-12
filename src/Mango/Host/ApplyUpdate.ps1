@@ -69,6 +69,7 @@ try {
     }
 } finally {
     [IO.File]::Delete($ready)
+    [IO.File]::Delete("$ready.tmp")
     [IO.File]::Delete($armed)
     [IO.File]::Delete($go)
     if ($committed) {

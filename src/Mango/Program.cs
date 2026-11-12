@@ -129,7 +129,11 @@ internal static class Program
             if (control.IsFaulted)
                 control.GetAwaiter().GetResult();
             if (options.UpdateReady is { } nonce)
-                File.WriteAllText(UpdateInstall.ReadyPath(directory, nonce), MangoRelease.Current.Version);
+            {
+                var ready = UpdateInstall.ReadyPath(directory, nonce);
+                File.WriteAllText(ready + ".tmp", MangoRelease.Current.Version);
+                File.Move(ready + ".tmp", ready);
+            }
             try
             {
                 File.Delete(diagnostic);
