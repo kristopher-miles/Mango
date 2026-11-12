@@ -40,6 +40,26 @@ Refresh inventory on setup, local management actions, supported provider events,
 - Exercise one working deployment per required non-chat route; provider absence is a documented incomplete acceptance item, not a reason to invent support.
 - Check that native credentials and Mango authority are not leaked into client responses and that remote-shaped requests cannot enable backend tool execution.
 
+## Qualification
+
+These checks used the Mango loopback listener and actual provider processes on Windows. The Release host and provider fixture checks also passed. Fixtures exercise alias conflicts, embedding result shape, context overflow, input and output parameter preservation, SSE framing, rejection of hosted tool and external-provider controls, DPAPI round trips, sanitized errors, and replacement of a resident image load.
+
+| Provider profile exercised | Version | Checks through Mango |
+| --- | --- | --- |
+| LM Studio managed REST | LM Studio API in installed Bionic 1.1.9 build 6 | Registered the unloaded Qwen2.5-0.5B-Instruct Q4_0 GGUF, applied a 2,048-token instance limit, ran chat and disconnected after the first SSE event, then observed native unload. The backend log recorded that it stopped generation on disconnect. |
+| Unsloth Studio API-only | Unsloth 2026.11.4 | Resolved an installed local GGUF through its native inventory handle, loaded it at 2,048 tokens, ran Qwen chat, then observed zero loaded models after native unload. |
+| Unsloth run managed | Unsloth 2026.11.4 with server-side tools disabled | Reported the loaded Qwen model and effective 2,048-token context, ran chat, disconnected after the first SSE event, and confirmed native unload. Kokoro through audio.cpp returned RIFF WAV and Qwen3 ASR transcribed that upload. SDXL Turbo through Diffusers 0.42.1 and PyTorch 2.15.0 CPU returned a synchronous 512×512 PNG as inline base64. |
+| llama-server single model and router | b12292, commit `af6b5243d` | Managed single-model launch, chat, SSE disconnect with an observed idle slot, and owned-process stop passed. Router load, context, chat, unload, and native SSE inventory updates on external load/unload passed. |
+| llama-server embeddings and decisions | b12292, commit `af6b5243d` | Qwen3-Embedding-0.6B returned batches of 1,024-element float vectors and base64 vectors. LiquidAI d1-omni-600M returned a named System One decision. |
+
+The single-model embeddings profile handles versions that report an embedding model as text in their general model list. Mango reads the actual served context and embedding dimensions when the server reports them. LM Studio embedding deployments can supply missing dimensions and a served limit locally. Text requests use provider token counts where available and a conservative estimate otherwise. Models that lack a reliable media token counter require a configured per-item budget for inline chat or decision media.
+
+Loaded models stay visible when busy. The local bring-up API serves the explicitly selected loaded deployment, with one active request at a time. A client disconnect is forwarded upstream. If the provider cannot confirm that generation stopped, Mango waits for a verified unload or an idle observation before accepting another local submission. Native lifecycle or format support varies by model and installed engine. Use provider controls to load media that needs an engine-specific recipe, and refresh Mango's catalog to observe it. Mango uses the native resident image identity to guard generation and unload.
+
+LM Studio's supported Mango routes are chat, embeddings, and System One on suitable installed models. Its chat profile uses `max_tokens`. Llama chat translates `max_completion_tokens` to the same total generation limit through `max_tokens`. Unsloth supplies the tested synchronous image and audio contracts. The qualified speech deployment returns whole-file audio. Transcription accepts the file, model, language, response format, and timestamp granularities supported by the Unsloth profile. Llama router and single-model profiles expose the operations their inventory establishes.
+
+Attached providers retain their lifecycle authority. Mango directly stops only the provider process it launched. Provider-local output links, persistent jobs, and provider-executed tools are outside this phase's API.
+
 ## Done
 
 The same local UI can register the three providers and present their actual models and capabilities. Required protocols work on suitable installed deployments. The adapter contract is small enough that another provider can be added as one adapter and relevant fixtures, without changing the scheduler. Memory profiling, global catalog edits, public exposure, model downloads, and `best` selection are not added here.

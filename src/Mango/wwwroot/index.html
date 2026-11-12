@@ -21,16 +21,77 @@
         <dl class="host-status">
           <div><dt>Setup</dt><dd>Local host ready</dd></div>
           <div><dt>Role preference</dt><dd id="role-status"></dd></div>
-          <div><dt>Providers</dt><dd>Not configured</dd></div>
+          <div><dt>Providers</dt><dd id="provider-count">Not configured</dd></div>
           <div><dt>Network</dt><dd>Not configured</dd></div>
           <div class="path"><dt>Data location</dt><dd id="data-directory"></dd></div>
         </dl>
         <p id="recovery" class="warning" hidden></p>
       </section>
 
+      <section class="card" aria-labelledby="providers-title">
+        <h2 id="providers-title">Providers and models</h2>
+        <p class="muted">Select one loaded deployment for local inference. Mango will use that model until you change the selection.</p>
+        <p id="providers-recovery" class="warning" hidden></p>
+        <form id="provider-form" aria-labelledby="provider-form-title">
+          <fieldset>
+            <legend id="provider-form-title">Register a provider</legend>
+            <div class="inputs">
+              <label>Provider profile
+                <select name="profile">
+                  <option value="lmStudio">LM Studio</option>
+                  <option value="unslothStudio">Unsloth Studio</option>
+                  <option value="unslothRun">Unsloth run</option>
+                  <option value="llamaSingle">llama.cpp single-model chat or decisions</option>
+                  <option value="llamaEmbedding">llama.cpp single-model embeddings</option>
+                  <option value="llamaRouter">llama.cpp router</option>
+                </select>
+              </label>
+              <label>Management
+                <select name="mode">
+                  <option value="attached">Attached · inference only</option>
+                  <option value="managed">Managed · authorize supported lifecycle controls</option>
+                </select>
+              </label>
+              <label>Provider address<input name="address" type="url" placeholder="http://127.0.0.1:1234"></label>
+              <label>Provider bearer token<input name="token" type="password" autocomplete="off" maxlength="4096"></label>
+              <label class="checkbox" id="provider-clear-token" hidden><input name="clearToken" type="checkbox"> Clear saved token</label>
+            </div>
+            <div class="inputs" id="provider-process" hidden>
+              <label>Authorized llama-server.exe path<input name="executable" type="text" maxlength="1024"></label>
+              <label>Local GGUF file path<input name="modelFile" type="text" maxlength="1024"></label>
+            </div>
+            <p class="muted">Leave the address blank to check the profile's local default. Mango saves provider tokens for the current Windows user.</p>
+          </fieldset>
+          <div class="actions">
+            <button type="submit">Save provider</button>
+            <button type="button" id="provider-cancel" class="secondary" hidden>Cancel edit</button>
+            <button type="button" id="provider-refresh" class="secondary">Refresh catalog</button>
+          </div>
+        </form>
+        <p id="provider-status" class="action-status" role="status"></p>
+        <div id="provider-list"></div>
+
+        <h3>Local inference selection</h3>
+        <p id="selection-status"></p>
+        <button type="button" id="clear-selection" class="secondary" hidden>Clear selection</button>
+        <p class="muted">Choose an explicit deployment or declare an embedding family for embeddings that share a vector space.</p>
+        <div id="deployment-list"></div>
+        <form id="alias-rating-form" hidden>
+          <fieldset>
+            <legend>Set a capability rating for an alias</legend>
+            <div class="inputs">
+              <label>Alias<select name="alias" required></select></label>
+              <label>Capability label<input name="label" type="text" maxlength="100" required></label>
+              <label>Rating (0–5, or blank for unrated)<input name="rating" type="number" min="0" max="5" step="1"></label>
+            </div>
+          </fieldset>
+          <button type="submit">Apply rating to alias</button>
+        </form>
+      </section>
+
       <form id="settings" class="card" aria-labelledby="settings-title">
         <h2 id="settings-title">Contribution</h2>
-        <p class="muted">Mango saves your preference for when inference is available.</p>
+        <p class="muted">Mango saves your preference for future network contribution.</p>
         <fieldset>
           <legend>Local role preference</legend>
           <div class="role-options">

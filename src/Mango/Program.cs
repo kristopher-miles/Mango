@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Diagnostics;
 using Mango.Host;
+using Mango.Providers;
 
 namespace Mango;
 
@@ -78,11 +79,34 @@ internal static class Program
     {
         var settings = new SnapshotFile<LocalSettings>(Path.Combine(directory, "local-settings.json"), LocalSettings.Validate);
         settings.LoadAsync(new LocalSettings()).GetAwaiter().GetResult();
+        var providers = new ProviderCatalog(directory);
         var web = new LocalWeb();
-        var app = web.Build(options.Port, directory, settings, new LoginStartup(options.DataDirectory));
         try
         {
-            app.StartAsync().GetAwaiter().GetResult();
+            providers.InitializeAsync().GetAwaiter().GetResult();
+            var app = web.Build(options.Port, directory, settings, new LoginStartup(options.DataDirectory), providers);
+            try
+            {
+                RunHost(app, options, instance, diagnostic, settings, web, providers);
+            }
+            finally
+            {
+                app.DisposeAsync().AsTask().GetAwaiter().GetResult();
+            }
+        }
+        finally
+        {
+            providers.DisposeAsync().AsTask().GetAwaiter().GetResult();
+        }
+    }
+
+    private static void RunHost(WebApplication app, LaunchOptions options, InstanceControl instance, string diagnostic,
+        SnapshotFile<LocalSettings> settings, LocalWeb web, ProviderCatalog providers)
+    {
+        app.StartAsync().GetAwaiter().GetResult();
+        var inventory = providers.RunAsync(app.Lifetime.ApplicationStopping);
+        try
+        {
             var url = web.BrowserUrl(app.Urls.Single());
             var control = instance.ServeAsync(url, app.Lifetime);
             if (control.IsFaulted)
@@ -111,7 +135,8 @@ internal static class Program
         }
         finally
         {
-            app.DisposeAsync().AsTask().GetAwaiter().GetResult();
+            app.Lifetime.StopApplication();
+            inventory.GetAwaiter().GetResult();
         }
     }
 

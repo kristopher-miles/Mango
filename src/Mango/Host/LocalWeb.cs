@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Mango.Providers;
 using Microsoft.AspNetCore.Http.Features;
 
 namespace Mango.Host;
@@ -14,7 +15,8 @@ internal sealed class LocalWeb
 
     public string BrowserUrl(string origin) => $"{origin}/#session={token}";
 
-    public WebApplication Build(int port, string dataDirectory, SnapshotFile<LocalSettings> settings, LoginStartup startup)
+    public WebApplication Build(int port, string dataDirectory, SnapshotFile<LocalSettings> settings, LoginStartup startup,
+        ProviderCatalog providers)
     {
         var builder = WebApplication.CreateSlimBuilder(new WebApplicationOptions
         {
@@ -44,7 +46,8 @@ internal sealed class LocalWeb
                 "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
             headers["Referrer-Policy"] = "no-referrer";
             headers["X-Content-Type-Options"] = "nosniff";
-            if (context.Request.Path.StartsWithSegments("/api/local"))
+            var localApi = context.Request.Path.StartsWithSegments("/api/local");
+            if (localApi || context.Request.Path.StartsWithSegments("/v1"))
             {
                 headers.CacheControl = "no-store";
                 if (!HasSession(context))
@@ -52,7 +55,7 @@ internal sealed class LocalWeb
                     context.Response.StatusCode = StatusCodes.Status401Unauthorized;
                     return;
                 }
-                if (context.Features.Get<IHttpMaxRequestBodySizeFeature>() is { IsReadOnly: false } bodyLimit)
+                if (localApi && context.Features.Get<IHttpMaxRequestBodySizeFeature>() is { IsReadOnly: false } bodyLimit)
                     bodyLimit.MaxRequestBodySize = 16 * 1024;
             }
             await next(context);
@@ -122,6 +125,7 @@ internal sealed class LocalWeb
                 return Results.Problem(title: "Mango could not change Windows startup.", detail: error.Message);
             }
         });
+        ProviderRoutes.Map(app, local, providers);
         return app;
     }
 

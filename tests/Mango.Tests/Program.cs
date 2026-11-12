@@ -12,6 +12,7 @@ try
 {
     TestDefaults();
     await TestHostAsync(directory);
+    await ProviderChecks.RunAsync();
     Console.WriteLine("Mango host checks passed.");
 }
 finally
@@ -48,6 +49,9 @@ static async Task TestHostAsync(string directory)
 
             using var noSession = await http.GetAsync(endpoint);
             Check(noSession.StatusCode == HttpStatusCode.Unauthorized, "Session required");
+            var modelList = new Uri(url, "/v1/models");
+            using var noInferenceSession = await http.GetAsync(modelList);
+            Check(noInferenceSession.StatusCode == HttpStatusCode.Unauthorized, "Local inference session required");
             using var crossOrigin = new HttpRequestMessage(HttpMethod.Put, endpoint);
             crossOrigin.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
             crossOrigin.Headers.Add("Origin", "https://unrelated.example");
@@ -59,6 +63,8 @@ static async Task TestHostAsync(string directory)
             using var rebinding = await http.SendAsync(wrongHost);
             Check(rebinding.StatusCode == HttpStatusCode.Forbidden, "Foreign Host header denied");
             http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+            using var noModels = await http.GetFromJsonAsync<JsonDocument>(modelList);
+            Check(noModels!.RootElement.GetProperty("data").GetArrayLength() == 0, "No inference aliases before provider setup");
 
             var initial = await ReadSettingsAsync(http, endpoint);
             Check(initial.Role == LocalRole.Leech, "First run starts as leech");

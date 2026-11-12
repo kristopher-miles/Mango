@@ -30,6 +30,32 @@ Settings live in `%LOCALAPPDATA%\Mango`. For isolated runs, pass `--data-dir <pr
 
 If the primary settings file is unreadable, Mango reports recovery from the last good snapshot in the browser. A subsequent settings change retains the unreadable file as `local-settings.json.invalid-*`. If neither copy is usable, check `startup-error.txt` in the data directory. This diagnostic also reports startup binding failures.
 
-Phase 1 provides local settings, including activity thresholds and memory reserve consent. Contribution is a saved preference at this stage. Provider and network setup arrive in later phases.
+## Connect a local model server
+
+Open **Providers and models**, choose the profile for an existing LM Studio, Unsloth Studio, Unsloth run, or llama.cpp server, then save its address and bearer token. A blank address uses the profile's loopback default. HTTP is available on loopback. An explicitly configured non-loopback provider uses HTTPS. Mango protects saved provider tokens with Windows DPAPI for the current user.
+
+**Attached** mode lets Mango inspect the provider and send inference requests. **Managed** mode authorizes the provider's supported model load and unload operations. To let Mango launch and stop a single-model llama-server, give it the full paths to the existing `llama-server.exe` and local GGUF file. An already running process stays under its original owner. The llama.cpp embeddings profile is for a single server started in embedding mode.
+
+Load the model in its provider or use the authorized **Load model** action. Use **Refresh catalog** to observe external changes. In a deployment's details, set its alias, capability ratings, and any missing served limits. Select **Use for local inference** on the loaded deployment. The local list at `GET /v1/models` shows that selected alias once it is eligible. Embedding clients can pin the deployment, or use deployments in an owner-declared compatible family. Equal vector dimensions alone do not guarantee a shared vector space.
+
+Use the loopback host URL and current session bearer for the local API. The command `--url` returns the bearer as the `session` fragment. Keep it private. For example, PowerShell can invoke the selected chat model as follows.
+
+```powershell
+$session = [uri](dotnet .\src\Mango\bin\Release\net10.0-windows\Mango.dll --url)
+$base = $session.GetLeftPart([System.UriPartial]::Authority)
+$headers = @{ Authorization = 'Bearer ' + $session.Fragment.Substring(9) }
+$body = @{
+    model = '<your-selected-alias>'
+    messages = @(@{ role = 'user'; content = 'Say hello.' })
+    max_tokens = 64
+} | ConvertTo-Json -Depth 5
+Invoke-RestMethod "$base/v1/chat/completions" -Method Post -Headers $headers -ContentType 'application/json' -Body $body
+```
+
+For the already-loaded workflow, disable just-in-time model loading in LM Studio and automatic switching and downloading in Unsloth. Start `unsloth run` with `--disable-tools`. Mango accepts client-executed function tools on deployments that report support and disables Unsloth host-side tool execution in forwarded requests.
+
+The local inference surface includes chat completions, embeddings, images, audio transcriptions, speech, and System One decisions when the selected deployment advertises that protocol. Image generation returns inline base64. Transcriptions accept a multipart audio file. The current implementation limits local inference to one request at a time and checks provider state after an interrupted response. See the [provider plan and qualification results](docs/plan/02-provider-integration.md) for tested versions and runtime limits.
+
+Network routing and automatic resource protection arrive in later phases. The contributor preference remains local saved intent.
 
 Runtime state, credentials, logs, models, and generated application builds do not belong in Git. No remote repository or hosted service is required by this plan.

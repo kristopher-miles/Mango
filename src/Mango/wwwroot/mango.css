@@ -29,7 +29,7 @@ fieldset { min-inline-size: 0; padding: 1rem 0 0; margin: 1.4rem 0; border: 0; b
 legend { font-weight: 700; padding: 0 .65rem 0 0; }
 label { display: block; font-weight: 600; }
 input, select, button { font: inherit; }
-input[type="number"], select { width: 100%; padding: .5rem .7rem; border: 1px solid #818a7c; border-radius: .35rem; color: inherit; background: #fff; margin: .25rem 0 0; }
+input:is([type="number"], [type="text"], [type="url"], [type="password"]), select { width: 100%; padding: .5rem .7rem; border: 1px solid #818a7c; border-radius: .35rem; color: inherit; background: #fff; margin: .25rem 0 0; }
 input:is([type="radio"], [type="checkbox"]) { width: 1.05rem; height: 1.05rem; accent-color: var(--accent); margin: 0; }
 label:is(.checkbox, :has(input[type="radio"])) { display: flex; align-items: center; gap: .55rem; min-height: 2.25rem; }
 .role-options { display: flex; flex-wrap: wrap; column-gap: 1.5rem; }
@@ -40,8 +40,16 @@ button:disabled { opacity: .65; cursor: wait; }
 :focus-visible { outline: 3px solid #91611d; outline-offset: 3px; }
 .action-status:not(:empty) { margin-top: .65rem; }
 .error { color: #8b271f; }
+.actions { display: flex; flex-wrap: wrap; gap: .5rem; margin: .65rem 0; }
+button.secondary { background: #ecf1e8; color: #294232; }
+.provider-row, .deployment { border-top: 1px solid var(--border); margin-top: 1rem; padding-top: .75rem; overflow-wrap: anywhere; }
+.deployment summary { cursor: pointer; font-weight: 700; }
+.deployment p { margin: .35rem 0; }
+.rating-row { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) auto; gap: .5rem; align-items: end; margin-bottom: .45rem; }
+#provider-form .muted, #selection-status + button { margin-top: .5rem; }
 
 @media (max-width: 36rem) {
   main { margin-top: 1.25rem; }
   .inputs { grid-template-columns: 1fr; gap: .7rem; }
+  .rating-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
 }
