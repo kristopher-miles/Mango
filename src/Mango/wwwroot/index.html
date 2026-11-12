@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mango · Local settings</title>
+  <link rel="stylesheet" href="/mango.css">
+  <script src="/mango.js" defer></script>
+</head>
+<body>
+  <main>
+    <header>
+      <p class="product">Mango</p>
+      <h1>Local settings</h1>
+    </header>
+
+    <p id="status" role="status">Opening local session…</p>
+    <div id="workspace" hidden>
+      <section class="card" aria-labelledby="host-title">
+        <h2 id="host-title">Host status</h2>
+        <dl class="host-status">
+          <div><dt>Setup</dt><dd>Local host ready</dd></div>
+          <div><dt>Role preference</dt><dd id="role-status"></dd></div>
+          <div><dt>Providers</dt><dd>Not configured</dd></div>
+          <div><dt>Network</dt><dd>Not configured</dd></div>
+          <div class="path"><dt>Data location</dt><dd id="data-directory"></dd></div>
+        </dl>
+        <p id="recovery" class="warning" hidden></p>
+      </section>
+
+      <form id="settings" class="card" aria-labelledby="settings-title">
+        <h2 id="settings-title">Contribution</h2>
+        <p class="muted">Mango saves your preference for when inference is available.</p>
+        <fieldset>
+          <legend>Local role preference</legend>
+          <div class="role-options">
+            <label><input name="role" type="radio" value="leech" required> Leech</label>
+            <label><input name="role" type="radio" value="contributor" required> Contributor</label>
+          </div>
+        </fieldset>
+
+        <fieldset>
+          <legend>Activity protection</legend>
+          <p class="muted">Activity protection and benchmarks will take effect once resource management is available.</p>
+          <label class="checkbox"><input type="checkbox" name="activityMonitoring"> Monitor local activity</label>
+          <div class="inputs">
+            <label>Sampling interval (seconds)<input name="sampleSeconds" type="number" min="2" max="3600" required></label>
+            <label>Quiet cooldown (seconds)<input name="cooldownSeconds" type="number" min="1" max="86400" required></label>
+            <label>CPU cutoff (%)<input name="cpuCutoffPercent" type="number" min="1" max="100" required></label>
+            <label>GPU cutoff (%)<input name="gpuCutoffPercent" type="number" min="1" max="100" required></label>
+            <label>RAM pressure cutoff (%)<input name="ramCutoffPercent" type="number" min="1" max="100" required></label>
+            <label>VRAM pressure cutoff (%)<input name="vramCutoffPercent" type="number" min="1" max="100" required></label>
+          </div>
+        </fieldset>
+
+        <fieldset>
+          <legend>Memory reserves</legend>
+          <p id="reserve-hint" class="muted">Leave a reserve blank to use the default.</p>
+          <div class="inputs">
+            <label>Host RAM reserve (MiB)
+              <input name="ramReserveMiB" type="number" min="0" max="1048576" aria-describedby="reserve-hint ram-default">
+              <span id="ram-default" class="muted"></span>
+            </label>
+            <label>VRAM reserve per discrete GPU (MiB)
+              <input name="vramReserveMiB" type="number" min="0" max="1048576" aria-describedby="reserve-hint vram-default">
+              <span id="vram-default" class="muted"></span>
+            </label>
+          </div>
+          <div id="reserve-warning" class="warning" hidden>
+            <p>Reducing a default memory reserve can cause system instability or shutdown.</p>
+            <label class="checkbox">
+              <input type="checkbox" name="acceptReducedReserve"> I accept this risk on this machine.
+            </label>
+          </div>
+        </fieldset>
+
+        <fieldset>
+          <legend>Benchmarks</legend>
+          <label>When to benchmark
+            <select name="benchmarkPolicy">
+              <option value="never">Never</option>
+              <option value="now">Before serving requests</option>
+              <option value="whenConvenient">When convenient</option>
+            </select>
+          </label>
+        </fieldset>
+        <button type="submit">Save local settings</button>
+        <p id="save-status" class="action-status" role="status"></p>
+      </form>
+
+      <form id="startup" class="card" aria-labelledby="startup-title">
+        <h2 id="startup-title">Windows startup</h2>
+        <label class="checkbox"><input name="enabled" type="checkbox"> Start Mango when I sign in</label>
+        <p class="muted">Mango starts in the tray and waits for you to open the browser.</p>
+        <button type="submit">Save startup preference</button>
+        <p id="startup-status" class="action-status" role="status"></p>
+      </form>
+    </div>
+  </main>
+</body>
+</html>

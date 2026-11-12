@@ -1,0 +1,47 @@
+:root {
+  color-scheme: light;
+  font-family: Inter, "Segoe UI", system-ui, sans-serif;
+  color: #22291e;
+  background: #f5f5ed;
+  line-height: 1.5;
+  --muted: #535b4f;
+  --border: #d8dbd0;
+  --accent: #30513b;
+}
+
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+body { margin: 0; }
+main { width: min(100% - 2rem, 55rem); margin: 2.5rem auto 4rem; }
+header { margin-bottom: 1.5rem; }
+h1, h2, p, dl, dd { margin: 0; }
+h1 { font-size: clamp(2rem, 6vw, 3.2rem); letter-spacing: -.055em; line-height: 1.1; }
+h2 { font-size: 1.25rem; letter-spacing: -.02em; }
+.product { color: var(--accent); font-size: .9rem; font-weight: 700; margin-bottom: .3rem; }
+.card { background: #fff; border: 1px solid var(--border); border-radius: .8rem; padding: clamp(1rem, 3vw, 1.7rem); margin-bottom: 1rem; }
+.host-status, .inputs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; }
+.host-status { margin-top: 1rem; }
+dt, .muted { color: var(--muted); font-size: .9rem; }
+dd { font-weight: 600; }
+.path { grid-column: 1 / -1; overflow-wrap: anywhere; }
+
+fieldset { min-inline-size: 0; padding: 1rem 0 0; margin: 1.4rem 0; border: 0; border-top: 1px solid var(--border); }
+legend { font-weight: 700; padding: 0 .65rem 0 0; }
+label { display: block; font-weight: 600; }
+input, select, button { font: inherit; }
+input[type="number"], select { width: 100%; padding: .5rem .7rem; border: 1px solid #818a7c; border-radius: .35rem; color: inherit; background: #fff; margin: .25rem 0 0; }
+input:is([type="radio"], [type="checkbox"]) { width: 1.05rem; height: 1.05rem; accent-color: var(--accent); margin: 0; }
+label:is(.checkbox, :has(input[type="radio"])) { display: flex; align-items: center; gap: .55rem; min-height: 2.25rem; }
+.role-options { display: flex; flex-wrap: wrap; column-gap: 1.5rem; }
+fieldset > .muted, .checkbox + .muted { margin-bottom: .75rem; }
+.warning { color: #5d3706; background: #fff3d8; border: 1px solid #e9c988; border-radius: .4rem; padding: .75rem; margin-top: .8rem; }
+button { color: #fff; background: var(--accent); border: 0; border-radius: .4rem; padding: .6rem .95rem; cursor: pointer; font-weight: 700; }
+button:disabled { opacity: .65; cursor: wait; }
+:focus-visible { outline: 3px solid #91611d; outline-offset: 3px; }
+.action-status:not(:empty) { margin-top: .65rem; }
+.error { color: #8b271f; }
+
+@media (max-width: 36rem) {
+  main { margin-top: 1.25rem; }
+  .inputs { grid-template-columns: 1fr; gap: .7rem; }
+}

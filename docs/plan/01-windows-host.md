@@ -26,6 +26,10 @@ Bind only loopback at this phase. Provider routes appear in phase 2 and the Tail
 - Check that an unrelated origin cannot change settings, ordinary keyboard controls work, and the headless launch does not need a desktop window.
 - Measure initial idle service cost once to catch a bad foundation early. No provider, telemetry, or network workload is required yet.
 
+The Release build and host checks exercise headless startup, duplicate launches, the local session boundary, memory reserve consent, binding conflicts, and recovery from interrupted and invalid snapshots. On the Windows development machine, a second desktop launch opened the running host in Edge, arrow keys and Tab moved through the controls, and Enter saved the role preference. Closing Edge left the host running. The tray host used 74.3 MiB of working set and averaged 0.10% of one CPU core over a 15-second initial idle sample with the browser closed.
+
+The same-user `--quit` command stopped the tray host and Windows message loop. Direct selection of the native tray menu item and an actual Windows sign-in with startup registration enabled remain unverified.
+
 ## Done
 
 A Windows user can launch the app, reopen its UI, save local settings, and stop it cleanly. The checkout contains source and reproducible build instructions; runtime configuration and credentials live outside Git. No inference provider installation, network wizard, generic command framework, native mobile interface, or auto-updater is part of this phase.
