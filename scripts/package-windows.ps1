@@ -2,7 +2,8 @@
 [CmdletBinding()]
 param(
     [string] $Dotnet = 'dotnet',
-    [string] $OutputDirectory
+    [string] $OutputDirectory,
+    [ValidatePattern('^\d+\.\d+\.\d+$')] [string] $Version
 )
 
 $ErrorActionPreference = 'Stop'
@@ -14,13 +15,15 @@ $archiveDraft = Join-Path $output ('.mango-' + [guid]::NewGuid().ToString('N') +
 
 Push-Location $sourceRoot
 try {
+    $versionArgs = @(if ($Version) { "-p:Version=$Version" })
     & $Dotnet publish src/Mango/Mango.csproj -c Release -r win-x64 --self-contained true --output $staging `
-        -p:RuntimeFrameworkVersion=10.0.15 -p:ContinuousIntegrationBuild=true -p:DebugType=None --nologo
+        -p:RuntimeFrameworkVersion=10.0.15 -p:ContinuousIntegrationBuild=true -p:DebugType=None --nologo @versionArgs
     if ($LASTEXITCODE -ne 0) { throw "Mango publish failed with exit code $LASTEXITCODE." }
     foreach ($required in @('Mango.exe', 'coreclr.dll', 'wwwroot/index.html')) {
         if (-not (Test-Path -LiteralPath (Join-Path $staging $required) -PathType Leaf)) { throw "Publish is missing $required." }
     }
     [IO.File]::Copy((Join-Path $sourceRoot 'docs/windows-install.md'), (Join-Path $staging 'Install.md'))
+    [IO.File]::WriteAllText((Join-Path $staging 'Mango.package'), 'win-x64')
     [IO.Directory]::CreateDirectory($output) | Out-Null
 
     $files = [IO.Directory]::GetFiles($staging, '*', [IO.SearchOption]::AllDirectories)

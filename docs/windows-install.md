@@ -1,4 +1,4 @@
-# Install Mango 0.1.0 on Windows
+# Install Mango on Windows
 
 Mango ships as a Windows x64 ZIP with the .NET 10.0.15 runtime and browser UI. Windows 11 Pro x64 was used for release qualification.
 
