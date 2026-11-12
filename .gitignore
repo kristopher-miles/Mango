@@ -14,6 +14,9 @@
 *.pfx
 *.p12
 mango-answers-*.json
+*.dpapi
+*.gguf
+*.safetensors
 
 # Application builds, editor state, and test output.
 **/bin/
@@ -29,3 +32,14 @@ __pycache__/
 node_modules/
 .DS_Store
 Thumbs.db
+
+# Local agent instructions, editor state, and scratch output.
+[Aa][Gg][Ee][Nn][Tt][Ss].[Mm][Dd]
+.codex/
+.idea/
+.vscode/
+.pytest_cache/
+.venv/
+*.log
+*.tmp
+*.zip
