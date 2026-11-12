@@ -13,5 +13,7 @@
     <Content Update="wwwroot/**/*" CopyToOutputDirectory="PreserveNewest" />
     <InternalsVisibleTo Include="Mango.Tests" />
     <AssemblyMetadata Include="MangoProtocolWindow" Value="1" />
+    <EmbeddedResource Include="../../scripts/update-publisher.pub" LogicalName="Mango.UpdatePublisher" />
+    <EmbeddedResource Include="Host/ApplyUpdate.ps1" LogicalName="Mango.ApplyUpdate" />
   </ItemGroup>
 </Project>

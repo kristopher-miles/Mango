@@ -27,6 +27,12 @@ Password recovery uses the recovery record to replace the master password while 
 
 ## Replace or remove the package
 
-Automatic updates are unavailable. To replace Mango, quit it and extract the new package into a fresh folder. Reenable **Start at login** from the new executable if its path changed. Back up the Mango data directory while the host is stopped before changing releases. A prior binary can be restored only when it supports the saved data format. Use the saved pre-upgrade data if a newer version changed it incompatibly.
+If you installed v0.0.1, replace it manually once to get the updater. Quit Mango and extract the new ZIP into a fresh folder. Reenable **Start at login** from the new executable if its path changed. Keep the application in a dedicated, writable folder on a local drive, and keep its data directory separate.
+
+In **Local settings**, enable **Check for safe updates daily**. Mango checks GitHub while running. It verifies Mango's signature and the ZIP, then installs a newer release in the same communications protocol window after active inference finishes. A protocol cutoff requires a manual upgrade. Use **Check GitHub now** to check immediately. **Defer future maintenance on this host** pauses automatic installs.
+
+**Queue safe update on peers** asks other nodes to verify the same release independently. Only nodes that enabled automatic updates can queue it. Mango staggers the restart windows. If a peer cannot verify eligibility or is unreachable, the sender must explicitly choose to proceed with the verified peers. An offline node can check for itself when it is running again.
+
+Mango keeps the previous program folder next to the updated installation. If the replacement cannot start, Mango attempts to restore the previous folder and records the result in `update-result.json` in the data directory. Keep a backup of the data directory before manually crossing a cutoff. Restore an older binary only when it can read the saved data.
 
 To uninstall, disable **Start at login**, quit Mango, and remove the extracted program folder. Mango settings and logs live in the separate data directory. Use **Clear logs** or **Full network reset** for their documented effects. Provider applications and weights live in their own locations.

@@ -41,10 +41,15 @@
         </dl>
         <p id="recovery" class="warning" hidden></p>
         <form id="maintenance">
+          <label class="check"><input name="daily" type="checkbox"> Check for safe updates daily</label>
           <label class="check"><input name="deferred" type="checkbox"> Defer future maintenance on this host</label>
-          <button class="secondary" type="submit">Save maintenance preference</button>
+          <button class="secondary" type="submit">Save update preferences</button>
           <p id="maintenance-status" class="action-status" role="status"></p>
         </form>
+        <button id="update-check" class="secondary" type="button">Check GitHub now</button>
+        <button id="update-share" class="secondary" type="button">Queue safe update on peers</button>
+        <label id="update-partial-label" class="check" hidden><input id="update-partial" type="checkbox"> Proceed with verified peers only</label>
+        <p id="update-action" class="action-status" role="status"></p>
       </section>
 
       <section id="private-network" class="card" aria-labelledby="network-title">

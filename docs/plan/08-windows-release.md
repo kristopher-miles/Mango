@@ -1,5 +1,7 @@
 # Phase 8 Windows packaging and release completion
 
+This records the original local packaging phase. GitHub publishing and protocol-cutoff updates were added later; see [release publishing](../releases.md) and [installation and updates](../windows-install.md).
+
 Deliver the complete non-deferred Windows application as a reproducible local package, with compatibility cutoffs, clear update unavailability, and bounded final qualification. Depends on phases 1–7. This is the final implementation phase, not permission to implement deferred features.
 
 Read the shared foundation, NFR-01–06, UPDATE-01–11 with the Q26 deferral, and the applicable [Acceptance scenarios](../requirements/06-acceptance-and-coverage.md). The historical proposed numeric limits do not become release gates.

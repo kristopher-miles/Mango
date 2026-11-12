@@ -28,6 +28,7 @@ internal sealed record LocalSettings
     [JsonRequired] public bool ReducedReserveConsent { get; init; }
     [JsonRequired] public BenchmarkPolicy BenchmarkPolicy { get; init; } = BenchmarkPolicy.Never;
     public bool MaintenanceDeferred { get; init; }
+    public bool DailyUpdates { get; init; }
 
     public static string? Validate(LocalSettings settings)
     {

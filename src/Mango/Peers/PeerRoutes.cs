@@ -137,6 +137,9 @@ internal static class PeerRoutes
             HandleAsync(context, token => peers.MergeAsync(incoming, token)));
         peer.MapPost("/notice", (PeerNotice notice, HttpContext context) =>
             HandleAsync(context, token => peers.ApplyNoticeAsync(notice, token)));
+        peer.MapPost("/update", (UpdateOffer offer, HttpContext context) =>
+            HandleAsync(context, token => peers.Updates?.OfferAsync(offer, token) ??
+                Task.FromResult(new UpdateReply("This installation cannot update automatically"))));
         peer.MapGet("/key/{id:guid}", (Guid id) => new PeerKeyReply(peers.Snapshot.Keys.GetValueOrDefault(id)));
         peers.MapAttemptRoutes(peer);
         peers.MapPeerLogs(peer);

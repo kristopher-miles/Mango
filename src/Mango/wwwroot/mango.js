@@ -124,9 +124,13 @@ startupForm.addEventListener("submit", event => {
     api("startup", { enabled: startupForm.elements.enabled.checked }));
 });
 
-async function loadRelease() {
+async function loadRelease(refreshPreferences = false) {
   const state = await api("release");
-  maintenanceForm.elements.deferred.checked = state.maintenanceDeferred;
+  if (refreshPreferences) {
+    maintenanceForm.elements.deferred.checked = state.maintenanceDeferred;
+    maintenanceForm.elements.daily.checked = state.dailyUpdates;
+    maintenanceForm.elements.daily.disabled = !state.canUpdate;
+  }
   document.querySelector("#release-status").textContent =
     `${state.release.version} · Protocol window ${state.release.window} · ${state.updates}${state.draining ? " Serving is draining for maintenance." : ""}`;
 }
@@ -134,7 +138,34 @@ async function loadRelease() {
 maintenanceForm.addEventListener("submit", event => {
   event.preventDefault();
   submit(maintenanceForm, document.querySelector("#maintenance-status"), () =>
-    api("release/deferral", { deferred: maintenanceForm.elements.deferred.checked }));
+    api("release/deferral", { deferred: maintenanceForm.elements.deferred.checked, daily: maintenanceForm.elements.daily.checked }));
+});
+
+const updateAction = document.querySelector("#update-action");
+const updatePartial = document.querySelector("#update-partial");
+const updatePartialLabel = document.querySelector("#update-partial-label");
+
+document.querySelector("#update-check").addEventListener("click", async () => {
+  try {
+    await api("release/check", null, "POST");
+    await loadRelease();
+  } catch (error) { updateAction.textContent = error.message; }
+});
+
+document.querySelector("#update-share").addEventListener("click", async event => {
+  const button = event.currentTarget;
+  button.disabled = true;
+  updateAction.textContent = "Verifying the release with peers…";
+  try {
+    const result = await api("release/share", { allowPartial: updatePartial.checked }, "POST");
+    updatePartial.checked = false;
+    updatePartialLabel.hidden = !result.needsOverride;
+    const detail = result.peers.map(peer => `${peer.name}: ${peer.state}`).join(" · ");
+    updateAction.textContent = result.needsOverride
+      ? `Mango ${result.version}: no updates were queued. Some peers could not verify eligibility. ${detail}`
+      : `Mango ${result.version}: ${detail || "No other nodes are enrolled."}`;
+  } catch (error) { updateAction.textContent = error.message; }
+  finally { button.disabled = false; }
 });
 
 function showSessionError(error) {
@@ -394,4 +425,7 @@ aliasRatingForm.addEventListener("submit", event => {
 });
 
 loadSettings().then(loadProviders).catch(showSessionError);
-loadRelease().catch(error => document.querySelector("#release-status").textContent = error.message);
+loadRelease(true).catch(error => document.querySelector("#release-status").textContent = error.message);
+setInterval(() => {
+  if (token && !document.hidden) loadRelease().catch(error => document.querySelector("#release-status").textContent = error.message);
+}, 15000);

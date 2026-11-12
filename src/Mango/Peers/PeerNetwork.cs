@@ -61,14 +61,26 @@ internal sealed partial class PeerNetwork(string directory, int port, ProviderCa
     {
         if (settings.Value.MaintenanceDeferred)
             return false;
+        Task ingress;
+        lock (authorization)
+        {
+            ingressDrain ??= new(TaskCreationOptions.RunContinuationsAsynchronously);
+            if (ingressLeases == 0)
+                ingressDrain.TrySetResult();
+            ingress = ingressDrain.Task;
+        }
         var drain = serving.DrainAsync(timeout, cancellation);
         QueueCatalog();
+        try { await Task.WhenAll(drain, ingress.WaitAsync(timeout, cancellation)); }
+        catch (TimeoutException) { return false; }
         return await drain;
     }
 
     internal void ResumeAdmissions()
     {
         serving.ResumeAdmissions();
+        lock (authorization)
+            ingressDrain = null;
         QueueCatalog();
     }
 

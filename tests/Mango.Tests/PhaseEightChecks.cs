@@ -25,7 +25,7 @@ internal static partial class PeerChecks
             var created = await Local(http, first, "network/create", new CreateNetworkRequest("Release one", Password));
             var identity = created.GetProperty("identity").GetProperty("id").GetGuid();
             await Local(http, second, "network/join", new JoinNetworkRequest("Release two", first.TailAddress, identity, Password));
-            await Local(http, second, "release/deferral", new { deferred = true }, expected: 204);
+            await Local(http, second, "release/deferral", new { deferred = true, daily = true }, expected: 204);
             Check(!await second.Network.DrainForMaintenanceAsync(TimeSpan.FromSeconds(1), default) && !second.Network.Draining,
                 "local deferral blocks a maintenance drain");
             var same = (await Local(http, first, "network")).GetProperty("nodes")[0];
@@ -54,13 +54,18 @@ internal static partial class PeerChecks
                 }
             }
             var deferral = await Local(http, second, "release");
-            Check(deferral.GetProperty("maintenanceDeferred").GetBoolean() &&
+            Check(deferral.GetProperty("maintenanceDeferred").GetBoolean() && deferral.GetProperty("dailyUpdates").GetBoolean() &&
                 deferral.GetProperty("updates").GetString() == "Automatic updates are unavailable.", "deferral persists without an update service");
 
             await second.DisposeAsync();
             second = await Host.StartAsync(secondPath, status, secondPort, sameWindow);
             Check((await Local(http, first, "network")).GetProperty("nodes")[0].GetProperty("compatible").GetBoolean(),
                 "compatible reconnect clears the cached cutoff diagnosis");
+            await Local(http, second, "release/deferral", new { deferred = false }, expected: 204);
+            Check(await second.Network.DrainForMaintenanceAsync(TimeSpan.FromSeconds(2), default), "idle host drains");
+            await Request(http, HttpMethod.Get, second.LocalAddress + "/v1/models", second.Session, expected: 503);
+            second.Network.ResumeAdmissions();
+            await Request(http, HttpMethod.Get, second.LocalAddress + "/v1/models", second.Session);
         }
         finally { await second.DisposeAsync(); }
     }

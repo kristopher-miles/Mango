@@ -104,7 +104,8 @@ internal sealed class LocalWeb
                     return next with
                     {
                         ReducedReserveConsent = current.ReducedReserveConsent || (reduced && update.AcceptReducedReserve),
-                        MaintenanceDeferred = current.MaintenanceDeferred
+                        MaintenanceDeferred = current.MaintenanceDeferred,
+                        DailyUpdates = current.DailyUpdates
                     };
                 }, cancellationToken);
                 return Results.NoContent();
@@ -136,12 +137,27 @@ internal sealed class LocalWeb
         });
         local.MapGet("/release", () => new
         {
-            peers.Release, Updates = "Automatic updates are unavailable.", settings.Value.MaintenanceDeferred, peers.Draining
+            peers.Release, Updates = peers.Updates?.Status ?? "Automatic updates are unavailable.",
+            settings.Value.MaintenanceDeferred, settings.Value.DailyUpdates, peers.Draining,
+            CanUpdate = peers.Updates?.Available == true
         });
         local.MapPut("/release/deferral", (MaintenanceUpdate update, HttpContext context) => PeerRoutes.HandleAsync(context, async token =>
         {
-            await settings.UpdateAsync(current => current with { MaintenanceDeferred = update.Deferred }, token);
+            await settings.UpdateAsync(current => current with
+            {
+                MaintenanceDeferred = update.Deferred,
+                DailyUpdates = update.Daily ?? current.DailyUpdates
+            }, token);
+            peers.Updates?.PreferencesChanged();
         }));
+        local.MapPost("/release/check", () =>
+        {
+            peers.Updates?.CheckNow();
+            return Results.NoContent();
+        });
+        local.MapPost("/release/share", (ShareUpdate input, HttpContext context) => PeerRoutes.HandleAsync(context, token =>
+            peers.Updates?.ShareAsync(input.AllowPartial, token) ??
+            throw new PeerFailure(409, "Update sharing is unavailable.")));
         PeerRoutes.MapLocal(local, peers);
         ingress?.Map(local);
         ProviderRoutes.Map(app, local, providers, peers);
@@ -176,5 +192,6 @@ internal sealed class LocalWeb
 
     private sealed record SettingsUpdate(LocalSettings? Settings, bool AcceptReducedReserve);
     private sealed record StartupUpdate([property: JsonRequired] bool Enabled);
-    private sealed record MaintenanceUpdate([property: JsonRequired] bool Deferred);
+    private sealed record MaintenanceUpdate([property: JsonRequired] bool Deferred, bool? Daily);
+    private sealed record ShareUpdate(bool AllowPartial);
 }

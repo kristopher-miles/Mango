@@ -47,6 +47,7 @@ internal static class Program
                 return 0;
             }
 
+            using var package = UpdateInstall.HoldPackage();
             Run(options, directory, instance, diagnostic);
             return 0;
         }
@@ -84,6 +85,8 @@ internal static class Program
         using var resources = new ResourceProtection(directory, settings);
         var providers = new ProviderCatalog(directory, resources);
         var peers = new PeerNetwork(directory, options.PeerPort, providers, settings);
+        using var updates = new WindowsUpdates(directory, options.RestartArguments(), settings, peers, options.UpdateReady is not null);
+        peers.Updates = updates;
         var ingress = new PublicIngress(directory, peers);
         var web = new LocalWeb();
         try
@@ -96,7 +99,7 @@ internal static class Program
             var app = web.Build(options.Port, directory, settings, new LoginStartup(options.DataDirectory), providers, peers, ingress);
             try
             {
-                RunHost(app, options, instance, diagnostic, settings, web, providers, peers);
+                RunHost(app, options, directory, instance, diagnostic, settings, web, providers, peers, updates);
             }
             finally
             {
@@ -111,19 +114,22 @@ internal static class Program
         }
     }
 
-    private static void RunHost(WebApplication app, LaunchOptions options, InstanceControl instance, string diagnostic,
-        SnapshotFile<LocalSettings> settings, LocalWeb web, ProviderCatalog providers, PeerNetwork peers)
+    private static void RunHost(WebApplication app, LaunchOptions options, string directory, InstanceControl instance, string diagnostic,
+        SnapshotFile<LocalSettings> settings, LocalWeb web, ProviderCatalog providers, PeerNetwork peers, WindowsUpdates updates)
     {
         app.StartAsync().GetAwaiter().GetResult();
         var inventory = providers.RunAsync(app.Lifetime.ApplicationStopping);
         var network = peers.RunAsync(app.Lifetime.ApplicationStopping);
         var protection = providers.Resources!.RunAsync(providers, app.Lifetime.ApplicationStopping);
+        var updateChecks = updates.RunAsync(app.Lifetime);
         try
         {
             var url = web.BrowserUrl(app.Urls.Single());
             var control = instance.ServeAsync(url, app.Lifetime);
             if (control.IsFaulted)
                 control.GetAwaiter().GetResult();
+            if (options.UpdateReady is { } nonce)
+                File.WriteAllText(UpdateInstall.ReadyPath(directory, nonce), MangoRelease.Current.Version);
             try
             {
                 File.Delete(diagnostic);
@@ -149,7 +155,7 @@ internal static class Program
         finally
         {
             app.Lifetime.StopApplication();
-            Task.WhenAll(inventory, network, protection).GetAwaiter().GetResult();
+            Task.WhenAll(inventory, network, protection, updateChecks).GetAwaiter().GetResult();
         }
     }
 
@@ -166,9 +172,14 @@ internal static class Program
         }
     }
 
-    private sealed record LaunchOptions(bool Headless, bool Background, bool Quit, bool PrintUrl, string? DataDirectory, int Port, int PeerPort)
+    private sealed record LaunchOptions(bool Headless, bool Background, bool Quit, bool PrintUrl, string? DataDirectory, int Port,
+        int PeerPort, string? UpdateReady)
     {
         public bool ControlOnly => Quit || PrintUrl;
+
+        public string RestartArguments() => $"{(Headless ? "--headless" : "--background")} --port {Port} --peer-port {PeerPort}" +
+            (DataDirectory is null ? "" : " --data-dir \"" + DataDirectory +
+                (Path.EndsInDirectorySeparator(DataDirectory) ? "\\" : "") + "\"");
 
         public static LaunchOptions Parse(string[] args)
         {
@@ -179,6 +190,7 @@ internal static class Program
             var port = 0;
             var peerPort = PeerLimits.DefaultPort;
             string? directory = null;
+            string? updateReady = null;
             for (var index = 0; index < args.Length; index++)
             {
                 switch (args[index])
@@ -187,6 +199,9 @@ internal static class Program
                     case "--background": background = true; break;
                     case "--quit": quit = true; break;
                     case "--url": printUrl = true; break;
+                    case "--update-ready" when index + 1 < args.Length && Guid.TryParseExact(args[index + 1], "N", out _):
+                        updateReady = args[++index];
+                        break;
                     case "--data-dir" when index + 1 < args.Length:
                         directory = Path.TrimEndingDirectorySeparator(Path.GetFullPath(args[++index]));
                         break;
@@ -202,7 +217,7 @@ internal static class Program
             }
             if ((headless ? 1 : 0) + (background ? 1 : 0) + (quit ? 1 : 0) + (printUrl ? 1 : 0) > 1)
                 throw new ArgumentException("Use only one launch mode at a time.");
-            return new LaunchOptions(headless, background, quit, printUrl, directory, port, peerPort);
+            return new LaunchOptions(headless, background, quit, printUrl, directory, port, peerPort, updateReady);
         }
     }
 }

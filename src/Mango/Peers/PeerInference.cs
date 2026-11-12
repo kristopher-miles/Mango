@@ -16,6 +16,8 @@ internal sealed partial class PeerNetwork
     private static readonly Dictionary<string, InferenceOperation> InferenceOperations = Enum.GetValues<InferenceOperation>()
         .ToDictionary(InferencePaths.Path, StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<Guid, ActiveKey> active = [];
+    private int ingressLeases;
+    private TaskCompletionSource? ingressDrain;
     private readonly object lookupLock = new();
     private readonly Dictionary<Guid, Task> lookups = [];
     private readonly Dictionary<Guid, DateTimeOffset> negatives = [];
@@ -28,10 +30,10 @@ internal sealed partial class PeerNetwork
         public int Count { get; set; }
     }
 
-    private sealed class InferenceLease(PeerNetwork owner, Guid id, ActiveKey active, InferenceAccess access) : IDisposable
+    private sealed class InferenceLease(PeerNetwork owner, Guid id, ActiveKey active, InferenceAccess access, bool forwarded) : IDisposable
     {
         public InferenceAccess Access { get; } = access;
-        public void Dispose() => owner.ReleaseLease(id, active);
+        public void Dispose() => owner.ReleaseLease(id, active, forwarded);
     }
 
     public static bool IsInferenceRequest(HttpRequest request) =>
@@ -71,9 +73,12 @@ internal sealed partial class PeerNetwork
         using var lease = AcquireLease(id, secret, operation, out var status);
         if (lease is null)
         {
-            await InferenceError(context, status, status == 403
-                ? "The inference credential does not allow this operation."
-                : "The inference credential was rejected.");
+            await InferenceError(context, status, status switch
+            {
+                403 => "The inference credential does not allow this operation.",
+                503 => "Mango is draining for maintenance.",
+                _ => "The inference credential was rejected."
+            });
             return;
         }
         context.Items[typeof(InferenceAccess)] = lease.Access;
@@ -98,22 +103,31 @@ internal sealed partial class PeerNetwork
                     return null;
                 }
             }
+            if (!forwarded && ingressDrain is not null)
+            {
+                status = 503;
+                return null;
+            }
             if (!active.TryGetValue(id, out var currentLease))
             {
                 active[id] = currentLease = new();
                 if (key?.ExpiresAt is { } expires && expires - clock.GetUtcNow() is { TotalMilliseconds: > 0 and < uint.MaxValue } remaining)
                     currentLease.Stop.CancelAfter(remaining);
             }
+            if (!forwarded)
+                ingressLeases++;
             currentLease.Count++;
             return new(this, id, currentLease, new(key?.Id, key?.Name, key?.Scopes ?? [], key?.Priority ?? KeyPriority.Normal,
-                currentLease.Stop.Token));
+                currentLease.Stop.Token), forwarded);
         }
     }
 
-    private void ReleaseLease(Guid id, ActiveKey lease)
+    private void ReleaseLease(Guid id, ActiveKey lease, bool forwarded)
     {
         lock (authorization)
         {
+            if (!forwarded && --ingressLeases == 0)
+                ingressDrain?.TrySetResult();
             if (--lease.Count != 0)
                 return;
             if (active.GetValueOrDefault(id) == lease)

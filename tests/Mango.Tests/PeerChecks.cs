@@ -20,6 +20,7 @@ internal static partial class PeerChecks
     public static async Task RunAsync(string root)
     {
         TestMerge();
+        await TestUpdateAsync(root);
         await TestLogStoreAsync(root);
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(8));
         var status = await Tailnet.ReadAsync(timeout.Token);
