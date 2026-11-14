@@ -84,6 +84,9 @@ internal static partial class PeerChecks
 
             var originalRequests = 0;
             LogEntry? capturedChat = null;
+            var policyRevision = (await Local(http, first, "logs")).GetProperty("settings").GetProperty("revision").Deserialize<Revision>(Json);
+            await Local(http, first, "logs/settings", LogSettings(RequestLogMode.Sparse) with { ExpectedRevision = policyRevision }, admin);
+            await Local(http, first, "logs/settings", LogSettings(RequestLogMode.Everything) with { ExpectedRevision = policyRevision }, admin, expected: 409);
             await Local(http, first, "logs/settings", LogSettings(RequestLogMode.Everything), expected: 403);
             foreach (var mode in Enum.GetValues<RequestLogMode>())
             {

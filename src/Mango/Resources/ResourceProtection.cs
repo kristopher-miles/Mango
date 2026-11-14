@@ -141,11 +141,71 @@ internal sealed partial class ResourceProtection : IDisposable
                 if (requested is not null && requested != operation)
                     return false;
                 var budget = FindBudget(model, endpoint, operation);
-                return budget is not null && AttributionAllows(endpoint, settings.Value, observed, budget.AllowAttached) &&
-                    !unsafePlacements.Contains(FaultKey(budget)) &&
-                    (operation is not (InferenceOperation.Chat or InferenceOperation.Embeddings or InferenceOperation.SystemOne) ||
-                        model.Context is null || budget.Workload.Units >= model.Context);
+                return BudgetBlocker(model, endpoint, operation, budget) is null;
             });
+        }
+    }
+
+    private (string State, string Reason, string Action)? BudgetBlocker(Deployment model, EndpointStatus endpoint,
+        InferenceOperation operation, ResourceBudget? budget)
+    {
+        if (budget is null)
+            return ("limits", "Set workload and memory limits for this model and operation.", "qualification");
+        if (observed is null || !AttributionAllows(endpoint, settings.Value, observed, budget.AllowAttached))
+            return endpoint.Mode == ProviderMode.Attached
+                ? ("attached", "Acknowledge the attached provider limitation in local qualification.", "qualification")
+                : ("attribution", "Activity protection needs attributable workers and a verified managed release path.", "provider");
+        if (unsafePlacements.Contains(FaultKey(budget)))
+            return ("allocation", "An allocation failed. Correct the local limits or explicitly retry the benchmark.", "qualification");
+        if (operation is InferenceOperation.Chat or InferenceOperation.Embeddings or InferenceOperation.SystemOne &&
+            model.Context is { } context && budget.Workload.Units < context)
+            return ("contextLimit", "The workload limit is smaller than the served context. Qualify the full context.", "qualification");
+        return null;
+    }
+
+    // Read-only explanation of the same availability facts; admission still checks live pressure and reserves capacity.
+    public ServingReadiness Readiness(Deployment model, EndpointStatus endpoint, InferenceOperation? requested = null)
+    {
+        lock (sync)
+        {
+            var available = IsAvailable(model, endpoint, requested);
+            ServingReadiness State(string state, string reason, string? action = null) => new(state, reason, action, available);
+            if (!model.Online) return State("offline", "The provider is unreachable. Check its address, credential, and process.", "provider");
+            if (!model.Model.Installed) return State("installation", "Install this model in its provider, then refresh the inventory.", "provider");
+            if (settings.Value.Role != LocalRole.Contributor) return State("contribution", "Turn on contribution for this computer to serve network requests.", "contribution");
+            if (status.State != ContributionState.Contributor) return State("protection", status.Reason ?? "Local protection is holding contribution.", "protection");
+            if (observed is not { } latest || clock.GetUtcNow() - latest.At > TimeSpan.FromSeconds(settings.Value.SampleSeconds + 5))
+                return State("telemetry", "Waiting for current Windows resource observations.", "observations");
+            if (latest.Hardware is null) return State("telemetry", "Windows GPU memory topology is unavailable.", "observations");
+            var operations = Operations(model, endpoint).Where(operation => requested is null || requested == operation).ToArray();
+            if (operations.Length == 0) return State("protocol", "The provider has not reported a supported inference operation.", "provider");
+            if (!model.Eligible && !(endpoint.CanLoad && model.Model.SupportsLoad))
+            {
+                if (model.Instance is null) return State("load", "Load this model in its provider. This registration has no authorized load action.", "provider");
+                if (model.Context is null) return State("context", "Enter the served context when the provider cannot report it.", "model");
+                if (operations.Contains(InferenceOperation.Embeddings) && model.EmbeddingDimensions is null)
+                    return State("dimensions", "Enter embedding dimensions when the provider cannot report them.", "model");
+                return State("protocol", "The provider has not confirmed this model's serving capabilities.", "provider");
+            }
+            var candidates = operations.Select(operation => (Operation: operation, Budget: FindBudget(model, endpoint, operation))).ToArray();
+            var qualified = candidates.FirstOrDefault(candidate => BudgetBlocker(model, endpoint, candidate.Operation, candidate.Budget) is null);
+            if (qualified.Budget is null)
+            {
+                var blocker = BudgetBlocker(model, endpoint, candidates[0].Operation, candidates[0].Budget)!.Value;
+                return State(blocker.State, blocker.Reason, blocker.Action);
+            }
+            if (settings.Value.BenchmarkPolicy == BenchmarkPolicy.Now && !benchmarksReady)
+                return State("benchmark", "The selected benchmark policy requires complete local profiles before inference.", "qualification");
+            if (model.Busy || model.Instance?.Busy == true || reservations.Any(item => item.Endpoint == model.EndpointId && !item.Settled))
+                return State("busy", "This provider is busy. New work may wait for capacity.");
+            if (Pressure(latest, settings.Value) is { } pressure) return State("pressure", pressure, "protection");
+            var cost = model.Instance is null ? qualified.Budget.Load : qualified.Budget.Execute;
+            if (model.Instance is null && cost.RamBytes == 0 && cost.DeviceBytes.Values.All(value => value == 0))
+                return State("loadLimit", "Enter a measured peak memory allowance before loading this model.", "qualification");
+            if (!Fits(cost, latest, latest.FreeRam, settings.Value))
+                return State("capacity", "The qualified workload does not fit current RAM or dedicated VRAM reserves. Work may wait.", "qualification");
+            return model.Instance is null ? State("readyToLoad", "Ready for automatic loading when a matching request arrives.")
+                : State("ready", "Ready for matching requests. Admission checks live resources before starting work.");
         }
     }
 

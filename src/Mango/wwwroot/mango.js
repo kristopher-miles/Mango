@@ -6,426 +6,297 @@ if (fragmentToken !== null) {
   if (/^[A-F0-9]{64}$/.test(fragmentToken)) sessionStorage.setItem("mango-session", fragmentToken);
 }
 const token = sessionStorage.getItem("mango-session");
+addEventListener("hashchange", () => {
+  const session = new URLSearchParams(location.hash.slice(1)).get("session");
+  if (session === null) return;
+  history.replaceState(null, "", location.pathname + location.search);
+  if (/^[A-F0-9]{64}$/.test(session)) { sessionStorage.setItem("mango-session", session); location.reload(); }
+});
 const workspace = document.querySelector("#workspace");
 const status = document.querySelector("#status");
-const settingsForm = document.querySelector("#settings");
 const startupForm = document.querySelector("#startup");
 const maintenanceForm = document.querySelector("#maintenance");
-const reserveWarning = document.querySelector("#reserve-warning");
-const reserveConsent = settingsForm.elements.acceptReducedReserve;
-const numbers = [
-  "sampleSeconds", "cooldownSeconds", "cpuCutoffPercent", "gpuCutoffPercent",
-  "ramCutoffPercent", "vramCutoffPercent", "ramReserveMiB", "vramReserveMiB"
-];
-let view;
-let dirty = false;
-let networkAdmin = null;
+const providerForm = document.querySelector("#provider-form");
+const providerStatus = document.querySelector("#provider-status");
+const aliasRatingForm = document.querySelector("#alias-rating-form");
+const profileNames = { lmStudio: "LM Studio", unslothStudio: "Unsloth Studio", unslothRun: "Unsloth run",
+  llamaSingle: "llama.cpp single model", llamaEmbedding: "llama.cpp embeddings", llamaRouter: "llama.cpp router", generic: "Generic endpoint" };
+const operationNames = { chat: "Chat", embeddings: "Embeddings", images: "Images", transcription: "Transcription", speech: "Speech", systemOne: "System One" };
+const servingFields = ["servedContext", "embeddingDimensions", "embeddingFamily", "mediaTokensPerItem"];
+const stateNames = { contributor: "Contributing", withdrawing: "Withdrawing", cooldown: "Cooling down", manualLeech: "Contribution off", fault: "Protection needs attention" };
+const benchmarkNames = { never: "Never", now: "Now", whenConvenient: "When convenient" };
+const writers = new Map();
+let view, settingsWriter, startupWriter;
+const administration = { token: null, expiresAt: null, timer: null, locking: false, pendingRevocation: null };
 
-async function api(path, body, method = body ? "PUT" : "GET") {
+async function api(path, body, method = body == null ? "GET" : "PUT", administrationToken) {
   if (!token) throw new Error("Open Mango again to start a local session.");
+  if (administration.token && administration.expiresAt && Date.parse(administration.expiresAt) <= Date.now()) setAdministration(null);
   const headers = { Authorization: `Bearer ${token}` };
-  if (networkAdmin) headers["Mango-Admin"] = networkAdmin;
-  if (body) headers["Content-Type"] = "application/json";
-  const response = await fetch(`/api/local/${path}`, {
-    method,
-    headers,
-    body: body ? JSON.stringify(body) : undefined,
-    cache: "no-store"
-  });
+  if (administrationToken || administration.token) headers["Mango-Admin"] = administrationToken || administration.token;
+  const sentAdministration = headers["Mango-Admin"];
+  if (body != null) headers["Content-Type"] = "application/json";
+  const response = await fetch(`/api/local/${path}`, { method, headers,
+    body: body != null ? JSON.stringify(body) : undefined, cache: "no-store" });
   if (!response.ok) {
     const details = await response.json().catch(() => ({}));
-    throw new Error(details.error || details.detail || (response.status === 401
-      ? "Your local session has ended. Open Mango again." : `Mango returned HTTP ${response.status}.`));
+    const error = Object.assign(new Error(details.error || details.detail || (response.status === 401
+      ? "Your local session has ended. Open Mango again." : `Mango returned HTTP ${response.status}.`)),
+      { status: response.status, code: details.code });
+    if (error.code === "admin_required" && administration.token === sentAdministration) setAdministration(null);
+    if (error.code === "local_session_required" || response.status === 401 && !details.error && !details.detail) {
+      for (const writer of writers.values()) writer.pause("Local session ended · reopen Mango");
+      showSessionError(error);
+    }
+    throw error;
   }
   return response.status === 204 ? undefined : response.json();
 }
 
-function needsConsent() {
-  const inputs = settingsForm.elements;
-  return !view.settings.reducedReserveConsent && (
-    inputs.ramReserveMiB.value !== "" && inputs.ramReserveMiB.valueAsNumber < view.defaultRamReserveMiB ||
-    inputs.vramReserveMiB.value !== "" && inputs.vramReserveMiB.valueAsNumber < view.defaultVramReserveMiB
-  );
-}
-
-function showReserveWarning() {
-  const needed = needsConsent();
-  reserveWarning.hidden = !needed;
-  reserveConsent.required = needed;
-  if (!needed) reserveConsent.checked = false;
-}
-
-async function loadSettings() {
-  view = await api("settings");
-  const inputs = settingsForm.elements;
-  inputs.role.value = view.settings.role;
-  inputs.activityMonitoring.checked = view.settings.activityMonitoring;
-  inputs.benchmarkPolicy.value = view.settings.benchmarkPolicy;
-  for (const choice of document.querySelectorAll("[data-benchmark-choice]"))
-    if (!choice.dataset.changed) choice.value = view.settings.benchmarkPolicy;
-  for (const choice of document.querySelectorAll("[data-role-choice]"))
-    if (!choice.dataset.changed) choice.value = view.settings.role;
-  for (const key of numbers) inputs[key].value = view.settings[key] ?? "";
-  startupForm.hidden = !view.startupAvailable;
-  startupForm.elements.enabled.checked = view.startsAtLogin;
-  document.querySelector("#role-status").textContent = view.settings.role === "leech" ? "Leech" : "Contributor";
-  document.querySelector("#data-directory").textContent = view.dataDirectory;
-  document.querySelector("#ram-default").textContent =
-    `Default ${view.defaultRamReserveMiB} MiB · Effective ${view.effectiveRamReserveMiB} MiB`;
-  document.querySelector("#vram-default").textContent =
-    `Default ${view.defaultVramReserveMiB} MiB · Effective ${view.effectiveVramReserveMiB} MiB`;
-  const recovery = document.querySelector("#recovery");
-  recovery.textContent = view.recoveryWarning || "";
-  recovery.hidden = !view.recoveryWarning;
-  showReserveWarning();
-  workspace.hidden = false;
-  status.hidden = true;
-}
-
-async function submit(form, feedback, operation) {
-  const button = form.querySelector("button");
-  button.disabled = true;
-  feedback.classList.remove("error");
-  feedback.textContent = "Saving…";
-  try {
-    await operation();
-    feedback.textContent = "Saved.";
-  } catch (error) {
-    feedback.classList.add("error");
-    feedback.textContent = error.message;
-  } finally {
-    button.disabled = false;
-  }
-}
-
-settingsForm.addEventListener("input", () => {
-  dirty = true;
-  showReserveWarning();
-});
-settingsForm.addEventListener("submit", event => {
-  event.preventDefault();
-  const inputs = settingsForm.elements;
-  const settings = {
-    ...view.settings,
-    role: inputs.role.value,
-    activityMonitoring: inputs.activityMonitoring.checked,
-    benchmarkPolicy: inputs.benchmarkPolicy.value
-  };
-  for (const key of numbers) settings[key] = inputs[key].value === "" ? null : inputs[key].valueAsNumber;
-  submit(settingsForm, document.querySelector("#save-status"), async () => {
-    await api("settings", { settings, acceptReducedReserve: reserveConsent.checked });
-    dirty = false;
-    await loadSettings();
-  });
-});
-startupForm.addEventListener("submit", event => {
-  event.preventDefault();
-  submit(startupForm, document.querySelector("#startup-status"), () =>
-    api("startup", { enabled: startupForm.elements.enabled.checked }));
-});
-
-async function loadRelease(refreshPreferences = false) {
-  const state = await api("release");
-  if (refreshPreferences) {
-    maintenanceForm.elements.deferred.checked = state.maintenanceDeferred;
-    maintenanceForm.elements.daily.checked = state.dailyUpdates;
-    maintenanceForm.elements.daily.disabled = !state.canUpdate;
-  }
-  document.querySelector("#release-status").textContent =
-    `${state.release.version} · Protocol window ${state.release.window} · ${state.updates}${state.draining ? " Serving is draining for maintenance." : ""}`;
-}
-
-maintenanceForm.addEventListener("submit", event => {
-  event.preventDefault();
-  submit(maintenanceForm, document.querySelector("#maintenance-status"), () =>
-    api("release/deferral", { deferred: maintenanceForm.elements.deferred.checked, daily: maintenanceForm.elements.daily.checked }));
-});
-
-const updateAction = document.querySelector("#update-action");
-const updatePartial = document.querySelector("#update-partial");
-const updatePartialLabel = document.querySelector("#update-partial-label");
-
-document.querySelector("#update-check").addEventListener("click", async () => {
-  try {
-    await api("release/check", null, "POST");
-    await loadRelease();
-  } catch (error) { updateAction.textContent = error.message; }
-});
-
-document.querySelector("#update-share").addEventListener("click", async event => {
-  const button = event.currentTarget;
-  button.disabled = true;
-  updateAction.textContent = "Verifying the release with peers…";
-  try {
-    const result = await api("release/share", { allowPartial: updatePartial.checked }, "POST");
-    updatePartial.checked = false;
-    updatePartialLabel.hidden = !result.needsOverride;
-    const detail = result.peers.map(peer => `${peer.name}: ${peer.state}`).join(" · ");
-    updateAction.textContent = result.needsOverride
-      ? `Mango ${result.version}: no updates were queued. Some peers could not verify eligibility. ${detail}`
-      : `Mango ${result.version}: ${detail || "No other nodes are enrolled."}`;
-  } catch (error) { updateAction.textContent = error.message; }
-  finally { button.disabled = false; }
-});
-
-function showSessionError(error) {
-  status.hidden = false;
-  status.classList.add("error");
-  status.textContent = error.message;
-}
-
-document.addEventListener("visibilitychange", () => {
-  if (view && !dirty && document.visibilityState === "visible") loadSettings().catch(showSessionError);
-});
-const providerForm = document.querySelector("#provider-form");
-const providerStatus = document.querySelector("#provider-status");
-const aliasRatingForm = document.querySelector("#alias-rating-form");
-const profileNames = {
-  lmStudio: "LM Studio",
-  unslothStudio: "Unsloth Studio",
-  unslothRun: "Unsloth run",
-  llamaSingle: "llama.cpp single model",
-  llamaEmbedding: "llama.cpp embeddings",
-  llamaRouter: "llama.cpp router"
-};
-const operationNames = {
-  chat: "Chat", embeddings: "Embeddings", images: "Images",
-  transcription: "Transcription", speech: "Speech", systemOne: "System One"
-};
-let editedProvider = null;
-
 function element(tag, content, className) {
   const node = document.createElement(tag);
-  if (content !== undefined) node.textContent = content;
+  if (content != null) node.textContent = content;
   if (className) node.className = className;
   return node;
 }
-
 function action(label, handler) {
   const button = element("button", label, "secondary");
   button.type = "button";
   button.addEventListener("click", handler);
   return button;
 }
-
-async function providerAction(button, message, operation, success = "Saved.") {
-  button.disabled = true;
-  providerStatus.classList.remove("error");
-  providerStatus.textContent = message;
-  try {
-    await operation();
-    await loadProviders();
-    providerStatus.textContent = success;
-  } catch (error) {
-    providerStatus.classList.add("error");
-    providerStatus.textContent = error.message;
-  } finally {
-    button.disabled = false;
-  }
-}
-
-function showProviderFields() {
-  const fields = providerForm.elements;
-  const processAllowed = fields.mode.value === "managed" &&
-    ["llamaSingle", "llamaEmbedding"].includes(fields.profile.value);
-  document.querySelector("#provider-process").hidden = !processAllowed;
-  fields.address.placeholder = fields.profile.value === "lmStudio" ? "http://127.0.0.1:1234" :
-    fields.profile.value.startsWith("unsloth") ? "http://127.0.0.1:8888" : "http://127.0.0.1:8080";
-}
-
-function editProvider(endpoint) {
-  providerForm.reset();
-  editedProvider = endpoint?.id ?? null;
-  document.querySelector("#provider-form-title").textContent = endpoint ? "Edit provider" : "Register a provider";
-  document.querySelector("#provider-cancel").hidden = !endpoint;
-  document.querySelector("#provider-clear-token").hidden = !endpoint?.credentialReference;
-  if (endpoint) {
-    const fields = providerForm.elements;
-    for (const key of ["profile", "mode", "address", "executable", "modelFile"])
-      fields[key].value = endpoint[key] ?? "";
-    fields.token.focus();
-  }
-  showProviderFields();
-}
-
-providerForm.addEventListener("change", showProviderFields);
-providerForm.addEventListener("submit", event => {
-  event.preventDefault();
-  const fields = providerForm.elements;
-  const process = !document.querySelector("#provider-process").hidden;
-  const update = {
-    id: editedProvider, profile: fields.profile.value, mode: fields.mode.value,
-    address: fields.address.value, token: fields.token.value || null, clearToken: fields.clearToken.checked,
-    executable: process ? fields.executable.value : null, modelFile: process ? fields.modelFile.value : null
-  };
-  providerAction(event.submitter, "Checking the provider…", async () => {
-    await api("providers", update);
-    editProvider(null);
-  });
-});
-document.querySelector("#provider-cancel").addEventListener("click", () => editProvider(null));
-document.querySelector("#provider-refresh").addEventListener("click", event =>
-  providerAction(event.currentTarget, "Refreshing the provider catalog…", () => api("providers/refresh", {}), "Catalog refreshed."));
-document.querySelector("#clear-selection").addEventListener("click", event =>
-  providerAction(event.currentTarget, "Clearing selection…", () => api("providers/selection", { id: null })));
-
-function providerRow(endpoint) {
-  const row = element("div", undefined, "provider-row");
-  const name = profileNames[endpoint.profile] ?? endpoint.profile;
-  const access = endpoint.mode === "managed" ? "Managed" : "Attached";
-  row.append(element("strong", `${name} · ${access}${endpoint.version ? " · " + endpoint.version : ""}`));
-  row.append(element("p", `${endpoint.address} · ${endpoint.online ? "Connected" : endpoint.error || "Awaiting inventory"}`, "muted"));
-  if (endpoint.credentialReference) row.append(element("p", "Provider token saved", "muted"));
-  if (endpoint.mode === "managed" && !endpoint.canLoad && !endpoint.canUnload && !endpoint.canStop)
-    row.append(element("p", "No lifecycle operation is available for this registration.", "muted"));
-  const buttons = element("div", undefined, "actions");
-  buttons.append(action("Edit provider", () => editProvider(endpoint)));
-  buttons.append(action("Refresh provider", event => providerAction(event.currentTarget, "Refreshing provider…",
-    () => api("providers/refresh", { id: endpoint.id }), "Provider refreshed.")));
-  if (endpoint.canStop)
-    buttons.append(action("Stop owned process", event => providerAction(event.currentTarget, "Stopping provider…",
-      () => api(`providers/${endpoint.id}/stop`, {}), "Process stopped.")));
-  else
-    buttons.append(action("Remove provider", event => providerAction(event.currentTarget, "Removing provider…",
-      () => api(`providers/${endpoint.id}`, undefined, "DELETE"), "Provider removed.")));
-  row.append(buttons);
-  return row;
-}
-
+function timeLabel(time) { return time ? new Date(time).toLocaleString() : "Unobserved"; }
+function sameRevision(left, right) { return !!left && !!right && left.time === right.time && left.writer === right.writer; }
 function labeledInput(label, name, type, value) {
   const wrapper = element("label", label);
   const input = element("input");
-  input.name = name;
-  input.type = type;
-  input.value = value ?? "";
+  Object.assign(input, { name, type, value: value ?? "" });
   if (type === "number") input.step = "1";
   wrapper.append(input);
   return wrapper;
 }
-
-function ratingRow(label, rating) {
-  const row = element("div", undefined, "rating-row");
-  const labelField = labeledInput("Capability label", "capability", "text", label);
-  labelField.lastElementChild.maxLength = 100;
-  labelField.lastElementChild.required = true;
-  const numberField = labeledInput("Rating (0–5)", "rating", "number", rating);
-  numberField.lastElementChild.min = "0";
-  numberField.lastElementChild.max = "5";
-  row.append(labelField, numberField, action("Remove rating", () => row.remove()));
-  return row;
+function inputValue(input) {
+  if (input.hasAttribute("data-role-switch")) return input.checked ? "contributor" : "leech";
+  if (input.type === "checkbox") return input.checked;
+  if (input.type === "number") return input.value === "" ? null : Number.isFinite(input.valueAsNumber) ? input.valueAsNumber : null;
+  return input.value;
+}
+function fillInput(input, value) {
+  if (document.activeElement === input) return;
+  if (input.hasAttribute("data-role-switch")) input.checked = value === "contributor";
+  else if (input.type === "checkbox") input.checked = !!value;
+  else input.value = value ?? "";
 }
 
-function modelRow(deployment, endpoint, selected, expanded) {
-  const model = deployment.model;
-  const status = !deployment.online ? "Provider unavailable" : !model.installed ? "Installation unconfirmed" :
-    !deployment.instance ? "Installed · unloaded" : deployment.busy || deployment.instance.busy ? "Busy" :
-      deployment.eligible ? "Eligible" : "Limits or protocol unconfirmed";
-  const details = element("details", undefined, "deployment");
-  details.dataset.model = deployment.id;
-  details.open = expanded;
-  details.append(element("summary", `${deployment.alias} · ${status}${deployment.id === selected ? " · Selected" : ""}`));
-  details.append(element("p", [model.displayName, model.variant, model.format, profileNames[endpoint.profile]].filter(Boolean).join(" · ")));
-  details.append(element("p", `Provider ID ${model.nativeId}`, "muted"));
-  details.append(element("p", `Input ${model.inputs.join(", ") || "unreported"} · Output ${model.outputs.join(", ") || "unreported"}`, "muted"));
-  details.append(element("p", `${model.operations.map(key => operationNames[key]).join(", ") || "Protocol unconfirmed"}${model.clientTools ? " · Client function tools" : ""}${model.structuredOutput ? " · Structured output" : ""}`, "muted"));
-  details.append(element("p", `Served context ${deployment.context ?? "unknown"}${deployment.contextSource ? " (" + deployment.contextSource + ")" : ""} · Model maximum ${model.theoreticalContext ?? "unknown"}`, "muted"));
-  if (model.operations.includes("embeddings"))
-    details.append(element("p", `Embedding dimensions ${deployment.embeddingDimensions ?? "unknown"} · Encoding ${model.embeddingEncodings.join(", ")}`, "muted"));
-
-  const buttons = element("div", undefined, "actions");
-  if (deployment.eligible && deployment.id !== selected)
-    buttons.append(action("Use for local inference", event => providerAction(event.currentTarget, "Selecting deployment…",
-      () => api("providers/selection", { id: deployment.id }))));
-  const load = !deployment.instance;
-  if (model.installed && (load ? endpoint.canLoad && model.supportsLoad : endpoint.canUnload && model.supportsUnload))
-    buttons.append(action(load ? "Load model" : "Unload model", event =>
-      providerAction(event.currentTarget, load ? "Loading model…" : "Unloading model…",
-        () => api("providers/lifecycle", { id: deployment.id, load }), load ? "Load observed." : "Unload observed.")));
-  details.append(buttons);
-
-  const form = element("form");
-  const fields = element("div", undefined, "inputs");
-  for (const [label, key, type] of [
-    ["Alias", "alias", "text"], ["Fallback served context (tokens)", "servedContext", "number"],
-    ["Fallback embedding dimensions", "embeddingDimensions", "number"],
-    ["Embedding family", "embeddingFamily", "text"], ["Media token budget per item", "mediaTokensPerItem", "number"]
-  ]) {
-    const field = labeledInput(label, key, type, deployment.options[key]);
-    if (type === "number") field.lastElementChild.min = "1";
-    else field.lastElementChild.maxLength = 200;
-    if (key === "alias") field.lastElementChild.required = true;
-    if ((key === "embeddingDimensions" || key === "embeddingFamily") && !model.operations.includes("embeddings"))
-      field.hidden = true;
-    if (key === "mediaTokensPerItem" && !model.inputs.some(modality => modality === "image" || modality === "audio"))
-      field.hidden = true;
-    fields.append(field);
-  }
-  form.append(fields);
-  const ratings = element("fieldset");
-  ratings.append(element("legend", "Capability ratings"));
-  const rows = element("div");
-  for (const [label, rating] of Object.entries(deployment.options.ratings))
-    rows.append(ratingRow(label, rating));
-  ratings.append(rows, action("Add rating", () => {
-    const row = ratingRow("", null);
-    rows.append(row);
-    row.querySelector("input").focus();
+function pendingSummary() {
+  const pending = [...writers.values()].filter(writer => writer.pending);
+  const button = document.querySelector("#pending-edits");
+  button.hidden = pending.length === 0;
+  button.textContent = `${pending.length} unfinished ${pending.length === 1 ? "change" : "changes"}`;
+  if (document.querySelector("#pending-dialog").open) renderPending();
+}
+function renderPending() {
+  document.querySelector("#pending-list").replaceChildren(...[...writers.values()].filter(w => w.pending).map(writer => {
+    const li = element("li");
+    const link = element("a", writer.label);
+    link.href = `#/${writer.page}`;
+    link.addEventListener("click", () => document.querySelector("#pending-dialog").close());
+    li.append(link, element("p", writer.state.message, "muted"));
+    return li;
   }));
-  form.append(ratings, element("button", "Save model"));
-  form.addEventListener("submit", event => {
-    event.preventDefault();
-    const input = form.elements;
-    const values = Array.from(rows.children, row => {
-      const [label, rating] = row.querySelectorAll("input");
-      return [label.value.trim(), rating.value === "" ? null : rating.valueAsNumber];
-    });
-    if (new Set(values.map(pair => pair[0])).size !== values.length) {
-      providerStatus.classList.add("error");
-      providerStatus.textContent = "Use each capability label once.";
-      return;
-    }
-    const update = { id: deployment.id, alias: input.alias.value,
-      revision: deployment.options.revision, ratings: Object.fromEntries(values),
-      embeddingFamily: input.embeddingFamily.value || null };
-    for (const key of ["servedContext", "embeddingDimensions", "mediaTokensPerItem"])
-      update[key] = input[key].value === "" ? null : input[key].valueAsNumber;
-    providerAction(event.submitter, "Saving model settings…", () => api("providers/models", update));
-  });
-  details.append(form);
-  return details;
 }
-
-async function loadProviders() {
-  const catalog = await api("providers");
-  const endpoints = new Map(catalog.endpoints.map(endpoint => [endpoint.id, endpoint]));
-  document.querySelector("#provider-count").textContent = endpoints.size ? String(endpoints.size) : "Not configured";
-  const recovery = document.querySelector("#providers-recovery");
-  recovery.textContent = catalog.recoveryWarning ?? "";
-  recovery.hidden = !catalog.recoveryWarning;
-  document.querySelector("#provider-list").replaceChildren(...catalog.endpoints.map(providerRow));
-  const selected = catalog.models.find(model => model.id === catalog.selected);
-  document.querySelector("#selection-status").textContent = selected
-    ? `${selected.alias} · ${selected.eligible ? "Ready" : "Unavailable"}` : "No preferred deployment.";
-  document.querySelector("#clear-selection").hidden = !catalog.selected;
-  const list = document.querySelector("#deployment-list");
-  const expanded = new Set(Array.from(list.querySelectorAll("details[open]"), details => details.dataset.model));
-  list.replaceChildren(...catalog.models.map(model => modelRow(model, endpoints.get(model.endpointId),
-    catalog.selected, expanded.has(model.id))));
-  const aliases = Array.from(new Set(catalog.models.map(model => model.alias))).sort();
-  aliasRatingForm.elements.alias.replaceChildren(...aliases.map(alias => element("option", alias)));
-  aliasRatingForm.hidden = aliases.length === 0;
-}
-
-aliasRatingForm.addEventListener("submit", event => {
-  event.preventDefault();
-  const fields = aliasRatingForm.elements;
-  const value = fields.rating.value === "" ? null : fields.rating.valueAsNumber;
-  providerAction(event.submitter, "Applying the alias rating…", () =>
-    api("providers/ratings", { alias: fields.alias.value, ratings: { [fields.label.value.trim()]: value } }));
+document.querySelector("#pending-edits").addEventListener("click", () => { renderPending(); document.querySelector("#pending-dialog").showModal(); });
+addEventListener("beforeunload", event => {
+  if ([...writers.values()].some(w => w.pending)) { event.preventDefault(); event.returnValue = ""; }
 });
 
-loadSettings().then(loadProviders).catch(showSessionError);
-loadRelease(true).catch(error => document.querySelector("#release-status").textContent = error.message);
-setInterval(() => {
-  if (token && !document.hidden) loadRelease().catch(error => document.querySelector("#release-status").textContent = error.message);
-}, 15000);
+function feedbackFor(writer, target) {
+  if (!target) return;
+  const key = `${writer.state.kind}:${writer.state.message}:${[...writer.conflicts].join(",")}`;
+  if (target.dataset.feedback === key) return;
+  target.dataset.feedback = key;
+  target.classList.toggle("error", ["error", "conflict", "incomplete"].includes(writer.state.kind));
+  target.replaceChildren(element("span", writer.state.message));
+  if (writer.conflicts.size) {
+    const values = [...writer.conflicts].filter(key => key !== "token").map(key => `${key}: current ${JSON.stringify(writer.baseline[key])}; entered ${JSON.stringify(writer.value[key])}`);
+    target.append(element("pre", values.join("\n")), action("Use current values", () => writer.resolve(true)), action("Keep my changes", () => writer.resolve(false)));
+  } else if (writer.state.kind === "error") target.append(action("Retry", () => writer.flush()));
+  else if (writer.state.kind === "paused" && writer.requiresAdmin?.()) target.append(action("Unlock", openAdministration));
+}
+function recordWriter(key, options) {
+  const protectedWrite = payload => {
+    if (options.requiresAdmin?.() && !administration.token) throw Object.assign(new Error("Unlock administration to update"), { code: "admin_required" });
+    return options.write(payload);
+  };
+  if (writers.has(key)) {
+    const writer = writers.get(key);
+    writer.write = protectedWrite; writer.read = options.read; writer.requiresAdmin = options.requiresAdmin;
+    writer.validate = options.validate || (() => null);
+    writer.reviewKeys = options.reviewKeys || [];
+    writer.onChanged = options.changed;
+    writer.label = options.label; writer.page = options.page;
+    writer.refresh(options.value);
+    return writer;
+  }
+  const writer = new MangoPreferences.PreferenceWriter({ ...options, write: protectedWrite, changed: current => {
+    current.onChanged?.(current);
+    for (const binding of current.bindings || []) {
+      for (const input of binding.inputs()) {
+        const name = input.dataset.setting || input.name;
+        if (name && !current.invalid.has(name)) fillInput(input, current.value[name]);
+        input.setAttribute("aria-invalid", String(current.invalid.has(name)));
+      }
+      feedbackFor(current, binding.feedback);
+    }
+    pendingSummary();
+  } });
+  writer.label = options.label; writer.page = options.page;
+  writer.onChanged = options.changed;
+  writer.requiresAdmin = options.requiresAdmin;
+  writer.bindings = [];
+  writers.set(key, writer);
+  if (options.requiresAdmin?.() && !administration.token) writer.pause();
+  return writer;
+}
+function bindPreferences(writer, root, feedback, { inputs = () => [...root.querySelectorAll("input[name],select[name],textarea[name],input[data-setting],select[data-setting]")], exclude = [] } = {}) {
+  const binding = { feedback, inputs: () => inputs().filter(input => !exclude.includes(input.name)) };
+  writer.bindings = writer.bindings.filter(old => old.feedback !== feedback || old.inputs()[0] !== binding.inputs()[0]);
+  writer.bindings.push(binding);
+  for (const input of binding.inputs()) {
+    const name = input.dataset.setting || input.name;
+    if (!writer.invalid.has(name)) fillInput(input, writer.value[name]);
+    if (input.preferenceWriter === writer) continue;
+    input.preferenceWriter = writer;
+    const changed = event => {
+      if (event.isComposing || input.composing) return;
+      const immediate = input.type === "checkbox" || input.tagName === "SELECT";
+      const valid = input.validity.valid && (!input.required || input.type === "checkbox" || String(input.value).trim().length > 0);
+      writer.change(name, inputValue(input), { immediate, valid });
+    };
+    if (input.preferenceHandler) {
+      for (const [type, handler] of input.preferenceHandler) input.removeEventListener(type, handler);
+    }
+    const handlers = [[input.type === "checkbox" || input.tagName === "SELECT" ? "change" : "input", changed], ["compositionstart", () => input.composing = true],
+      ["compositionend", event => { input.composing = false; changed(event); }],
+      ["blur", () => { if (!input.composing) writer.flush(); }],
+      ["keydown", event => { if (event.key === "Enter" && !event.isComposing && input.tagName !== "TEXTAREA") { event.preventDefault(); writer.flush(); } }]];
+    for (const [type, handler] of handlers) input.addEventListener(type, handler);
+    input.preferenceHandler = handlers;
+  }
+  feedbackFor(writer, feedback);
+  if (root.tagName === "FORM" && !root.preferenceSubmit) { root.addEventListener("submit", event => event.preventDefault()); root.preferenceSubmit = true; }
+}
+async function perform(button, feedback, work, message = "Working…") {
+  button.disabled = true;
+  feedback.classList.remove("error"); feedback.textContent = message;
+  try { feedback.textContent = await work() || "Done."; }
+  catch (error) { feedback.classList.add("error"); feedback.textContent = error.message; }
+  finally { button.disabled = false; }
+}
+function showSessionError(error) { status.hidden = false; status.classList.add("error"); status.textContent = error.message; }
+
+function syncLocalPreferences() {
+  const settings = settingsWriter.value;
+  document.querySelector("#rail-contribution").textContent = settings.role === "contributor" ? "Contribution on" : "Contribution off";
+  document.querySelector("#overview-protection").textContent = settings.activityMonitoring ? "Activity protection on" : "Activity protection off";
+  const reduced = !settingsWriter.baseline.reducedReserveConsent && (
+    settings.ramReserveMiB != null && settings.ramReserveMiB < view.defaultRamReserveMiB ||
+    settings.vramReserveMiB != null && settings.vramReserveMiB < view.defaultVramReserveMiB);
+  document.querySelector("#reserve-warning").hidden = !reduced;
+  const fields = document.querySelector("#settings-memory").elements;
+  fields.acceptReducedReserve.required = reduced;
+  for (const [name, minimum] of [["ramReserveMiB", view.defaultRamReserveMiB], ["vramReserveMiB", view.defaultVramReserveMiB]]) {
+    if (!settingsWriter.dirty.has(name)) continue;
+    if (!fields[name].validity.valid || !settingsWriter.baseline.reducedReserveConsent && !fields.acceptReducedReserve.checked && settings[name] != null && settings[name] < minimum)
+      settingsWriter.invalid.add(name);
+    else settingsWriter.invalid.delete(name);
+  }
+}
+async function loadSettings() {
+  view = await api("settings");
+  settingsWriter = recordWriter("settings", { value: view.settings, label: "Local preferences", page: "protection/activity",
+    read: async () => (await api("settings")).settings,
+    write: async ({ changes, expected }) => {
+      const accepted = await api("settings", { changes, expected,
+        acceptReducedReserve: document.querySelector("#settings-memory").elements.acceptReducedReserve.checked }, "PATCH");
+      view.settings = accepted;
+      const actual = await api("settings");
+      document.querySelector("#ram-default").textContent = `Default ${actual.defaultRamReserveMiB} MiB · Effective ${actual.effectiveRamReserveMiB} MiB`;
+      document.querySelector("#vram-default").textContent = `Default ${actual.defaultVramReserveMiB} MiB · Effective ${actual.effectiveVramReserveMiB} MiB`;
+      return accepted;
+    },
+    validate: values => !values.reducedReserveConsent && !document.querySelector("#settings-memory").elements.acceptReducedReserve.checked && (
+      values.ramReserveMiB != null && values.ramReserveMiB < view.defaultRamReserveMiB ||
+      values.vramReserveMiB != null && values.vramReserveMiB < view.defaultVramReserveMiB) ? "Acknowledge the reduced reserve before it takes effect." : null,
+    changed: () => { if (settingsWriter) syncLocalPreferences(); }
+  });
+  for (const [id, feedback] of [["settings-activity", "protection-feedback"], ["settings-memory", "memory-feedback"], ["settings-benchmarks", "benchmark-feedback"]])
+    bindPreferences(settingsWriter, document.querySelector(`#${id}`), document.querySelector(`#${feedback}`), { exclude: ["acceptReducedReserve"] });
+  for (const input of document.querySelectorAll("[data-setting]")) {
+    const feedback = input.closest("section")?.querySelector(`[data-setting-status="${input.dataset.setting}"]`);
+    bindPreferences(settingsWriter, input.parentElement, feedback, { inputs: () => [input] });
+  }
+  maintenanceForm.elements.deferred.dataset.setting = "maintenanceDeferred";
+  maintenanceForm.elements.daily.dataset.setting = "dailyUpdates";
+  bindPreferences(settingsWriter, maintenanceForm, document.querySelector("#maintenance-status"));
+  for (const choice of document.querySelectorAll("[data-benchmark-choice], [data-role-choice]"))
+    if (!choice.dataset.changed) choice.value = choice.hasAttribute("data-role-choice") ? view.settings.role : view.settings.benchmarkPolicy;
+  startupForm.hidden = !view.startupAvailable;
+  document.querySelector("#startup-unavailable").hidden = view.startupAvailable;
+  startupWriter = recordWriter("startup", { value: { enabled: view.startsAtLogin }, label: "Start at login", page: "system/startup",
+    write: async ({ changes }) => {
+      try { await api("startup", changes); }
+      catch (error) { startupWriter.baseline = { enabled: (await api("settings")).startsAtLogin }; throw error; }
+      return { enabled: (await api("settings")).startsAtLogin };
+    } });
+  bindPreferences(startupWriter, startupForm, document.querySelector("#startup-status"));
+  document.querySelector("#data-directory").textContent = view.dataDirectory;
+  document.querySelector("#ram-default").textContent = `Default ${view.defaultRamReserveMiB} MiB · Effective ${view.effectiveRamReserveMiB} MiB`;
+  document.querySelector("#vram-default").textContent = `Default ${view.defaultVramReserveMiB} MiB · Effective ${view.effectiveVramReserveMiB} MiB`;
+  document.querySelector("#recovery").textContent = view.recoveryWarning || "";
+  document.querySelector("#recovery").hidden = !view.recoveryWarning;
+  syncLocalPreferences();
+  workspace.hidden = false; status.hidden = true;
+}
+document.querySelector("#settings-memory").elements.acceptReducedReserve.addEventListener("change", () => { syncLocalPreferences(); settingsWriter?.flush(); });
+async function loadRelease() {
+  const state = await api("release");
+  maintenanceForm.elements.daily.disabled = !state.canUpdate;
+  document.querySelector("#release-status").textContent = `${state.release.version} · Protocol window ${state.release.window} · ${state.updates}${state.draining ? " · Draining for maintenance" : ""}`;
+}
+const updateAction = document.querySelector("#update-action");
+const updatePartial = document.querySelector("#update-partial");
+document.querySelector("#update-check").addEventListener("click", event => perform(event.currentTarget, updateAction, async () => {
+  await api("release/check", null, "POST"); await loadRelease(); return "Release check complete.";
+}));
+document.querySelector("#update-share").addEventListener("click", event => perform(event.currentTarget, updateAction, async () => {
+  const result = await api("release/share", { allowPartial: updatePartial.checked }, "POST");
+  updatePartial.checked = false;
+  document.querySelector("#update-partial-label").hidden = !result.needsOverride;
+  const detail = result.peers.map(peer => `${peer.name}: ${peer.state}`).join(" · ");
+  return result.needsOverride ? `Mango ${result.version}: no updates queued. Some peers could not verify eligibility. ${detail}` : `Mango ${result.version}: ${detail || "No other nodes are enrolled."}`;
+}));
+
+async function refreshPage() {
+  if (!token || document.hidden) return;
+  const jobs = [];
+  if (route.page === "overview" || route.group === "protection" || route.group === "serving") jobs.push(loadResources().catch(error => document.querySelector("#resource-feedback").textContent = error.message));
+  if (route.group === "serving") jobs.push(loadProviders().catch(error => providerStatus.textContent = error.message));
+  if (route.group === "network" || route.group === "serving") jobs.push(loadNetwork().catch(error => document.querySelector("#network-status").textContent = error.message));
+  if (route.page === "system/updates") jobs.push(loadRelease().catch(error => document.querySelector("#release-status").textContent = error.message));
+  if (["activity/history", "system/logging", "system/data"].includes(route.page)) jobs.push(loadLogs().catch(logError));
+  await Promise.allSettled(jobs);
+}
+document.addEventListener("DOMContentLoaded", async () => {
+  const jobs = [[loadSettings, showSessionError], [loadNetwork, e => document.querySelector("#network-status").textContent = e.message],
+    [loadProviders, e => providerStatus.textContent = e.message], [loadResources, e => document.querySelector("#resource-feedback").textContent = e.message],
+    [loadPublic, e => document.querySelector("#public-state").textContent = e.message], [loadLogs, logError], [loadRelease, e => document.querySelector("#release-status").textContent = e.message]];
+  await Promise.allSettled(jobs.map(([work, failure]) => work().catch(failure)));
+  if (token) watchDashboard();
+});
+document.addEventListener("mango:route", () => {
+  for (const writer of writers.values()) if (writer.pending && ["pending", "updating"].includes(writer.state.kind)) writer.flush();
+  refreshPage();
+});
+document.addEventListener("visibilitychange", () => { if (!document.hidden) { loadNetwork().catch(error => networkFeedback.textContent = error.message); loadSettings().catch(showSessionError); refreshPage(); } });
+setInterval(refreshPage, 5000);

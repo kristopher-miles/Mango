@@ -19,7 +19,7 @@ internal static class PeerRoutes
         network.MapGet("/events", (HttpContext context) => HandleAsync(context,
             token => peers.WatchDashboardAsync(context, token), noContent: false));
         network.MapPut("/queue", (QueueSettings input, HttpContext context) =>
-            HandleAsync(context, token => peers.SetQueuePolicyAsync(context.Request, input.WaitSeconds, token)));
+            HandleAsync(context, token => peers.SetQueuePolicyAsync(context.Request, input.WaitSeconds, token, input.ExpectedWaitSeconds)));
         network.MapPut("/models", (SharedModelUpdate input, HttpContext context) =>
             HandleAsync(context, token => peers.SetModelIntentAsync(context.Request, input, token)));
         network.MapPut("/providers", (SharedProviderUpdate input, HttpContext context) =>
@@ -33,6 +33,11 @@ internal static class PeerRoutes
             HandleAsync(context, token => peers.JoinAsync(input, token)));
         network.MapPut("/unlock", (UnlockRequest input, HttpContext context) =>
             HandleAsync(context, token => peers.UnlockAsync(input, context.Connection.RemoteIpAddress!, token)));
+        network.MapPut("/lock", (HttpRequest request) =>
+        {
+            peers.Lock(request);
+            return Results.NoContent();
+        });
         network.MapPut("/recover", (RecoverRequest input, HttpContext context) =>
             HandleAsync(context, token => peers.RecoverAsync(input, token)));
         network.MapPut("/reset", (ResetRequest input, HttpContext context) =>
@@ -171,7 +176,7 @@ internal static class PeerRoutes
         catch (PeerFailure error)
         {
             context.Response.StatusCode = error.Status;
-            await context.Response.WriteAsJsonAsync(new { error = error.Message }, context.RequestAborted);
+            await context.Response.WriteAsJsonAsync(new { error = error.Message, code = error.Code }, context.RequestAborted);
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or System.Security.Cryptography.CryptographicException)
         {
@@ -181,5 +186,5 @@ internal static class PeerRoutes
     }
 
     private sealed record DiscoveryRequest(string? Address);
-    private sealed record QueueSettings(int WaitSeconds);
+    private sealed record QueueSettings(int WaitSeconds, int? ExpectedWaitSeconds = null);
 }

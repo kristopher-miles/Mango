@@ -1,11 +1,12 @@
 using Mango.Host;
 using Mango.Providers;
+using System.Text.Json;
 
 namespace Mango.Resources;
 
 internal sealed record BudgetUpdate(string Deployment, InferenceOperation Operation, long Units, int Items, int MediaItems,
     long? LoadRamMiB, long? ExecuteRamMiB, Dictionary<string, long>? LoadVramMiB, Dictionary<string, long>? ExecuteVramMiB,
-    bool AllowOverlap, int ParallelSlots, bool AllowAttached);
+    bool AllowOverlap, int ParallelSlots, bool AllowAttached, string? ExpectedRevision = null);
 
 internal sealed partial class ResourceProtection
 {
@@ -92,7 +93,11 @@ internal sealed partial class ResourceProtection
                 target.Model.Alias,
                 target.Operation,
                 Budget = target.Budget,
+                QualificationConfiguration = target.Configuration + ":" + target.Model.Instance?.ResourceFingerprint,
+                BudgetRevision = BudgetRevision(store.Value.Budgets.FirstOrDefault(item => item.Deployment == target.Model.Id &&
+                    item.Workload.Operation == target.Operation), target.Configuration, target.Model.Instance?.ResourceFingerprint),
                 Profile = target.Profile,
+                Readiness = Readiness(target.Model, target.Endpoint, target.Operation),
                 Unsafe = target.Budget is { } budget && unsafePlacements.Contains(FaultKey(budget)),
                 target.Model.Context,
                 Attached = target.Endpoint.Mode == ProviderMode.Attached,
@@ -133,6 +138,14 @@ internal sealed partial class ResourceProtection
             bool MatchesProfile(BenchmarkProfile item) => item.Deployment == budget.Deployment &&
                 item.Operation == budget.Workload.Operation;
             var previous = data.Budgets.FirstOrDefault(Matches);
+            lock (sync)
+            {
+                var model = providers.View.Models.FirstOrDefault(item => item.Id == update.Deployment);
+                if (model is null || Configuration(model) != budget.Configuration || model.Instance?.ResourceFingerprint != budget.Runtime)
+                    throw new ProviderFailure(409, "This deployment or its hardware changed. Review its current limits.", code: "configuration_changed");
+                if (update.ExpectedRevision is not null && update.ExpectedRevision != BudgetRevision(previous, budget.Configuration, budget.Runtime))
+                    throw new ProviderFailure(409, "These local limits changed elsewhere. Review their current values.", code: "conflict");
+            }
             var changedWorkload = previous is not null && previous.Workload != budget.Workload;
             return data with
             {
@@ -158,6 +171,9 @@ internal sealed partial class ResourceProtection
             throw new ProviderFailure(400, "Enter RAM and per-device VRAM limits in MiB. Enter zero for a discrete GPU the provider does not use.");
         return new(host.Value * MiB, vram.ToDictionary(item => item.Key, item => item.Value * MiB));
     }
+
+    private static string BudgetRevision(ResourceBudget? budget, string configuration, string? runtime) =>
+        ProviderIdentity.Hash(configuration, runtime, JsonSerializer.Serialize(budget, SnapshotFile<ResourceData>.Json));
 
     public async Task RetryBenchmarkAsync(string deployment, InferenceOperation operation, ProviderCatalog providers,
         CancellationToken cancellation)

@@ -239,6 +239,14 @@ internal sealed partial class PeerNetwork
         finally { passwordChecks.Release(); }
     }
 
+    public void Lock(HttpRequest request)
+    {
+        var token = AdminHeader(request);
+        if (string.IsNullOrEmpty(token)) return;
+        lock (authorization)
+            unlocks.Remove(PeerCredentials.Digest(token));
+    }
+
     private static string? AdminHeader(HttpRequest request) =>
         request.Headers[AdminSessionHeader].Count == 1 ? request.Headers[AdminSessionHeader][0] : null;
 
@@ -255,7 +263,7 @@ internal sealed partial class PeerNetwork
     private void RequireAdmin(PeerSnapshot current, string? token)
     {
         if (!HasAdmin(current, token))
-            throw new PeerFailure(403, "Unlock network administration with the master password.");
+            throw new PeerFailure(403, "Unlock network administration with the master password.", "admin_required");
     }
 
     public async Task<PushResult> RecoverAsync(RecoverRequest input, CancellationToken cancellation)

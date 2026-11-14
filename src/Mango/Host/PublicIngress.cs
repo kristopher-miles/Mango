@@ -12,6 +12,9 @@ internal sealed record PublicIngressSettings([property: JsonRequired] bool Enabl
     public static readonly PublicIngressSettings Off = new(false, 53782, null, null);
 }
 
+internal sealed record PublicIngressUpdate([property: JsonRequired] bool Enabled, [property: JsonRequired] int Port,
+    string? TrustedProxy, string? HttpsOrigin, PublicIngressSettings? Expected = null);
+
 internal sealed class PublicIngress(string directory, PeerNetwork peers) : IAsyncDisposable
 {
     private const string CheckHeader = "Mango-Ingress";
@@ -46,7 +49,7 @@ internal sealed class PublicIngress(string directory, PeerNetwork peers) : IAsyn
         catch (IOException) { error = $"Mango could not bind the public inference upstream on port {store.Value.Port}."; }
     }
 
-    public async Task ConfigureAsync(PublicIngressSettings input, CancellationToken cancellation)
+    public async Task ConfigureAsync(PublicIngressSettings input, CancellationToken cancellation, PublicIngressSettings? expected = null)
     {
         var next = input with { TrustedProxy = Blank(input.TrustedProxy), HttpsOrigin = Blank(input.HttpsOrigin) };
         if (Validate(next) is { } invalid)
@@ -56,6 +59,8 @@ internal sealed class PublicIngress(string directory, PeerNetwork peers) : IAsyn
         await writer.WaitAsync(cancellation);
         try
         {
+            if (expected is not null && expected != store.Value)
+                throw new PeerFailure(409, "Public access settings changed elsewhere. Review their current values.", "conflict");
             var previous = listener;
             var keep = next.Enabled && previous is not null && next.Port == store.Value.Port;
             WebApplication? replacement = null;
@@ -109,8 +114,8 @@ internal sealed class PublicIngress(string directory, PeerNetwork peers) : IAsyn
     {
         var route = local.MapGroup("/public-ingress");
         route.MapGet("", View);
-        route.MapPut("", (PublicIngressSettings input, HttpContext context) => PeerRoutes.HandleAsync(context,
-            token => ConfigureAsync(input, token)));
+        route.MapPut("", (PublicIngressUpdate input, HttpContext context) => PeerRoutes.HandleAsync(context,
+            token => ConfigureAsync(new(input.Enabled, input.Port, input.TrustedProxy, input.HttpsOrigin), token, input.Expected)));
         route.MapPost("/check", (HttpContext context) => PeerRoutes.HandleAsync(context, CheckAsync));
     }
 

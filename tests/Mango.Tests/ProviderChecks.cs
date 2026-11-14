@@ -107,8 +107,84 @@ internal static class ProviderChecks
                 : Response(HttpStatusCode.OK, "data: {\"error\":{\"message\":\"out of memory\"}}\n\n", "text/event-stream"))));
         var exhausted = await Fails(503, () => Run(InferenceOperation.Chat, ChatBody, chat, new UnslothAdapter(allocation, endpoint)));
         Check(exhausted.AllocationFailure, "provider streaming allocation errors invalidate the local placement");
+        using var unlabeledStream = new HttpClient(new Handler(_ => Task.FromResult(
+            Response(HttpStatusCode.OK, Stream, "application/octet-stream"))));
+        var generic = new LmStudioAdapter(unlabeledStream, endpoint with { Profile = ProviderProfile.Generic });
+        var invalidStream = await Fails(502, () => Run(InferenceOperation.Chat, ChatBody, chat, generic));
+        Check(invalidStream.Message.Contains("event stream"), "unlabeled chat streams are rejected as invalid provider responses");
+        await CheckGenericInventoryAsync(endpoint);
+        await CheckGenericMediaAsync(endpoint);
         await CheckResidentImageAsync(endpoint);
         Console.WriteLine("Provider fixture checks passed.");
+    }
+
+    private static async Task CheckGenericInventoryAsync(ProviderEndpoint endpoint)
+    {
+        var inventory = """
+            {"models":[{"key":"sample","type":"llm","loaded_instances":[{"id":"loaded","busy":true}]}]}
+            """;
+        using var fixture = new HttpClient(new Handler(_ => Task.FromResult(Response(HttpStatusCode.OK, inventory))));
+        var adapter = new LmStudioAdapter(fixture, endpoint with { Profile = ProviderProfile.Generic });
+        var model = (await adapter.InspectAsync(default)).Models.Single();
+        Check(model.Instances.Single().Busy && await adapter.CheckIdleAsync(model, default) == false,
+            "generic inventory reports busy instances");
+        inventory = inventory.Replace("true", "false");
+        Check(await adapter.CheckIdleAsync(model, default) == true, "generic inventory confirms an idle instance");
+        inventory = inventory.Replace(",\"busy\":false", "");
+        Check(await adapter.CheckIdleAsync(model, default) is null, "missing busy flag cannot confirm idle");
+        inventory = """{"models":[{"key":"sample","type":"llm"}]}""";
+        await Fails(502, () => adapter.CheckIdleAsync(model, default));
+    }
+
+    private static async Task CheckGenericMediaAsync(ProviderEndpoint endpoint)
+    {
+        using var fixture = new HttpClient(new Handler(async request =>
+        {
+            var route = request.RequestUri!.AbsolutePath;
+            if (route == "/api/v1/models")
+                return Response(HttpStatusCode.OK, """
+                    {"models":[
+                      {"key":"draw","type":"image","loaded_instances":[{"id":"draw-1"}]},
+                      {"key":"listen","type":"transcription","loaded_instances":[{"id":"listen-1"}]},
+                      {"key":"speak","type":"speech","loaded_instances":[{"id":"speak-1"}]}
+                    ]}
+                    """);
+            if (route == "/v1/audio/transcriptions")
+            {
+                var parts = ((MultipartFormDataContent)request.Content!).ToDictionary(part =>
+                    part.Headers.ContentDisposition!.Name!.Trim('"'));
+                Check(await parts["model"].ReadAsStringAsync() == "listen-1" &&
+                    (await parts["file"].ReadAsByteArrayAsync()).SequenceEqual(new byte[] { 1, 2, 3 }),
+                    "generic transcription forwards the instance and audio file");
+                return Response(HttpStatusCode.OK, """{"text":"Hello"}""");
+            }
+            using var body = JsonDocument.Parse(await request.Content!.ReadAsStringAsync());
+            var model = body.RootElement.GetProperty("model").GetString();
+            return (route, model) switch
+            {
+                ("/v1/images/generations", "draw-1") => Response(HttpStatusCode.OK, """{"data":[{"b64_json":"AA=="}]}"""),
+                ("/v1/audio/speech", "speak-1") => Response(HttpStatusCode.OK, "audio bytes", "audio/wav"),
+                _ => throw new InvalidOperationException("Unexpected generic inference route or instance.")
+            };
+        }));
+        var adapter = new LmStudioAdapter(fixture, endpoint with { Profile = ProviderProfile.Generic });
+        var models = (await adapter.InspectAsync(default)).Models;
+        Deployment Find(string key) => new(endpoint.Id, models.Single(model => model.NativeId == key),
+            new(key, [], null, null, null, null, 0), true, false, "fixture");
+        await Run(InferenceOperation.Images, """{"model":"draw","prompt":"A mango"}""", Find("draw"), adapter);
+        await Run(InferenceOperation.Speech, """{"model":"speak","input":"Hello","response_format":"wav"}""", Find("speak"), adapter);
+
+        var context = Context("");
+        context.Request.ContentType = "multipart/form-data; boundary=test";
+        using var upload = new MemoryStream([1, 2, 3]);
+        var file = new FormFile(upload, 0, 3, "file", "fixture.wav") { Headers = new HeaderDictionary(), ContentType = "audio/wav" };
+        context.Request.Form = new FormCollection(new Dictionary<string, StringValues> { ["model"] = "listen" },
+            new FormFileCollection { file });
+        var transcription = Find("listen");
+        Check(transcription.Model.Inputs.SequenceEqual(["audio"]) && transcription.Model.Outputs.SequenceEqual(["text"]),
+            "generic transcription publishes audio input and text output");
+        using var payload = await InferenceRequest.ReadAsync(InferenceOperation.Transcription, context.Request, default);
+        await payload.ForwardAsync(transcription, adapter, context, default);
     }
 
     private static async Task RejectTranscriptionFieldAsync(string name, string value)

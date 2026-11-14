@@ -73,4 +73,4 @@ internal sealed record LogPayloadTransfer(LogEpoch Epoch, DateOnly Day, string T
 
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
 internal sealed record LogSettingsUpdate([property: JsonRequired] RequestLogMode Mode, [property: JsonRequired] bool Operational,
-    string TimeZone, int RawDays, int AggregateDays, int CapMiB);
+    string TimeZone, int RawDays, int AggregateDays, int CapMiB, Revision? ExpectedRevision = null);

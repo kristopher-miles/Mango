@@ -43,7 +43,7 @@ internal sealed partial class PeerNetwork
                 providers.View.Models.FirstOrDefault(model => model.Id == input.Deployment) is { } observed &&
                 Matches(existing, observed.Alias, observed.Options.Ratings, ModelServing.Of(observed.Options));
             if (existing?.Revision != input.Revision && !justPublished)
-                throw new PeerFailure(409, "This requested model configuration changed. Refresh it before saving.");
+                throw new PeerFailure(409, "This requested model configuration changed. Review its current values.", "conflict");
             if (existing is null && current.Records.Models.Length >= PeerLimits.Models)
                 throw new PeerFailure(409, "The network model record limit was reached.");
             var desired = new SharedModel(id, input.Owner, input.Deployment, Next(current, self.Id), alias!, input.Ratings!,
@@ -74,10 +74,10 @@ internal sealed partial class PeerNetwork
         if (model is null)
             throw new PeerFailure(404, "The deployment was not found in the local inventory.");
         if (model.Options.Revision != input.Revision)
-            throw new PeerFailure(409, "This model changed. Refresh the catalog before editing.");
+            throw new PeerFailure(409, "This model changed. Review its current values.", "conflict");
         var existing = current.Records.Models.FirstOrDefault(item => item.Owner == self.Id && item.Deployment == input.Id);
         if (existing is not null && !Matches(existing, model.Alias, model.Options.Ratings, ModelServing.Of(model.Options)))
-            throw new PeerFailure(409, "A shared model change is pending. Edit its requested configuration in Private network.");
+            throw new PeerFailure(409, "A shared model change is pending. Review its requested settings in Serving.");
         await SetModelIntentAsync(request, new(self.Id, input.Id, existing?.Revision, input.Alias, input.Ratings ?? [],
             new(input.ServedContext, input.EmbeddingDimensions,
                 string.IsNullOrWhiteSpace(input.EmbeddingFamily) ? null : input.EmbeddingFamily.Trim(), input.MediaTokensPerItem)),
@@ -135,7 +135,7 @@ internal sealed partial class PeerNetwork
             if (input.Id is not null && existing is null)
                 throw new PeerFailure(404, "The provider registration was not found.");
             if (existing?.Revision != input.Revision)
-                throw new PeerFailure(409, "This requested provider configuration changed. Refresh it before saving.");
+                throw new PeerFailure(409, "This requested provider configuration changed. Review its current values.", "conflict");
             return WithProviderIntent(current, self.Id, input.Owner, existing?.Id ?? Guid.NewGuid(), input.Profile, address, input.Enabled);
         }, cancellation);
         return await PushChangesAsync(before, after, stopping.Token);

@@ -75,6 +75,23 @@ internal static class ResourceChecks
         var update = new BudgetUpdate(model.Id, Chat.Operation, Chat.Units, 1, 0, 1200, 600, null, null,
             AllowOverlap: true, ParallelSlots: 2, AllowAttached: true);
         resources.ApplyObservation(Sample(clock.GetUtcNow()));
+        Check(resources.Readiness(model, endpoint, Chat.Operation).State == "limits", "readiness identifies absent local qualification");
+        await resources.SaveBudgetAsync(update, providers, default);
+        Check(resources.Readiness(model, endpoint, Chat.Operation) is { State: "ready", Available: true } && !resources.HasWork(endpoint.Id),
+            "readiness accepts unrated models without reserving resources");
+        await resources.SaveBudgetAsync(update with { AllowAttached = false }, providers, default);
+        Check(resources.Readiness(model, endpoint, Chat.Operation).State == "attached", "readiness explains attached permission");
+        await resources.SaveBudgetAsync(update, providers, default);
+
+        var revision = JsonSerializer.SerializeToElement(resources.View(providers), SnapshotFile<ResourceData>.Json)
+            .GetProperty("models")[0].GetProperty("budgetRevision").GetString();
+        await resources.SaveBudgetAsync(update with { LoadRamMiB = 1250, ExpectedRevision = revision }, providers, default);
+        try
+        {
+            await resources.SaveBudgetAsync(update with { ExpectedRevision = revision }, providers, default);
+            throw new InvalidOperationException("A stale UI budget overwrote another editor.");
+        }
+        catch (ProviderFailure error) when (error.Status == 409) { }
         await resources.SaveBudgetAsync(update, providers, default);
 
         var managed = endpoint with { Mode = ProviderMode.Managed, CanLoad = true, CanUnload = true };
@@ -83,6 +100,7 @@ internal static class ResourceChecks
         free = 1450 * MiB;
         Tick(2);
         var loading = resources.TryAdmit(model, managed, Chat, ResourceWork.Load).Require();
+        Check(resources.Readiness(model, endpoint, Chat.Operation).State == "busy", "readiness reports live reservations without taking another");
         Check(resources.TryAdmit(model, endpoint, Chat, ResourceWork.Execute).Status == AdmissionStatus.Wait,
             "the load reservation excludes concurrent inference before the worker allocates");
         loading.Complete();
@@ -114,6 +132,7 @@ internal static class ResourceChecks
         failed.Complete();
         Check(resources.TryAdmit(model, endpoint, Chat, ResourceWork.Execute).Status == AdmissionStatus.Unavailable,
             "allocation failure blocks repeated unsafe admission");
+        Check(resources.Readiness(model, endpoint, Chat.Operation).State == "allocation", "readiness points to explicit allocation recovery");
         using (var reloaded = new ResourceProtection(directory, settings, (_, now) => Sample(now), () => ((ulong)Total, (ulong)free), clock))
         {
             await reloaded.InitializeAsync();

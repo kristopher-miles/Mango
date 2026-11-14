@@ -9,7 +9,7 @@ namespace Mango.Providers;
 internal sealed record EndpointStatus(Guid Id, ProviderProfile Profile, ProviderMode Mode, string Address,
     Guid? CredentialReference, string? Executable, string? ModelFile, bool Online, string? Version,
     string? Error, DateTimeOffset? ObservedAt, bool CanLoad, bool CanUnload, bool CanStop, int? OwnedProcessId,
-    int? MaxLoadedModels = null, bool CredentialNeeded = false);
+    int? MaxLoadedModels = null, bool CredentialNeeded = false, string? ConfigurationRevision = null);
 
 internal sealed record CatalogView(EndpointStatus[] Endpoints, Deployment[] Models, string? Selected, string? RecoveryWarning);
 internal sealed record ProviderLifecycle(string DeploymentId, bool Loading, TimeSpan Elapsed);
@@ -130,6 +130,8 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
         {
             var current = store.Value;
             var previous = current.Endpoints.FirstOrDefault(endpoint => endpoint.Id == input.Id);
+            if (input.ExpectedConfiguration is not null && (previous is null || ConfigurationRevision(previous) != input.ExpectedConfiguration))
+                throw new ProviderFailure(409, "This provider changed elsewhere. Review its current settings.", code: "conflict");
             if (input.Id.HasValue && previous is null)
                 throw new ProviderFailure(404, "Provider endpoint does not exist.");
             if (previous is null && current.Endpoints.Length >= ProviderLimits.MaxEndpoints)
@@ -230,7 +232,7 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
         {
             var model = Find(input.Id);
             if (model.Options.Revision != input.Revision)
-                throw new ProviderFailure(409, "This model changed. Refresh the catalog before editing.");
+                throw new ProviderFailure(409, "This model changed. Review its current values.", code: "conflict");
             var updated = new ModelOptions(input.Alias?.Trim() ?? "", input.Ratings ?? [],
                 input.ServedContext, input.EmbeddingDimensions, BlankToNull(input.EmbeddingFamily),
                 input.MediaTokensPerItem, model.Options.Revision + 1);
@@ -792,7 +794,7 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
                 inventory?.CanLoad == true && (online || endpoint.Executable is not null),
                 inventory?.CanUnload == true && (online || inventory.CanStop),
                 inventory?.CanStop == true, adapters.GetValueOrDefault(endpoint.Id)?.OwnedProcessId ?? inventory?.OwnedProcessId,
-                inventory?.MaxLoadedModels, observation?.CredentialNeeded == true));
+                inventory?.MaxLoadedModels, observation?.CredentialNeeded == true, ConfigurationRevision(endpoint)));
             foreach (var model in inventory?.Models ?? [])
             {
                 var options = value.Models.GetValueOrDefault(model.Id) ?? new ModelOptions(DefaultAlias(model), [], null, null, null, null, 0);
@@ -867,7 +869,7 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
 
     private ProviderAdapter CreateAdapter(ProviderEndpoint endpoint) => endpoint.Profile switch
     {
-        ProviderProfile.LmStudio => new LmStudioAdapter(http, endpoint),
+        ProviderProfile.LmStudio or ProviderProfile.Generic => new LmStudioAdapter(http, endpoint),
         ProviderProfile.UnslothStudio or ProviderProfile.UnslothRun => new UnslothAdapter(http, endpoint),
         _ => new LlamaAdapter(http, endpoint)
     };
@@ -884,6 +886,7 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
 
     internal static string DefaultAddress(ProviderProfile profile) => profile switch
     {
+        ProviderProfile.Generic => throw new ProviderFailure(400, "Enter the generic provider's origin."),
         ProviderProfile.LmStudio => "http://127.0.0.1:1234",
         ProviderProfile.UnslothStudio or ProviderProfile.UnslothRun => "http://127.0.0.1:8888",
         _ => "http://127.0.0.1:8080"
@@ -977,4 +980,7 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
         value.All(character => char.IsAsciiLetterOrDigit(character) || character is '.' or '-' or '_' or '/' or ':');
     private static bool SameAlias(string left, string right) => string.Equals(left, right, StringComparison.OrdinalIgnoreCase);
     private static string? BlankToNull(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+    private static string ConfigurationRevision(ProviderEndpoint endpoint) => ProviderIdentity.Hash(
+        endpoint.Id.ToString(), endpoint.Profile.ToString(), endpoint.Mode.ToString(), endpoint.Address,
+        endpoint.ProtectedToken, endpoint.Executable, endpoint.ModelFile);
 }

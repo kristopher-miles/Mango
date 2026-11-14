@@ -45,16 +45,17 @@ internal sealed class LocalWeb
 
             var headers = context.Response.Headers;
             headers.ContentSecurityPolicy =
-                "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
+                "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
             headers["Referrer-Policy"] = "no-referrer";
             headers["X-Content-Type-Options"] = "nosniff";
+            headers.CacheControl = "no-store";
             var localApi = context.Request.Path.StartsWithSegments("/api/local");
             if (localApi)
             {
-                headers.CacheControl = "no-store";
                 if (!HasSession(context))
                 {
                     context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+                    await context.Response.WriteAsJsonAsync(new { error = "Your local session has ended. Open Mango from the tray again.", code = "local_session_required" });
                     return;
                 }
                 if (context.Features.Get<IHttpMaxRequestBodySizeFeature>() is { IsReadOnly: false } bodyLimit)
@@ -135,6 +136,12 @@ internal sealed class LocalWeb
                 return Results.Problem(title: "Mango could not change Windows startup.", detail: error.Message);
             }
         });
+        local.MapPatch("/settings", (LocalSettingsPatch patch, HttpContext context) => PeerRoutes.HandleAsync(context, async cancellation =>
+        {
+            var result = await settings.UpdateAsync(current => patch.Apply(current, defaultRamMiB), cancellation);
+            if (patch.Changes!.ContainsKey("dailyUpdates")) peers.Updates?.PreferencesChanged();
+            return result;
+        }));
         local.MapGet("/release", () => new
         {
             peers.Release, Updates = peers.Updates?.Status ?? "Automatic updates are unavailable.",

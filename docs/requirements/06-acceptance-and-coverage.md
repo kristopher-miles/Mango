@@ -87,3 +87,8 @@ These are future acceptance scenarios, not tests that have already run. Confirme
 ## Status before implementation planning
 
 All 29 responses and the password-recovery clarification are recorded in [Recorded decisions](09-recorded-decisions.md). The subject requirements and these scenarios reflect those decisions. The [eight-phase plan](../plan/00-shared-foundation.md) identifies implementation ownership and the small checks needed at each stage. Hardware behavior still requires live qualification; application implementation has not begun.
+
+
+## WebUI repair acceptance, 2026-11-14
+
+The owner-requested interface repair adds UI-09–UI-12. The detailed scenarios and critique traceability are [A01–A17 in the repair plan](../plan/09-webui-redesign.md#acceptance-checks): exclusive routing, responsive layout, no Save controls, concurrent automatic persistence, automatic setup unlock, authority lifecycle, local ownership, direct Serving workflows, consent and calibration, honest telemetry, logging/key/public boundaries, accessibility, brand, packaging and end-to-end node provisioning. Hardware and browser evidence must distinguish exercised behavior from remaining checks.

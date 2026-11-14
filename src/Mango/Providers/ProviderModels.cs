@@ -4,7 +4,7 @@ using System.Text.Json.Serialization;
 
 namespace Mango.Providers;
 
-internal enum ProviderProfile { LmStudio, UnslothStudio, UnslothRun, LlamaSingle, LlamaRouter, LlamaEmbedding }
+internal enum ProviderProfile { LmStudio, UnslothStudio, UnslothRun, LlamaSingle, LlamaRouter, LlamaEmbedding, Generic }
 internal enum ProviderMode { Attached, Managed }
 internal enum InferenceOperation { Chat, Embeddings, Images, Transcription, Speech, SystemOne }
 internal enum LimitSource { Reported, Configured }
@@ -14,7 +14,7 @@ internal sealed record ProviderEndpoint(Guid Id, ProviderProfile Profile, Provid
 
 internal sealed record EndpointUpdate(Guid? Id, [property: JsonRequired] ProviderProfile Profile,
     [property: JsonRequired] ProviderMode Mode, string? Address,
-    string? Token, bool ClearToken, string? Executable, string? ModelFile);
+    string? Token, bool ClearToken, string? Executable, string? ModelFile, string? ExpectedConfiguration = null);
 
 internal sealed record ModelOptions(string Alias, Dictionary<string, int?> Ratings, int? ServedContext,
     int? EmbeddingDimensions, string? EmbeddingFamily, int? MediaTokensPerItem, long Revision);
@@ -91,9 +91,10 @@ internal static class ProviderLimits
 }
 
 internal sealed class ProviderFailure(int status, string message, bool allocationFailure = false, bool capacityWait = false,
-    bool memoryWait = false) : Exception(message)
+    bool memoryWait = false, string? code = null) : Exception(message)
 {
     public int Status { get; } = status;
+    public string? Code { get; } = code;
     public bool AllocationFailure { get; } = allocationFailure;
     public bool CapacityWait { get; } = capacityWait;
     public bool MemoryWait { get; } = memoryWait;

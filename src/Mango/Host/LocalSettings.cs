@@ -1,6 +1,8 @@
 using System.ComponentModel;
 using System.Runtime.InteropServices;
+using System.Text.Json;
 using System.Text.Json.Serialization;
+using Mango.Peers;
 
 namespace Mango.Host;
 
@@ -61,6 +63,52 @@ internal sealed record LocalSettings
             ? custom : DefaultVramReserveMiB;
 
     private static bool ValidPercent(int percent) => percent is >= 1 and <= 100;
+}
+
+internal sealed record LocalSettingsPatch(Dictionary<string, JsonElement>? Changes,
+    Dictionary<string, JsonElement>? Expected, bool AcceptReducedReserve = false)
+{
+    public LocalSettings Apply(LocalSettings current, int defaultRamMiB)
+    {
+        if (Changes is not { Count: > 0 and <= 14 } || Expected is null || Expected.Count != Changes.Count)
+            throw new PeerFailure(400, "Supply changed preferences and their previous values.");
+        var snapshot = JsonSerializer.SerializeToElement(current, SnapshotFile<LocalSettings>.Json);
+        var next = current;
+        foreach (var (name, value) in Changes)
+        {
+            if (name == "reducedReserveConsent" || !snapshot.TryGetProperty(name, out var before))
+                throw new PeerFailure(400, $"Unknown or protected preference: {name}.");
+            if (!Expected.TryGetValue(name, out var expected) || !JsonElement.DeepEquals(before, expected))
+                throw new PeerFailure(409, $"The {name} preference changed elsewhere. Review its current value.", "conflict");
+            try
+            {
+                T Read<T>() => value.Deserialize<T>(SnapshotFile<LocalSettings>.Json)!;
+                next = name switch
+                {
+                    "role" => next with { Role = Read<LocalRole>() },
+                    "activityMonitoring" => next with { ActivityMonitoring = Read<bool>() },
+                    "sampleSeconds" => next with { SampleSeconds = Read<int>() },
+                    "cooldownSeconds" => next with { CooldownSeconds = Read<int>() },
+                    "cpuCutoffPercent" => next with { CpuCutoffPercent = Read<int>() },
+                    "gpuCutoffPercent" => next with { GpuCutoffPercent = Read<int>() },
+                    "ramCutoffPercent" => next with { RamCutoffPercent = Read<int>() },
+                    "vramCutoffPercent" => next with { VramCutoffPercent = Read<int>() },
+                    "ramReserveMiB" => next with { RamReserveMiB = Read<int?>() },
+                    "vramReserveMiB" => next with { VramReserveMiB = Read<int?>() },
+                    "benchmarkPolicy" => next with { BenchmarkPolicy = Read<BenchmarkPolicy>() },
+                    "maintenanceDeferred" => next with { MaintenanceDeferred = Read<bool>() },
+                    "dailyUpdates" => next with { DailyUpdates = Read<bool>() },
+                    _ => throw new PeerFailure(400, $"Unknown preference: {name}.")
+                };
+            }
+            catch (JsonException) { throw new PeerFailure(400, $"Enter a valid value for {name}."); }
+        }
+        if (LocalSettings.Validate(next) is { } invalid) throw new PeerFailure(400, invalid);
+        var reduced = next.HasReducedReserve(defaultRamMiB);
+        if (reduced && !current.ReducedReserveConsent && !AcceptReducedReserve)
+            throw new PeerFailure(400, "Acknowledge the reduced memory reserve risk first.", "reserve_consent");
+        return next with { ReducedReserveConsent = current.ReducedReserveConsent || reduced && AcceptReducedReserve };
+    }
 }
 
 internal static class WindowsMemory

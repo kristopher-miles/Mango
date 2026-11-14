@@ -1,65 +1,178 @@
 <!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Mango · Local settings</title>
-  <link rel="stylesheet" href="/mango.css">
-  <script src="/mango.js" defer></script>
-  <script src="/network-catalog.js" defer></script>
-  <script src="/network.js" defer></script>
-  <script src="/dashboard.js" defer></script>
-  <script src="/resources.js" defer></script>
-  <script src="/logs.js" defer></script>
-</head>
-<body>
-  <main>
-    <header>
-      <p class="product">Mango</p>
-      <h1>Network and local settings</h1>
-    </header>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mango · Local settings</title><link rel="icon" href="/mango.svg" type="image/svg+xml"><link rel="stylesheet" href="/mango.css">
+<script src="/preferences.js" defer></script>
+<script src="/shell.js" defer></script>
+<script src="/mango.js" defer></script>
+<script src="/network-catalog.js" defer></script>
+<script src="/enrollment.js" defer></script>
+<script src="/network.js" defer></script>
+<script src="/dashboard.js" defer></script>
+<script src="/telemetry.js" defer></script><script src="/resources.js" defer></script>
+<script src="/logs.js" defer></script>
+</head><body>
+<a class="skip-link" href="#main-content">Skip to content</a>
+<aside class="app-sidebar" aria-label="Mango workspace">
+<a class="brand" aria-label="Mango home" href="#/overview"><img src="/mango.svg" alt="" width="30" height="30"><span>Mango</span></a>
+<div class="host-identity"><strong id="sidebar-node">This computer</strong><span id="sidebar-network" class="muted">Local workspace</span></div>
+<nav id="primary-nav" class="primary-nav" aria-label="Main navigation"><a href="#/overview" aria-label="Overview"><svg class="glyph" aria-hidden="true"><use href="/glyphs.svg#overview"></use></svg><span>Overview</span></a><a href="#/serving" aria-label="Serving"><svg class="glyph" aria-hidden="true"><use href="/glyphs.svg#provider"></use></svg><span>Serving</span></a><a href="#/activity/live" aria-label="Activity"><svg class="glyph" aria-hidden="true"><use href="/glyphs.svg#activity"></use></svg><span>Activity</span></a><a href="#/network/nodes" aria-label="Network"><svg class="glyph" aria-hidden="true"><use href="/glyphs.svg#network"></use></svg><span>Network</span></a><a href="#/protection/activity" aria-label="Protection"><svg class="glyph" aria-hidden="true"><use href="/glyphs.svg#protection"></use></svg><span>Protection</span></a><a href="#/system/startup" aria-label="System"><svg class="glyph" aria-hidden="true"><use href="/glyphs.svg#system"></use></svg><span>System</span></a></nav>
+<div class="rail-status"><div class="contribution-status"><span class="muted">This computer</span><strong id="rail-contribution">Checking…</strong></div><div class="administration-actions"><button id="admin-control" class="admin-control" type="button"><svg class="glyph" aria-hidden="true"><use href="/glyphs.svg#lock"></use></svg><span id="admin-label">Not joined</span></button><button id="admin-lock" class="quiet" type="button" hidden>Lock</button></div><button id="pending-edits" class="quiet" type="button" hidden>Unfinished changes</button></div>
+</aside>
+<main id="main-content" tabindex="-1"><div class="page-heading"><div><h1 id="page-title" tabindex="-1">Overview</h1><p id="page-description" class="muted"></p></div><p id="status" role="status">Opening local session…</p></div>
+<nav id="page-tabs" class="page-tabs" aria-label="Page views"></nav><div id="workspace" hidden>
+<section data-page="overview" class="page " hidden><div class="overview-grid"><div><section class="panel resource-chart"><div class="panel-heading"><h2>Local resources</h2><span id="chart-freshness" class="muted">Waiting for observations</span></div><div id="resource-metrics" class="metric-grid"></div><label id="chart-device-label" class="compact" hidden>GPU memory device<select id="chart-device"></select></label><svg id="resource-chart" viewBox="0 0 800 220" role="img" aria-labelledby="chart-title chart-description"><title id="chart-title">Local resource usage over the last ten minutes</title><desc id="chart-description">No observations yet.</desc></svg><p id="chart-summary" class="muted">History starts when this view opens.</p><p id="chart-limitation" class="muted"></p></section><section class="panel"><div class="panel-heading"><h2>Recent work</h2><a href="#/activity/live">View activity</a></div><ul id="overview-activity" class="work-list"><li>No recent work.</li></ul></section></div><aside><section class="panel"><h2>This computer</h2><p id="resource-state" class="state-line">Checking contribution…</p><label class="switch"><span>Contribute this computer</span><input type="checkbox" data-setting="role" data-role-switch></label><p class="field-status" data-setting-status="role" role="status"></p><label>Preferred local model<select id="overview-selection"><option value="">Automatic placement</option></select></label><p id="selection-status" class="muted"></p><a id="overview-protection" href="#/protection/activity"></a><div class="request-counts"><span><strong id="overview-running">0</strong> running</span><span><strong id="overview-waiting">0</strong> waiting</span></div></section><section class="panel"><h2>Needs attention</h2><ul id="overview-attention" class="attention-list"></ul></section></aside></div></section>
+<section data-page="serving" class="page " hidden><div class="serving-toolbar"><label>Computer<select id="serving-node"></select></label><label>Provider<select id="serving-provider"></select></label><button id="provider-add" type="button" class="secondary"><svg class="glyph" aria-hidden="true"><use href="/glyphs.svg#add"></use></svg>Add provider</button></div><p id="serving-scope" class="muted"></p><section class="panel provider-panel"><div class="panel-heading"><h2 id="provider-heading">Connect a provider</h2><span id="provider-connection" class="badge"></span></div><p id="providers-recovery" class="warning" hidden></p><form id="provider-form" aria-labelledby="provider-form-title">
+          <fieldset>
+            <legend id="provider-form-title">Register a provider</legend>
+            <div class="inputs">
+              <label>Provider profile
+                <select name="profile">
+                  <option value="lmStudio">LM Studio</option>
+                  <option value="unslothStudio">Unsloth Studio</option>
+                  <option value="unslothRun">Unsloth run</option>
+                  <option value="llamaSingle">llama.cpp single-model chat or decisions</option>
+                  <option value="llamaEmbedding">llama.cpp single-model embeddings</option>
+                  <option value="llamaRouter">llama.cpp router</option>
+                  <option value="generic">Generic endpoint</option>
+                </select>
+              </label>
+              <label>Management
+                <select name="mode">
+                  <option value="attached">Attached · inference only</option>
+                  <option value="managed">Managed · authorize supported lifecycle controls</option>
+                </select>
+              </label>
+              <label>Provider address<input name="address" type="url" placeholder="http://127.0.0.1:1234"></label>
+              <label>Provider bearer token<input name="token" type="password" autocomplete="off" maxlength="4096"></label>
+              <label class="checkbox" id="provider-clear-token" hidden><input name="clearToken" type="checkbox"> Clear saved token</label>
+            </div>
+            <div class="inputs" id="provider-process" hidden>
+              <label>Authorized llama-server.exe path<input name="executable" type="text" maxlength="1024"></label>
+              <label>Local GGUF file path<input name="modelFile" type="text" maxlength="1024"></label>
+            </div>
+            <p id="provider-help" class="muted">Enter an address for a generic endpoint. Other profiles have local defaults. Mango saves provider tokens for the current Windows user.</p>
+          </fieldset>
+          <div class="actions">
 
-    <p id="status" role="status">Opening local session…</p>
-    <div id="workspace" hidden>
-      <nav class="section-links" aria-label="Mango settings">
-        <a href="#private-network">Private network</a>
-        <a href="#providers">Providers</a>
-        <a href="#live-requests">Live requests</a>
-        <a href="#public-inference">Public inference</a>
-        <a href="#logging">Logs</a>
-        <a href="#settings">Contribution</a>
-      </nav>
-      <section class="card" aria-labelledby="host-title">
-        <h2 id="host-title">Host status</h2>
-        <dl class="host-status">
-          <div><dt>Setup</dt><dd>Local host ready</dd></div>
-          <div><dt>Role preference</dt><dd id="role-status"></dd></div>
-          <div><dt>Providers</dt><dd id="provider-count">Not configured</dd></div>
-          <div><dt>Network</dt><dd id="network-summary">Checking network</dd></div>
-          <div><dt>Mango release</dt><dd id="release-status"></dd></div>
-          <div class="path"><dt>Data location</dt><dd id="data-directory"></dd></div>
-        </dl>
-        <p id="recovery" class="warning" hidden></p>
-        <form id="maintenance">
-          <label class="check"><input name="daily" type="checkbox"> Check for safe updates daily</label>
-          <label class="check"><input name="deferred" type="checkbox"> Defer future maintenance on this host</label>
-          <button class="secondary" type="submit">Save update preferences</button>
-          <p id="maintenance-status" class="action-status" role="status"></p>
-        </form>
-        <button id="update-check" class="secondary" type="button">Check GitHub now</button>
-        <button id="update-share" class="secondary" type="button">Queue safe update on peers</button>
-        <label id="update-partial-label" class="check" hidden><input id="update-partial" type="checkbox"> Proceed with verified peers only</label>
-        <p id="update-action" class="action-status" role="status"></p>
-      </section>
 
-      <section id="private-network" class="card" aria-labelledby="network-title">
-        <h2 id="network-title">Private network</h2>
-        <p id="network-tailnet" class="muted"></p>
-        <p id="network-recovery" class="warning" hidden></p>
-        <p id="network-status" class="action-status" role="status"></p>
-        <p id="network-addresses" class="path"></p>
-        <button id="network-refresh" class="secondary" type="button">Refresh network</button>
-        <div id="network-setup" hidden>
+            <button type="button" id="provider-refresh" class="secondary">Refresh catalog</button>
+          </div>
+        </form><div id="provider-extra-actions" class="actions"></div><p id="provider-status" role="status" class="field-status"></p><p id="provider-applied" class="muted"></p><div class="serving-quick"><label class="switch">Contribute this computer<input type="checkbox" data-setting="role" data-role-switch></label><span class="field-status" data-setting-status="role"></span><label>Benchmark policy<select data-setting="benchmarkPolicy"><option value="never">Never</option><option value="now">Now · before serving</option><option value="whenConvenient">When convenient</option></select></label></div></section><div class="serving-grid"><section><div class="model-toolbar"><h2>Models and readiness</h2><label class="sr-only" for="model-search">Find a model</label><input id="model-search" type="search" placeholder="Find a model…"><label class="sr-only" for="model-operation">Filter by operation</label><select id="model-operation"><option value="">All operations</option></select></div><p id="catalog-status" role="status"></p><div id="deployment-list"></div><div class="pagination"><span id="model-count" class="muted"></span><button id="model-previous" type="button" class="quiet">Previous</button><button id="model-next" type="button" class="quiet">Next</button></div></section><aside class="panel qualification"><h2 id="qualification-title">Model qualification</h2><p id="qualification-scope" class="muted">Select a model to inspect its local limits.</p><p id="resource-feedback" class="field-status" role="status"></p><form id="resource-form" hidden>
+          <fieldset>
+            <legend>Local deployment limits</legend>
+            <label>Deployment and operation<select name="target" required></select></label>
+            <p id="resource-units" class="muted"></p>
+            <div class="inputs">
+              <label>Workload units<input name="units" type="number" min="1" max="67108864" required></label>
+              <label>Items per request<input name="items" type="number" min="1" max="128" required></label>
+              <label>Inline media items<input name="mediaItems" type="number" min="0" max="128" required></label>
+              <label>Load RAM peak (MiB)<input name="loadRamMiB" type="number" min="0" max="1048576" required></label>
+              <label>Additional execution RAM peak (MiB)<input name="executeRamMiB" type="number" min="0" max="1048576" required></label>
+            </div>
+            <div id="resource-gpus" class="inputs"></div>
+            <label id="resource-attached" class="checkbox" hidden>
+              <input name="allowAttached" type="checkbox"> Allow this attached provider. Mango can stop forwarding requests, and its model may remain resident.
+            </label>
+            <label class="checkbox"><input name="allowOverlap" type="checkbox"> I qualified these memory limits for overlapping executions</label>
+            <label>Qualified executions on this deployment<input name="parallelSlots" type="number" min="1" max="64" value="1" required></label>
+            <p id="resource-profile" class="muted"></p>
+
+            <div class="actions">
+
+              <button id="resource-retry" type="button" class="secondary">Retry benchmark</button>
+            </div>
+          </fieldset>
+        </form><p id="qualification-empty" class="muted">Models appear after the provider reports its inventory.</p></aside></div></section>
+<section data-page="serving/aliases" class="page " hidden><section class="panel settings-panel"><h2>Alias capability ratings</h2><p id="alias-scope" class="muted">Changes affect every deployment with the selected alias.</p><form id="alias-rating-form">
+          <fieldset>
+            <legend>Set a capability rating for an alias</legend>
+            <div class="inputs">
+              <label>Alias<select name="alias" required></select></label>
+              <label>Capability label<input name="label" type="text" maxlength="100" required></label>
+              <label>Rating (0–5, or blank for unrated)<input name="rating" type="number" min="0" max="5" step="1"></label>
+            </div>
+          </fieldset>
+
+        </form><p id="alias-feedback" class="field-status" role="status"></p></section></section>
+<section data-page="serving/measurements" class="page " hidden><section class="panel"><h2 id="measurement-title">Benchmark measurements</h2><p id="resource-benchmark" class="muted"></p><ul id="resource-passes" class="work-list"></ul><a href="#/serving">Back to Serving</a></section></section>
+<section data-page="activity/live" class="page " hidden><section class="panel"><div class="panel-heading"><h2>Live activity</h2><p id="requests-status" role="status" class="muted"></p></div><p id="requests-resources" class="muted"></p><div class="activity-columns"><div><h3>Received here</h3><ul id="ingress-activity" class="work-list"></ul></div><div><h3>Serving here</h3><ul id="serving-activity" class="work-list"></ul></div></div></section></section>
+<section data-page="activity/history" class="page " hidden><section class="panel"><form id="logs-query">
+          <fieldset>
+            <legend>View a day</legend>
+            <div class="inputs">
+              <label>Day<input name="day" type="date"></label>
+              <label>Key name<input name="key" type="text" maxlength="120"></label>
+              <label>Source address<input name="source" type="text" maxlength="64"></label>
+            </div>
+            <div class="actions">
+
+              <button id="logs-collect" type="button" class="secondary">Collect from network</button>
+              <button id="logs-export" type="button" class="secondary">Download day</button>
+            </div>
+          </fieldset>
+        </form><p id="logs-feedback" class="field-status" role="status"></p><p id="logs-coverage-note" class="muted"></p>
+        <ul id="logs-coverage" class="activity-list"></ul>
+        <p id="logs-storage" class="muted"></p>
+        <div class="inputs">
+          <div><h3>Usage by key name</h3><ul id="logs-keys" class="activity-list"></ul></div>
+          <div><h3>Usage by client address</h3><ul id="logs-sources" class="activity-list"></ul></div>
+        </div>
+        <p id="logs-count"></p>
+        <div class="log-table" tabindex="0" role="region" aria-label="Request and operation details">
+          <table>
+            <thead><tr><th scope="col">Time</th><th scope="col">Work</th><th scope="col">Destination and outcome</th><th scope="col">Timing</th></tr></thead>
+            <tbody id="logs-entries"></tbody>
+          </table>
+        </div>
+        <div class="pagination"><span id="logs-page" class="muted"></span><button id="logs-previous" class="quiet" type="button">Previous</button><button id="logs-next" class="quiet" type="button">Next</button></div></section></section>
+<section data-page="network/nodes" class="page " hidden><section class="panel"><div class="panel-heading"><h2>Network computers</h2><button id="network-refresh" class="secondary" type="button">Refresh network</button></div><p id="network-tailnet" class="muted"></p><p id="network-local" class="muted"></p><p id="network-addresses" class="muted path"></p><p id="network-recovery" class="warning" hidden></p><p id="network-status" class="field-status" role="status"></p><div id="network-models"></div><a id="network-setup-link" href="#/network/setup">Create or join a network</a></section></section>
+<section data-page="network/queue" class="page " hidden><section class="panel settings-panel"><h2>Inference queue</h2><p class="scope-label">Network</p><form id="network-queue">
+            <fieldset>
+              <legend>Inference queue</legend>
+              <label>Maximum wait in seconds<input name="waitSeconds" type="number" min="1" max="3600" required></label>
+
+            </fieldset>
+          </form><p id="queue-feedback" class="field-status" role="status"></p></section></section>
+<section data-page="network/keys" class="page " hidden><section class="panel"><h2>Inference keys</h2><p id="network-key-policy" class="muted"></p><ul id="network-keys" class="work-list"></ul><form id="network-issue">
+            <fieldset>
+              <legend>Issue a key</legend>
+              <div class="inputs">
+                <label>Display name<input name="name" type="text" maxlength="120" required></label>
+                <label>Priority<select name="priority" required><option value="low">Low</option><option value="normal" selected>Normal</option><option value="high">High</option></select></label>
+                <label>Expiry<select name="expiry" required><option value="">Choose expiry</option><option value="never">Never expire</option><option value="date">Expire at a date</option></select></label>
+                <label id="network-expiry" hidden>Expiry date and time<input name="expiresAt" type="datetime-local"></label>
+              </div>
+              <div class="role-options" id="network-scopes"></div>
+              <button type="submit">Issue key</button>
+            </fieldset>
+          </form><p id="key-feedback" class="field-status" role="status"></p></section></section>
+<section data-page="network/public" class="page " hidden><section class="panel settings-panel"><h2>Public HTTPS access</h2><p class="scope-label">This computer</p><p id="public-state"></p><p class="muted">An HTTPS reverse proxy or Tailscale Funnel can expose this inference-only upstream. A permitted inference key is still required.</p><form id="public-form">
+          <fieldset>
+            <legend>Local public ingress</legend>
+            <label class="checkbox"><input name="enabled" type="checkbox"> Enable the inference-only upstream</label>
+            <div class="inputs">
+              <label>Loopback upstream port<input name="port" type="number" min="1024" max="65535" required></label>
+              <label>HTTPS origin for a reachability check<input name="httpsOrigin" type="url" maxlength="512" placeholder="https://mango.example.com"></label>
+              <label>Trusted proxy IPv4 address, optional<input name="trustedProxy" type="text" maxlength="45" aria-describedby="proxy-source-hint" placeholder="127.0.0.1"></label>
+            </div>
+            <p id="proxy-source-hint" class="muted">Use this field only when the proxy overwrites X-Forwarded-For with a single observed client IP. Leave it blank for Funnel.</p>
+            <div class="actions">
+              <button id="public-check" type="button" class="secondary" disabled>Check HTTPS from this node</button></div>
+          </fieldset>
+        </form><p id="public-feedback" class="field-status" role="status"></p></section></section>
+<section data-page="network/recovery" class="page " hidden><section class="panel settings-panel"><h2>Recover a forgotten password</h2><form id="network-recover">
+              <p class="muted">Recovery keeps existing keys and configuration. A recovery record cannot recreate data missing from every peer.</p>
+              <label>Recovery record<input name="recoveryRecord" type="password" maxlength="112" autocomplete="off" required></label>
+              <label>New master password<input name="newPassword" type="password" minlength="12" maxlength="256" autocomplete="new-password" required></label>
+              <button type="submit">Replace master password</button>
+            </form></section><section id="network-reset-panel" class="panel settings-panel danger-panel"><h2>Full network reset</h2><form id="network-reset">
+              <p class="muted">Full reset clears keys and private request state. Peers must enroll again. Model settings and benchmarks are preserved.</p>
+              <label>New master password<input name="newPassword" type="password" minlength="12" maxlength="256" autocomplete="new-password" required></label>
+              <label class="checkbox"><input name="confirm" type="checkbox" required> Confirm full reset</label>
+              <button type="submit">Reset network</button>
+            </form></section><p id="recovery-feedback" class="field-status" role="status"></p></section>
+<section data-page="network/setup" class="page " hidden><section class="panel settings-panel"><h2>Connect this computer</h2><p id="setup-description" class="muted">Create a new network or join an existing one. Successful setup opens Serving with administration unlocked.</p><a id="setup-membership" href="#/serving" hidden>Open this computer in Serving</a><div class="segmented" role="group" aria-label="Setup path"><button id="setup-join" type="button" class="secondary">Join a network</button><button id="setup-create" type="button" class="secondary">Create a network</button></div><div id="network-setup">
           <form id="network-discover">
             <fieldset>
               <legend>Find a Mango peer</legend>
@@ -88,8 +201,8 @@
               <button type="submit">Join network</button>
             </fieldset>
           </form>
-          <details id="network-new-panel">
-            <summary>Create a separate network</summary>
+          <section id="network-new-panel">
+            <h2>Create a network</h2>
             <p class="muted">Use this when starting a new Mango network. If an existing peer is unreachable, try joining again with its known address and network ID.</p>
           <form id="network-create">
             <fieldset>
@@ -108,210 +221,9 @@
               <button type="submit">Create network</button>
             </fieldset>
           </form>
-          </details>
-        </div>
-        <div id="network-enrolled" hidden>
-          <p id="network-local"></p>
-          <form id="network-unlock">
-            <fieldset>
-              <legend>Unlock network administration</legend>
-              <label>Master password<input name="password" type="password" maxlength="256" autocomplete="off" required></label>
-              <button type="submit">Unlock for 10 minutes</button>
-            </fieldset>
-          </form>
-          <p id="network-unlocked" hidden>Network administration is unlocked.</p>
-          <h3>Nodes and deployments</h3>
-          <div id="network-models"></div>
-          <button id="network-provider-add" class="secondary" type="button" hidden>Request a provider registration</button>
-          <form id="network-provider-intent" hidden>
-            <fieldset>
-              <legend>Requested provider configuration</legend>
-              <div class="inputs">
-                <label>Owning node<select name="owner" required></select></label>
-                <label>Provider profile<select name="profile" required></select></label>
-                <label>Provider origin<input name="address" type="url" maxlength="2048" placeholder="Use profile default"></label>
-              </div>
-              <label class="checkbox"><input name="enabled" type="checkbox" checked> Enable this registration</label>
-              <p class="muted">Credentials and process access are configured on the owning node.</p>
-              <div class="actions"><button type="submit">Save provider request</button>
-                <button id="network-provider-cancel" class="secondary" type="button">Cancel</button></div>
-            </fieldset>
-          </form>
-          <form id="network-model-intent" hidden>
-            <fieldset>
-              <legend id="network-model-edit-title">Requested deployment settings</legend>
-              <div class="inputs">
-                <label>Alias<input name="alias" type="text" maxlength="200" required></label>
-                <label>Configured context tokens<input name="servedContext" type="number" min="1" max="4194304"></label>
-                <label>Configured embedding dimensions<input name="embeddingDimensions" type="number" min="1" max="65536"></label>
-                <label>Embedding family<input name="embeddingFamily" type="text" maxlength="200"></label>
-                <label>Tokens per inline media item<input name="mediaTokensPerItem" type="number" min="1" max="4194304"></label>
-              </div>
-              <div id="network-rating-rows"></div>
-              <div class="actions"><button id="network-rating-add" type="button" class="secondary">Add capability rating</button></div>
-              <div class="actions"><button type="submit">Save model request</button>
-                <button id="network-model-cancel" class="secondary" type="button">Cancel</button></div>
-            </fieldset>
-          </form>
-          <form id="network-queue" hidden>
-            <fieldset>
-              <legend>Inference queue</legend>
-              <label>Maximum wait in seconds<input name="waitSeconds" type="number" min="1" max="3600" required></label>
-              <button type="submit">Save queue limit</button>
-            </fieldset>
-          </form>
-          <h3>Inference keys</h3>
-          <p id="network-key-policy" class="muted"></p>
-          <ul id="network-keys"></ul>
-          <form id="network-issue" hidden>
-            <fieldset>
-              <legend>Issue a key</legend>
-              <div class="inputs">
-                <label>Display name<input name="name" type="text" maxlength="120" required></label>
-                <label>Priority<select name="priority" required><option value="low">Low</option><option value="normal" selected>Normal</option><option value="high">High</option></select></label>
-                <label>Expiry<select name="expiry" required><option value="">Choose expiry</option><option value="never">Never expire</option><option value="date">Expire at a date</option></select></label>
-                <label id="network-expiry" hidden>Expiry date and time<input name="expiresAt" type="datetime-local"></label>
-              </div>
-              <div class="role-options" id="network-scopes"></div>
-              <button type="submit">Issue key</button>
-            </fieldset>
-          </form>
-          <details>
-            <summary>Recover a forgotten password</summary>
-            <form id="network-recover">
-              <p class="muted">Recovery keeps existing keys and configuration. A recovery record cannot recreate data missing from every peer.</p>
-              <label>Recovery record<input name="recoveryRecord" type="password" maxlength="112" autocomplete="off" required></label>
-              <label>New master password<input name="newPassword" type="password" minlength="12" maxlength="256" autocomplete="new-password" required></label>
-              <button type="submit">Replace master password</button>
-            </form>
-          </details>
-          <details id="network-reset-panel" hidden>
-            <summary>Full network reset</summary>
-            <form id="network-reset">
-              <p class="muted">Full reset clears keys and private request state. Peers must enroll again. Model settings and benchmarks are preserved.</p>
-              <label>New master password<input name="newPassword" type="password" minlength="12" maxlength="256" autocomplete="new-password" required></label>
-              <label class="checkbox"><input name="confirm" type="checkbox" required> Confirm full reset</label>
-              <button type="submit">Reset network</button>
-            </form>
-          </details>
-        </div>
-        <div id="network-secret" class="warning" hidden>
-          <label id="network-secret-label" for="network-secret-value"></label>
-          <textarea id="network-secret-value" rows="3" readonly></textarea>
-          <div class="actions">
-            <button id="network-download" class="secondary" type="button">Download recovery record</button>
-            <button id="network-hide-secret" class="secondary" type="button">Hide</button>
-          </div>
-        </div>
-      </section>
-
-      <section id="providers" class="card" aria-labelledby="providers-title">
-        <h2 id="providers-title">Providers and models</h2>
-        <p class="muted">Register a local provider and decide whether Mango may manage its model lifecycle.</p>
-        <p id="providers-recovery" class="warning" hidden></p>
-        <form id="provider-form" aria-labelledby="provider-form-title">
-          <fieldset>
-            <legend id="provider-form-title">Register a provider</legend>
-            <div class="inputs">
-              <label>Provider profile
-                <select name="profile">
-                  <option value="lmStudio">LM Studio</option>
-                  <option value="unslothStudio">Unsloth Studio</option>
-                  <option value="unslothRun">Unsloth run</option>
-                  <option value="llamaSingle">llama.cpp single-model chat or decisions</option>
-                  <option value="llamaEmbedding">llama.cpp single-model embeddings</option>
-                  <option value="llamaRouter">llama.cpp router</option>
-                </select>
-              </label>
-              <label>Management
-                <select name="mode">
-                  <option value="attached">Attached · inference only</option>
-                  <option value="managed">Managed · authorize supported lifecycle controls</option>
-                </select>
-              </label>
-              <label>Provider address<input name="address" type="url" placeholder="http://127.0.0.1:1234"></label>
-              <label>Provider bearer token<input name="token" type="password" autocomplete="off" maxlength="4096"></label>
-              <label class="checkbox" id="provider-clear-token" hidden><input name="clearToken" type="checkbox"> Clear saved token</label>
-            </div>
-            <div class="inputs" id="provider-process" hidden>
-              <label>Authorized llama-server.exe path<input name="executable" type="text" maxlength="1024"></label>
-              <label>Local GGUF file path<input name="modelFile" type="text" maxlength="1024"></label>
-            </div>
-            <p class="muted">Leave the address blank to check the profile's local default. Mango saves provider tokens for the current Windows user.</p>
-          </fieldset>
-          <div class="actions">
-            <button type="submit">Save provider</button>
-            <button type="button" id="provider-cancel" class="secondary" hidden>Cancel edit</button>
-            <button type="button" id="provider-refresh" class="secondary">Refresh catalog</button>
-          </div>
-        </form>
-        <p id="provider-status" class="action-status" role="status"></p>
-        <div id="provider-list"></div>
-
-        <h3>Local inference selection</h3>
-        <p id="selection-status"></p>
-        <button type="button" id="clear-selection" class="secondary" hidden>Clear selection</button>
-        <p class="muted">Selection prefers this deployment among comparable placements. Use an embedding family for deployments that share a vector space.</p>
-        <div id="deployment-list"></div>
-        <form id="alias-rating-form" hidden>
-          <fieldset>
-            <legend>Set a capability rating for an alias</legend>
-            <div class="inputs">
-              <label>Alias<select name="alias" required></select></label>
-              <label>Capability label<input name="label" type="text" maxlength="100" required></label>
-              <label>Rating (0–5, or blank for unrated)<input name="rating" type="number" min="0" max="5" step="1"></label>
-            </div>
-          </fieldset>
-          <button type="submit">Apply rating to alias</button>
-        </form>
-      </section>
-
-      <section id="live-requests" class="card" aria-labelledby="requests-title">
-        <h2 id="requests-title">Live requests</h2>
-        <p id="requests-status" role="status" class="muted">Connecting to the local request feed…</p>
-        <p id="requests-resources" class="muted"></p>
-        <details open class="deployment">
-          <summary>Received here</summary>
-          <ul id="ingress-activity" class="activity-list"></ul>
-        </details>
-        <details open class="deployment">
-          <summary>Serving here</summary>
-          <ul id="serving-activity" class="activity-list"></ul>
-        </details>
-      </section>
-
-      <section id="public-inference" class="card" aria-labelledby="public-title">
-        <h2 id="public-title">Public HTTPS inference</h2>
-        <p id="public-state"></p>
-        <p class="muted">Point an HTTPS reverse proxy or Tailscale Funnel at the dedicated local upstream. Anyone who can reach the HTTPS endpoint and has a permitted inference key can submit work.</p>
-        <form id="public-form">
-          <fieldset>
-            <legend>Local public ingress</legend>
-            <label class="checkbox"><input name="enabled" type="checkbox"> Enable the inference-only upstream</label>
-            <div class="inputs">
-              <label>Loopback upstream port<input name="port" type="number" min="1024" max="65535" required></label>
-              <label>HTTPS origin for a reachability check<input name="httpsOrigin" type="url" maxlength="512" placeholder="https://mango.example.com"></label>
-              <label>Trusted proxy IPv4 address, optional<input name="trustedProxy" type="text" maxlength="45" aria-describedby="proxy-source-hint" placeholder="127.0.0.1"></label>
-            </div>
-            <p id="proxy-source-hint" class="muted">Use this field only when the proxy overwrites X-Forwarded-For with a single observed client IP. Leave it blank for Funnel.</p>
-            <div class="actions"><button type="submit">Save local ingress</button>
-              <button id="public-check" type="button" class="secondary" disabled>Check HTTPS from this node</button></div>
-          </fieldset>
-        </form>
-        <p id="public-feedback" role="status" class="action-status"></p>
-      </section>
-
-      <form id="settings" class="card" aria-labelledby="settings-title">
-        <h2 id="settings-title">Contribution</h2>
-        <fieldset>
-          <legend>Local role preference</legend>
-          <div class="role-options">
-            <label><input name="role" type="radio" value="leech" required> Leech</label>
-            <label><input name="role" type="radio" value="contributor" required> Contributor</label>
-          </div>
-        </fieldset>
-
-        <fieldset>
+          </section>
+        </div><p id="setup-feedback" class="field-status" role="status"></p></section></section>
+<section data-page="protection/activity" class="page " hidden><section class="panel settings-panel"><h2>Activity protection</h2><p class="scope-label">This computer</p><form id="settings-activity"><fieldset>
           <legend>Activity protection</legend>
           <label class="checkbox"><input type="checkbox" name="activityMonitoring"> Monitor local activity</label>
           <div class="inputs">
@@ -322,9 +234,8 @@
             <label>RAM pressure cutoff (%)<input name="ramCutoffPercent" type="number" min="1" max="100" required></label>
             <label>VRAM pressure cutoff (%)<input name="vramCutoffPercent" type="number" min="1" max="100" required></label>
           </div>
-        </fieldset>
-
-        <fieldset>
+        </fieldset></form><p id="resource-observation" class="muted"></p><p id="protection-feedback" class="field-status" role="status"></p><button id="resource-refresh" type="button" class="secondary">Refresh observations</button><button id="resource-release" type="button" class="secondary" hidden>Verify release again</button></section></section>
+<section data-page="protection/memory" class="page " hidden><section class="panel settings-panel"><h2>Memory reserves</h2><p class="scope-label">This computer</p><form id="settings-memory"><fieldset>
           <legend>Memory reserves</legend>
           <p id="reserve-hint" class="muted">Leave a reserve blank to use the default.</p>
           <div class="inputs">
@@ -343,9 +254,8 @@
               <input type="checkbox" name="acceptReducedReserve"> I accept this risk on this machine.
             </label>
           </div>
-        </fieldset>
-
-        <fieldset>
+        </fieldset></form><p id="memory-feedback" class="field-status" role="status"></p></section></section>
+<section data-page="protection/benchmarks" class="page " hidden><section class="panel settings-panel"><h2>Benchmark policy</h2><p class="scope-label">This computer</p><form id="settings-benchmarks"><fieldset>
           <legend>Benchmarks</legend>
           <label>When to benchmark
             <select name="benchmarkPolicy">
@@ -354,82 +264,21 @@
               <option value="whenConvenient">When convenient</option>
             </select>
           </label>
-        </fieldset>
-        <button type="submit">Save local settings</button>
-        <p id="save-status" class="action-status" role="status"></p>
-      </form>
+        </fieldset></form><p id="benchmark-feedback" class="field-status" role="status"></p><a href="#/serving/measurements">View measurements for the selected model</a></section></section>
+<section data-page="system/startup" class="page " hidden><section class="panel settings-panel"><form id="startup"  aria-labelledby="startup-title">
+        <h2 id="startup-title">Windows startup</h2>
+        <label class="checkbox"><input name="enabled" type="checkbox"> Start Mango when I sign in</label>
+        <p class="muted">Mango starts in the tray and waits for you to open the browser.</p>
 
-      <section class="card" aria-labelledby="resource-title">
-        <h2 id="resource-title">Resource protection</h2>
-        <p id="resource-state"></p>
-        <p id="resource-observation" class="muted"></p>
-        <p id="resource-benchmark" class="muted"></p>
-        <p id="resource-feedback" class="action-status" role="status"></p>
-        <div class="actions">
-          <button id="resource-refresh" type="button" class="secondary">Refresh resource status</button>
-          <button id="resource-release" type="button" class="secondary" hidden>Verify release again</button>
-        </div>
-        <form id="resource-form" hidden>
-          <fieldset>
-            <legend>Local deployment limits</legend>
-            <label>Deployment and operation<select name="target" required></select></label>
-            <p id="resource-units" class="muted"></p>
-            <div class="inputs">
-              <label>Workload units<input name="units" type="number" min="1" max="67108864" required></label>
-              <label>Items per request<input name="items" type="number" min="1" max="128" required></label>
-              <label>Inline media items<input name="mediaItems" type="number" min="0" max="128" required></label>
-              <label>Load RAM peak (MiB)<input name="loadRamMiB" type="number" min="0" max="1048576" required></label>
-              <label>Additional execution RAM peak (MiB)<input name="executeRamMiB" type="number" min="0" max="1048576" required></label>
-            </div>
-            <div id="resource-gpus" class="inputs"></div>
-            <label id="resource-attached" class="checkbox" hidden>
-              <input name="allowAttached" type="checkbox"> Allow this attached provider. Mango can stop forwarding requests, and its model may remain resident.
-            </label>
-            <label class="checkbox"><input name="allowOverlap" type="checkbox"> I qualified these memory limits for overlapping executions</label>
-            <label>Qualified executions on this deployment<input name="parallelSlots" type="number" min="1" max="64" value="1" required></label>
-            <p id="resource-profile" class="muted"></p>
-            <ul id="resource-passes"></ul>
-            <div class="actions">
-              <button type="submit">Save local limits</button>
-              <button id="resource-retry" type="button" class="secondary">Retry benchmark</button>
-            </div>
-          </fieldset>
-        </form>
-      </section>
+        <p id="startup-status" class="action-status" role="status"></p>
+      </form><p id="startup-unavailable" class="muted" hidden>Windows startup is available when Mango uses its default data directory.</p></section></section>
+<section data-page="system/updates" class="page " hidden><section class="panel settings-panel"><h2>Mango updates</h2><p id="release-status" class="muted"></p><form id="maintenance">
+          <label class="check"><input name="daily" type="checkbox"> Check for safe updates daily</label>
+          <label class="check"><input name="deferred" type="checkbox"> Defer future maintenance on this host</label>
 
-      <section id="logging" class="card" aria-labelledby="logs-title">
-        <h2 id="logs-title">Logs and retention</h2>
-        <p id="logs-feedback" class="action-status" role="status"></p>
-        <form id="logs-query">
-          <fieldset>
-            <legend>View a day</legend>
-            <div class="inputs">
-              <label>Day<input name="day" type="date"></label>
-              <label>Key name<input name="key" type="text" maxlength="120"></label>
-              <label>Source address<input name="source" type="text" maxlength="64"></label>
-            </div>
-            <div class="actions">
-              <button type="submit">View available logs</button>
-              <button id="logs-collect" type="button" class="secondary">Collect from network</button>
-              <button id="logs-export" type="button" class="secondary">Download day</button>
-            </div>
-          </fieldset>
-        </form>
-        <p id="logs-coverage-note" class="muted"></p>
-        <ul id="logs-coverage" class="activity-list"></ul>
-        <p id="logs-storage" class="muted"></p>
-        <div class="inputs">
-          <div><h3>Usage by key name</h3><ul id="logs-keys" class="activity-list"></ul></div>
-          <div><h3>Usage by client address</h3><ul id="logs-sources" class="activity-list"></ul></div>
-        </div>
-        <p id="logs-count"></p>
-        <div class="log-table" tabindex="0" role="region" aria-label="Request and operation details">
-          <table>
-            <thead><tr><th scope="col">Time</th><th scope="col">Work</th><th scope="col">Destination and outcome</th><th scope="col">Timing</th></tr></thead>
-            <tbody id="logs-entries"></tbody>
-          </table>
-        </div>
-        <form id="logs-settings">
+          <p id="maintenance-status" class="action-status" role="status"></p>
+        </form><div class="actions"><button id="update-check" class="secondary" type="button">Check for updates</button><button id="update-share" class="secondary" type="button">Queue update on peers</button></div><label id="update-partial-label" class="checkbox" hidden><input id="update-partial" type="checkbox"> Proceed with verified peers only</label><p id="update-action" role="status" class="field-status"></p></section></section>
+<section data-page="system/logging" class="page " hidden><section class="panel settings-panel"><h2>Logging policy</h2><form id="logs-settings">
           <fieldset>
             <legend>Retention policy</legend>
             <p id="logs-policy-help" class="muted"></p>
@@ -449,27 +298,25 @@
             </div>
             <label class="checkbox"><input name="operational" type="checkbox"> Retain operational events</label>
             <p class="muted">Saved payloads can contain private model content.</p>
-            <button type="submit">Save retention policy</button>
+
           </fieldset>
-        </form>
-        <form id="logs-clear">
+        </form><p id="logging-feedback" class="field-status" role="status"></p></section></section>
+<section data-page="system/data" class="page " hidden><section class="panel settings-panel"><h2>Local data</h2><p id="data-directory" class="path"></p><p id="recovery" class="warning" hidden></p><p class="muted">Model settings and configuration are stored for the current Windows user.</p></section><section class="panel settings-panel danger-panel"><form id="logs-clear">
           <fieldset>
             <legend>Clear retained logs</legend>
             <p id="logs-clear-status" class="muted"></p>
             <label class="checkbox"><input name="confirm" type="checkbox" required> Clear Mango’s retained records and payloads</label>
             <button type="submit" class="secondary">Clear logs</button>
           </fieldset>
-        </form>
-      </section>
-
-      <form id="startup" class="card" aria-labelledby="startup-title">
-        <h2 id="startup-title">Windows startup</h2>
-        <label class="checkbox"><input name="enabled" type="checkbox"> Start Mango when I sign in</label>
-        <p class="muted">Mango starts in the tray and waits for you to open the browser.</p>
-        <button type="submit">Save startup preference</button>
-        <p id="startup-status" class="action-status" role="status"></p>
-      </form>
-    </div>
-  </main>
-</body>
-</html>
+        </form><p id="clear-feedback" class="field-status" role="status"></p></section></section>
+</div></main>
+<dialog id="admin-dialog" aria-labelledby="admin-dialog-title"><div class="dialog-heading"><h2 id="admin-dialog-title">Unlock administration</h2><button type="button" data-close-dialog class="quiet">Close</button></div><p class="muted">Manage shared network settings for ten minutes. This computer's local protection remains under your control.</p><form id="network-unlock">
+            <fieldset>
+              <legend>Unlock network administration</legend>
+              <label>Master password<input name="password" type="password" maxlength="256" autocomplete="off" required></label>
+              <button type="submit">Unlock for 10 minutes</button>
+            </fieldset>
+          </form><p id="admin-feedback" class="field-status" role="status"></p></dialog>
+<dialog id="network-secret" aria-labelledby="network-secret-label"><div class="dialog-heading"><h2 id="network-secret-title">Keep this secret</h2><button id="network-hide-secret" type="button" class="quiet">Close</button></div><label id="network-secret-label" for="network-secret-value"></label><textarea id="network-secret-value" rows="3" readonly></textarea><div class="actions"><button id="network-copy-secret" type="button">Copy</button><button id="network-download" type="button" class="secondary">Download recovery record</button></div><p id="secret-feedback" role="status"></p></dialog>
+<dialog id="pending-dialog" aria-labelledby="pending-title"><div class="dialog-heading"><h2 id="pending-title">Unfinished changes</h2><button type="button" data-close-dialog class="quiet">Close</button></div><div id="pending-list"></div></dialog>
+</body></html>

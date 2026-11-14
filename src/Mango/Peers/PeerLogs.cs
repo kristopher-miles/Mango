@@ -134,6 +134,8 @@ internal sealed partial class PeerNetwork
             var writer = standalone ? localLogWriter : RequireMember(current).Id;
             if (!standalone)
                 RequireAdmin(current, AdminHeader(request));
+            if (input.ExpectedRevision is { } expected && expected != LogConfigurationFor(current).Policy.Revision)
+                throw new PeerFailure(409, "Logging policy changed elsewhere. Review its current values.", "conflict");
             var policy = new LogPolicy(Next(current, writer), input.Mode, input.Operational, input.TimeZone,
                 input.RawDays, input.AggregateDays, input.CapMiB);
             if (!policy.Valid)

@@ -28,11 +28,19 @@ function requestDurations(record) {
 }
 
 function renderRequests(view) {
+  document.querySelector("#overview-running").textContent = view.running;
+  document.querySelector("#overview-waiting").textContent = view.waiting;
+  const recent = [...view.ingress, ...[...view.recent].reverse()].slice(0, 4);
+  document.querySelector("#overview-activity").replaceChildren(...(recent.length ? recent.map(request => {
+    const row = element("li");
+    row.append(element("strong", request.alias), element("p", `${operationNames[request.operation]} · ${request.finished ? "Finished" : request.attempts.at(-1)?.state || "Finding capacity"}${request.reason ? ` · ${request.reason}` : ""}`, "muted"));
+    return row;
+  }) : [element("li", "No recent work.", "muted")]));
   const total = `${view.waiting} waiting · ${view.running} running on this host`;
   if (requestsStatus.textContent !== total) requestsStatus.textContent = total;
   const resource = view.localResources;
   requestsResources.textContent = resource ? [stateNames[resource.state], resource.reason].filter(Boolean).join(" · ") : "";
-  const received = [...view.ingress, ...[...view.recent].reverse()];
+  const received = [...view.ingress, ...[...view.recent].reverse()].slice(0, 50);
   ingressActivity.replaceChildren(...(received.length ? received.map(request => {
     const row = element("li");
     row.append(element("strong", `${request.alias} · ${operationNames[request.operation]} · ${request.priority} priority`));
@@ -51,7 +59,7 @@ function renderRequests(view) {
     }
     return row;
   }) : [element("li", "No recent requests received here.")]));
-  servingActivity.replaceChildren(...(view.serving.length ? view.serving.map(attempt => {
+  servingActivity.replaceChildren(...(view.serving.length ? view.serving.slice(0, 50).map(attempt => {
     const row = element("li");
     row.append(element("strong", `${attempt.alias} · ${attempt.loading ? "Loading" : attemptStates[attempt.state]} · ${attempt.priority} priority`));
     row.append(element("p", [attempt.reason, requestDurations(attempt)].filter(Boolean).join(" · ")));
@@ -112,13 +120,21 @@ document.addEventListener("visibilitychange", () => {
   } else stopDashboard();
 });
 
+let publicWriter;
 async function loadPublic() {
   const view = await api("public-ingress");
-  const fields = publicForm.elements;
-  fields.enabled.checked = view.settings.enabled;
-  fields.port.value = view.settings.port;
-  fields.httpsOrigin.value = view.settings.httpsOrigin || "";
-  fields.trustedProxy.value = view.settings.trustedProxy || "";
+  publicWriter = recordWriter("public", { value: view.settings, label: "Public access", page: "network/public",
+    read: async () => (await api("public-ingress")).settings,
+    write: async ({ baseline, changes }) => {
+      await api("public-ingress", { ...baseline, ...changes, expected: baseline });
+      const accepted = await api("public-ingress");
+      renderPublicState(accepted);
+      return accepted.settings;
+    } });
+  bindPreferences(publicWriter, publicForm, publicFeedback);
+  renderPublicState(view);
+}
+function renderPublicState(view) {
   publicCheck.disabled = !view.listening || !view.settings.httpsOrigin;
   const state = view.listening ? `Local upstream listening at ${view.upstream}.` :
     view.settings.enabled ? "Public upstream is configured and could not listen." : "Public upstream is off.";
@@ -126,16 +142,6 @@ async function loadPublic() {
     `HTTPS ${view.lastCheck.reached ? "reached" : "not verified"} from this node at ${timeLabel(view.lastCheck.at)}.`;
   publicState.textContent = [state, view.error, view.settings.enabled ? check : ""].filter(Boolean).join(" ");
 }
-
-publicForm.addEventListener("submit", event => {
-  event.preventDefault();
-  const fields = publicForm.elements;
-  submit(publicForm, publicFeedback, async () => {
-    await api("public-ingress", { enabled: fields.enabled.checked, port: fields.port.valueAsNumber,
-      httpsOrigin: fields.httpsOrigin.value, trustedProxy: fields.trustedProxy.value });
-    await loadPublic();
-  });
-});
 
 publicCheck.addEventListener("click", async () => {
   publicCheck.disabled = true;
@@ -152,8 +158,3 @@ publicCheck.addEventListener("click", async () => {
     publicCheck.disabled = false;
   }
 });
-
-if (token) {
-  watchDashboard();
-  loadPublic().catch(error => publicState.textContent = error.message);
-}

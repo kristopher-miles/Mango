@@ -7,7 +7,7 @@ const logFeedback = document.querySelector("#logs-feedback");
 const logCollect = document.querySelector("#logs-collect");
 const logExport = document.querySelector("#logs-export");
 let logViewVersion = 0;
-let logSettingsDirty = false;
+let logPolicyWriter, logPage = 0, logEntries = [], logFilterTimer;
 let logCollectionTimer;
 
 const coverageLabels = { received: "Received", unavailable: "Unavailable", off: "Request logging off",
@@ -43,17 +43,21 @@ function logDetail(entry) {
 }
 
 function logRender(view) {
-  const fields = logSettings.elements;
-  if (!logSettingsDirty) {
-    for (const name of ["mode", "timeZone", "rawDays", "aggregateDays", "capMiB"])
-      fields[name].value = view.settings[name];
-    fields.operational.checked = view.settings.operational;
-  }
+  logPolicyWriter = recordWriter("logging", { value: view.settings, label: "Logging policy", page: "system/logging",
+    requiresAdmin: () => !!networkView?.identity,
+    read: async () => (await api("logs")).settings,
+    write: async ({ baseline, changes }) => {
+      const next = { ...baseline, ...changes };
+      await api("logs/settings", { mode: next.mode, operational: next.operational, timeZone: next.timeZone,
+        rawDays: next.rawDays, aggregateDays: next.aggregateDays, capMiB: next.capMiB, expectedRevision: baseline.revision });
+      return (await api("logs")).settings;
+    } });
+  bindPreferences(logPolicyWriter, logSettings, document.querySelector("#logging-feedback"));
   logSettings.querySelector("fieldset").disabled = !view.canManage;
   logClear.querySelector("fieldset").disabled = !view.canManage;
   document.querySelector("#logs-policy-help").textContent = view.canManage
     ? "Retention and logging mode are applied by each enrolled node."
-    : "Unlock network administration in Private network to change the policy.";
+    : "Use Unlock in the sidebar to change the network policy.";
   document.querySelector("#logs-clear-status").textContent = !view.clear.generation
     ? "Each node clears its own retained logs when it receives the deletion."
     : !view.clear.localApplied ? "Local deletion is pending."
@@ -77,7 +81,8 @@ function logRender(view) {
       source.dropped ? "Incomplete capture" : "", source.fromCache ? "Cached records available" : ""].filter(Boolean).join(" · ")));
   logList("#logs-keys", view.byKey, logUsage);
   logList("#logs-sources", view.bySource, logUsage);
-  logList("#logs-entries", view.entries, logDetail);
+  logEntries = view.entries;
+  renderLogPage();
   document.querySelector("#logs-count").textContent =
     `${logCount(view.requests, "client request")} · ${logCount(view.attempts, "serving attempt")}.${view.capped ? " View limited to 10,000 records. The download includes all available records." : ""}`;
   logCollect.disabled = view.collection.running;
@@ -97,7 +102,7 @@ async function loadLogs() {
   const query = new URLSearchParams([...values].filter(([, value]) => value));
   const view = await api(`logs?${query}`);
   if (version !== logViewVersion) return;
-  logQuery.elements.day.value = view.day;
+  fillInput(logQuery.elements.day, view.day);
   logRender(view);
 }
 
@@ -108,25 +113,29 @@ logQuery.addEventListener("submit", event => {
   loadLogs().catch(logError);
 });
 
-logSettings.addEventListener("input", () => { logSettingsDirty = true; });
-logSettings.addEventListener("submit", event => {
-  event.preventDefault();
-  const fields = logSettings.elements;
-  submit(logSettings, logFeedback, async () => {
-    await api("logs/settings", { mode: fields.mode.value, operational: fields.operational.checked,
-      timeZone: fields.timeZone.value.trim(), rawDays: fields.rawDays.valueAsNumber,
-      aggregateDays: fields.aggregateDays.valueAsNumber, capMiB: fields.capMiB.valueAsNumber });
-    logSettingsDirty = false;
-    await loadLogs();
-  });
+function renderLogPage() {
+  logPage = Math.min(logPage, Math.max(0, Math.ceil(logEntries.length / 50) - 1));
+  logList("#logs-entries", logEntries.slice(logPage * 50, logPage * 50 + 50), logDetail);
+  document.querySelector("#logs-page").textContent = logEntries.length ? `${logPage * 50 + 1}–${Math.min(logEntries.length, logPage * 50 + 50)} of ${logEntries.length}` : "No records match these filters.";
+  document.querySelector("#logs-previous").disabled = logPage === 0;
+  document.querySelector("#logs-next").disabled = (logPage + 1) * 50 >= logEntries.length;
+}
+document.querySelector("#logs-previous").addEventListener("click", () => { logPage--; renderLogPage(); });
+document.querySelector("#logs-next").addEventListener("click", () => { logPage++; renderLogPage(); });
+logQuery.addEventListener("input", event => {
+  if (event.isComposing) return;
+  logViewVersion++;
+  clearTimeout(logFilterTimer);
+  logFilterTimer = setTimeout(() => { logPage = 0; loadLogs().catch(logError); }, 350);
 });
 
 logClear.addEventListener("submit", event => {
   event.preventDefault();
-  submit(logClear, logFeedback, async () => {
+  perform(event.submitter, document.querySelector("#clear-feedback"), async () => {
     await api("logs/clear", { confirm: logClear.elements.confirm.checked }, "POST");
     logClear.reset();
     await loadLogs();
+    return "Clear requested. Acknowledgements are shown above.";
   });
 });
 
@@ -166,4 +175,8 @@ logExport.addEventListener("click", async () => {
 });
 
 addEventListener("pagehide", () => clearTimeout(logCollectionTimer));
-if (token) loadLogs().catch(logError);
+document.addEventListener("mango:administration", () => {
+  const locked = !!networkView?.identity && !administration.token;
+  logSettings.querySelector("fieldset").disabled = locked;
+  logClear.querySelector("fieldset").disabled = locked;
+});

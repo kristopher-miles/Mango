@@ -295,6 +295,11 @@ internal sealed class InferenceRequest(InferenceOperation operation, string alia
         if (!response.IsSuccessStatusCode)
             Settled = true;
         await ProviderAdapter.RequireInferenceSuccessAsync(response, cancellation);
+        var eventStream = string.Equals(response.Content.Headers.ContentType?.MediaType, "text/event-stream",
+            StringComparison.OrdinalIgnoreCase);
+        if (operation == InferenceOperation.Chat && json?["stream"] is JsonValue streamFlag &&
+            streamFlag.TryGetValue<bool>(out var streaming) && streaming && !eventStream)
+            throw new ProviderFailure(502, "The provider did not return an event stream for the streaming chat request.");
         var target = context.Response;
         target.StatusCode = (int)response.StatusCode;
         target.ContentType = response.Content.Headers.ContentType?.ToString() ?? "application/octet-stream";
@@ -316,8 +321,7 @@ internal sealed class InferenceRequest(InferenceOperation operation, string alia
         {
             await using var stream = await response.Content.ReadAsStreamAsync(cancellation);
             var buffer = new byte[16 * 1024];
-            var events = operation == InferenceOperation.Chat &&
-                response.Content.Headers.ContentType?.MediaType == "text/event-stream" ? new InferenceEvents(statistics) : null;
+            var events = operation == InferenceOperation.Chat && eventStream ? new InferenceEvents(statistics) : null;
             int count;
             while ((count = await stream.ReadAsync(buffer, cancellation)) != 0)
             {

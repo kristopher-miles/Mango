@@ -94,7 +94,7 @@ internal sealed partial class PeerNetwork
             SignalRequests();
     }
 
-    public async Task SetQueuePolicyAsync(HttpRequest request, int seconds, CancellationToken cancellation)
+    public async Task SetQueuePolicyAsync(HttpRequest request, int seconds, CancellationToken cancellation, int? expectedWaitSeconds = null)
     {
         if (seconds is <= 0 or > QueuePolicy.MaxWaitSeconds)
             throw new PeerFailure(400, $"Enter a queue wait from 1 to {QueuePolicy.MaxWaitSeconds} seconds.");
@@ -102,6 +102,8 @@ internal sealed partial class PeerNetwork
         {
             var self = RequireMember(current);
             RequireAdmin(current, AdminHeader(request));
+            if (expectedWaitSeconds is { } expected && expected != (current.Records.Queue?.WaitSeconds ?? QueuePolicy.DefaultWaitSeconds))
+                throw new PeerFailure(409, "The queue wait changed elsewhere. Review its current value.", "conflict");
             return current.Records.Queue?.WaitSeconds == seconds ? current.Disk : current.Disk with
             {
                 Records = current.Records with { Queue = new(Next(current, self.Id), seconds) }
@@ -440,7 +442,7 @@ internal sealed partial class PeerNetwork
             model.Instance?.Fingerprint, model.Instance?.Slots, model.EmbeddingDimensions, model.EmbeddingSpace,
             model.Model.Installed && (protection is null ? model.Eligible : workloads.Length != 0), model.Model.ClientTools,
             model.Model.StructuredOutput, model.Options.MediaTokensPerItem, model.Model.EmbeddingEncodings, model.PlacementEpoch,
-            protection is null ? null : workloads);
+            protection is null ? null : workloads, Readiness: protection?.Readiness(model, endpoint));
     }
 
     private PlacementChoice[] Candidates(InferenceShape shape)

@@ -20,6 +20,14 @@ Every node provides a clear view of the network while keeping local resource pro
 
 **UI-08 — C, Q23.** Use a local desktop/tray experience with a background service and a browser-accessible local GUI for headless installations. Keep the administrative surface private and authenticated. Responsive does not automatically mean a native mobile application or internet-accessible admin page.
 
+**UI-09 — C, owner 2026-11-14.** Use exclusive pages with a persistent navigation and convenient tabs for meaningful setting groups. Overview presents important operating preferences and a truthful bounded local resource graph. Avoid a single long settings document.
+
+**UI-10 — C, owner 2026-11-14.** Persist preferences when changed. No Save controls or renamed preference commit steps. Preserve drafts through navigation, invalid input, failures and authority expiry; serialize writes and guard concurrent updates. Require an explicit choice for conflicting edits or changed qualification assumptions.
+
+**UI-11 — C, owner 2026-11-14.** Show network administration lock state at all times, with direct Unlock and real server-side Lock. Both Create and Join reuse the submitted password to establish the normal administration session and enter the new node's Serving workspace. Never replay successful enrollment when only sign-in failed.
+
+**UI-12 — C, owner 2026-11-14.** Make adding and preparing a model-serving node a primary workflow. One Serving workspace exposes provider and model fields without Edit modes or collapsed routine settings, with local qualification, lifecycle controls, and actionable host-derived readiness. Preserve local credential/process authority and requested-versus-applied network state.
+
 ### Setting boundaries
 
 | Setting | Owner and allowed editing location |

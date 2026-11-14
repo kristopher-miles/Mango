@@ -11,7 +11,7 @@ internal sealed record WorkerMemory(int[] Processes, long ResidentBytes, Diction
     long? PeakResidentBytes, long? SharedGpuBytes = null);
 internal sealed record ResourceObservation(DateTimeOffset At, long TotalRam, long FreeRam, double? ExternalCpu,
     double? ExternalGpu, DeviceMemory[] Devices, string? Hardware, Dictionary<Guid, WorkerMemory> Workers,
-    bool WorkerAttribution, string? Limitation, double? ManagedCpu = null);
+    bool WorkerAttribution, string? Limitation, double? ManagedCpu = null, double? TotalCpu = null, double? TotalGpu = null);
 
 internal sealed record MemoryCost(long RamBytes, Dictionary<string, long> DeviceBytes)
 {
@@ -40,6 +40,7 @@ internal sealed record ResourceData(ResourceBudget[] Budgets, BenchmarkProfile[]
 }
 
 internal sealed record ResourceStatus(ContributionState State, string? Reason, DateTimeOffset? QuietUntil);
+internal sealed record ServingReadiness(string State, string Reason, string? Action, bool Available);
 internal sealed record Admission(AdmissionStatus Status, string? Reason, ResourceReservation? Reservation, bool MemoryWait = false)
 {
     public ResourceReservation Require() => Reservation ??

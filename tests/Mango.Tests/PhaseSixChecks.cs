@@ -34,6 +34,17 @@ internal static partial class PeerChecks
             var identity = created.GetProperty("identity").GetProperty("id").GetGuid();
             var recovery = created.GetProperty("recoveryRecord").GetString();
             var admin = await Unlock(http, ingress, Password);
+            await Local(http, ingress, "network/unlock", new { password = "incorrect-fixture-password" }, expected: 401);
+            Check((await Local(http, ingress, "network", admin: admin)).GetProperty("unlocked").GetBoolean(),
+                "a rejected password does not invalidate the existing local or admin session");
+            var otherAdmin = await Unlock(http, ingress, Password);
+            await Local(http, ingress, "network/lock", new { }, admin, expected: 204);
+            await Local(http, ingress, "network/queue", new { waitSeconds = 300 }, admin, expected: 403);
+            await Local(http, ingress, "network/queue", new { waitSeconds = 300 }, otherAdmin, expected: 204);
+            admin = otherAdmin;
+            await Local(http, ingress, "network/queue", new { waitSeconds = 301, expectedWaitSeconds = 300 }, admin, expected: 204);
+            await Local(http, ingress, "network/queue", new { waitSeconds = 302, expectedWaitSeconds = 300 }, admin, expected: 409);
+            await Local(http, ingress, "network/queue", new { waitSeconds = 300, expectedWaitSeconds = 301 }, admin, expected: 204);
             var key = (await Issue(http, ingress, admin, "https client")).GetProperty("secret").GetString()!;
             Check(!(await Local(http, ingress, "public-ingress")).GetProperty("listening").GetBoolean(), "issuing a key leaves public ingress off");
             var joined = await Local(http, owner, "network/join", new JoinNetworkRequest("Model host", ingress.TailAddress,
@@ -121,6 +132,9 @@ internal static partial class PeerChecks
                 observed.EffectiveServing?.ServedContext == 4096, "rated zero, unrated and effective configuration round trip");
 
             var port = Port(IPAddress.Loopback);
+            var initialIngress = (await Local(http, ingress, "public-ingress")).GetProperty("settings").Deserialize<PublicIngressSettings>(Json)!;
+            await Local(http, ingress, "public-ingress", new PublicIngressUpdate(false, port, null, null, initialIngress), expected: 204);
+            await Local(http, ingress, "public-ingress", new PublicIngressUpdate(false, port, null, null, initialIngress), expected: 409);
             await Local(http, ingress, "public-ingress", new PublicIngressSettings(true, port, null, null), expected: 204);
             var upstream = $"http://127.0.0.1:{port}";
             using var rootKey = RSA.Create(2048);

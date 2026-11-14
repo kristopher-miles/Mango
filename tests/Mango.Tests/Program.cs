@@ -7,6 +7,12 @@ using System.Runtime.InteropServices;
 using System.Text.Json;
 using Mango.Host;
 
+if (args is ["--generic-provider-fixture"])
+{
+    await GenericProviderChecks.RunFixtureAsync();
+    return;
+}
+
 var directory = Directory.CreateTempSubdirectory("mango-check-").FullName;
 try
 {
@@ -16,8 +22,10 @@ try
         return;
     }
     TestDefaults();
+    await WebUiChecks.RunAsync(directory);
     await TestHostAsync(directory);
     await ProviderChecks.RunAsync();
+    await GenericProviderChecks.RunAsync(directory);
     await PeerChecks.RunAsync(directory);
     await ResourceChecks.RunAsync(directory);
     await SchedulingChecks.RunAsync();
@@ -57,6 +65,8 @@ static async Task TestHostAsync(string directory)
 
             using var noSession = await http.GetAsync(endpoint);
             Check(noSession.StatusCode == HttpStatusCode.Unauthorized, "Session required");
+            using var sessionError = JsonDocument.Parse(await noSession.Content.ReadAsStringAsync());
+            Check(sessionError.RootElement.GetProperty("code").GetString() == "local_session_required", "Local session expiry has a distinct UI error code");
             var modelList = new Uri(url, "/v1/models");
             using var noInferenceSession = await http.GetAsync(modelList);
             Check(noInferenceSession.StatusCode == HttpStatusCode.Unauthorized, "Local inference session required");
@@ -76,6 +86,14 @@ static async Task TestHostAsync(string directory)
 
             var initial = await ReadSettingsAsync(http, endpoint);
             Check(initial.Role == LocalRole.Leech, "First run starts as leech");
+            using var preferencePatch = await http.PatchAsJsonAsync(endpoint,
+                new { changes = new { sampleSeconds = 4 }, expected = new { sampleSeconds = 2 } });
+            Check(preferencePatch.IsSuccessStatusCode && (await ReadSettingsAsync(http, endpoint)).SampleSeconds == 4,
+                "Field-level UI preference update");
+            using var stalePatch = await http.PatchAsJsonAsync(endpoint,
+                new { changes = new { sampleSeconds = 6 }, expected = new { sampleSeconds = 2 } });
+            Check(stalePatch.StatusCode == HttpStatusCode.Conflict && (await ReadSettingsAsync(http, endpoint)).SampleSeconds == 4,
+                "Stale UI preference cannot overwrite acknowledged value");
             await SaveAsync(http, endpoint, initial with { SampleSeconds = 1 }, false, HttpStatusCode.BadRequest);
             var reduced = initial with { Role = LocalRole.Contributor, RamReserveMiB = 0, VramReserveMiB = 0 };
             await SaveAsync(http, endpoint, reduced with { ReducedReserveConsent = true }, false, HttpStatusCode.BadRequest);

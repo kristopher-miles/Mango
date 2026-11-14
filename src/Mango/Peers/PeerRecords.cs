@@ -46,7 +46,7 @@ internal sealed record ObservedDeployment(string Id, string DisplayName, string?
     int? MediaTokensPerItem = null, string[]? EmbeddingEncodings = null, string? PlacementEpoch = null,
     ObservedWorkload[]? Workloads = null, Guid? Endpoint = null, string? EffectiveAlias = null,
     Dictionary<string, int?>? EffectiveRatings = null, ModelServing? EffectiveServing = null, IntentReport? Intent = null,
-    bool Busy = false, int BenchmarksComplete = 0, int BenchmarksPartial = 0);
+    bool Busy = false, int BenchmarksComplete = 0, int BenchmarksPartial = 0, ServingReadiness? Readiness = null);
 internal sealed record ObservedWorkload(Workload Limit, double? PromptMilliseconds, double? CacheSavingsMilliseconds, int Slots = 1);
 internal sealed record NodeCatalog(Guid Node, Revision Revision, string Name, LocalRole Role, ObservedDeployment[] Models,
     ContributionState? ResourceState = null, string? SchedulingEpoch = null, ObservedProvider[]? Providers = null,
@@ -213,9 +213,10 @@ internal static class PeerLimits
     public static readonly TimeSpan UnlockLifetime = TimeSpan.FromMinutes(10);
 }
 
-internal sealed class PeerFailure(int status, string message) : Exception(message)
+internal sealed class PeerFailure(int status, string message, string? code = null) : Exception(message)
 {
     public int Status { get; } = status;
+    public string? Code { get; } = code;
 }
 
 internal static class PeerValidation
@@ -301,6 +302,8 @@ internal static class PeerValidation
                     model.EmbeddingEncodings is null or { Length: <= 8 } &&
                     (model.EffectiveAlias is null || ValidModelSettings(model.EffectiveAlias, model.EffectiveRatings, model.EffectiveServing)) &&
                     ValidIntent(model.Intent) && model.BenchmarksComplete is >= 0 and <= 6 && model.BenchmarksPartial is >= 0 and <= 6 &&
+                    (model.Readiness is null || Text(model.Readiness.State, 40) && Text(model.Readiness.Reason, 600) &&
+                        (model.Readiness.Action is null || Text(model.Readiness.Action, 40))) &&
                     (model.PlacementEpoch is null || Text(model.PlacementEpoch, 128)) &&
                     (model.Workloads is null || model.Workloads.Length <= 6 && model.Workloads.All(work => work is not null &&
                         model.Operations.Contains(work.Limit.Operation) && work.Limit.Units > 0 && work.Limit.Items > 0 &&

@@ -92,16 +92,21 @@ internal sealed class WindowsObservation : IDisposable
 
         double? externalCpu = null;
         double? managedCpu = null;
+        double? totalCpu = null;
         if (singleProcessorGroup && GetSystemTimes(out var idle, out var kernel, out var user))
         {
             var total = kernel + user;
             var busy = total - Math.Min(idle, total);
-            if (previousCpu is { } previous && total > previous.Total && busy >= previous.Busy && attributed)
+            if (previousCpu is { } previous && total > previous.Total && busy >= previous.Busy)
             {
-                var own = currentWorkers.Sum(item => previousWorkers.TryGetValue(item.Key, out var before)
-                    ? Math.Max(0, item.Value - before) : 0);
-                managedCpu = Math.Clamp(own * 100.0 / (total - previous.Total), 0, 100);
-                externalCpu = Math.Clamp(((double)(busy - previous.Busy) - own) * 100 / (total - previous.Total), 0, 100);
+                totalCpu = Math.Clamp((double)(busy - previous.Busy) * 100 / (total - previous.Total), 0, 100);
+                if (attributed)
+                {
+                    var own = currentWorkers.Sum(item => previousWorkers.TryGetValue(item.Key, out var before)
+                        ? Math.Max(0, item.Value - before) : 0);
+                    managedCpu = Math.Clamp(own * 100.0 / (total - previous.Total), 0, 100);
+                    externalCpu = Math.Clamp(((double)(busy - previous.Busy) - own) * 100 / (total - previous.Total), 0, 100);
+                }
             }
             previousCpu = (total, busy);
         }
@@ -112,13 +117,16 @@ internal sealed class WindowsObservation : IDisposable
         var externalGpu = attributed && gpuSample.Engines is { } engines
             ? engines.Where(item => !allIds.Contains(item.Process)).GroupBy(item => item.Engine)
                 .Select(group => Math.Clamp(group.Sum(item => item.Percent), 0, 100)).DefaultIfEmpty().Max() : (double?)null;
+        var totalGpu = gpuSample.Devices.Length > 0 && gpuSample.Engines is { } allEngines
+            ? allEngines.GroupBy(item => item.Engine)
+                .Select(group => Math.Clamp(group.Sum(item => item.Percent), 0, 100)).DefaultIfEmpty().Max() : (double?)null;
         var limitation = !attributed ? "Windows could not attribute every managed provider worker."
             : !singleProcessorGroup ? "CPU attribution is unavailable across multiple Windows processor groups."
             : gpuSample.Hardware is null || externalGpu is null ? "Windows GPU activity or device topology is unavailable."
             : gpuSample.Devices.Any(item => !item.Integrated && item.UsedBytes is null)
                 ? "Windows did not report dedicated memory usage for every GPU." : null;
         return new(now, checked((long)memory.Total), checked((long)memory.Available), externalCpu, externalGpu,
-            gpuSample.Devices, gpuSample.Hardware, workers, attributed, limitation, managedCpu);
+            gpuSample.Devices, gpuSample.Hardware, workers, attributed, limitation, managedCpu, totalCpu, totalGpu);
     }
 
     private static bool IsAny(IPAddress address) => address.Equals(IPAddress.Any) || address.Equals(IPAddress.IPv6Any);

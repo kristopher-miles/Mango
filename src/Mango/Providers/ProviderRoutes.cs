@@ -82,11 +82,11 @@ internal static class ProviderRoutes
         catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { }
         catch (PeerFailure error)
         {
-            await FailureAsync(context, error.Status, error.Message);
+            await FailureAsync(context, error.Status, error.Message, error.Code);
         }
         catch (ProviderFailure error)
         {
-            await FailureAsync(context, error.Status, error.Message);
+            await FailureAsync(context, error.Status, error.Message, error.Code);
         }
         catch (BadHttpRequestException error)
         {
@@ -99,7 +99,7 @@ internal static class ProviderRoutes
         }
     }
 
-    private static async Task FailureAsync(HttpContext context, int status, string message)
+    private static async Task FailureAsync(HttpContext context, int status, string message, string? code = null)
     {
         if (LogCapture.Of(context) is { } capture)
             capture.Failure = message;
@@ -113,7 +113,7 @@ internal static class ProviderRoutes
         if (context.Request.Path.StartsWithSegments("/v1"))
             await context.Response.WriteAsJsonAsync(new { error = new { message, type = status < 500 ? "invalid_request_error" : "provider_error" } });
         else
-            await context.Response.WriteAsJsonAsync(new { error = message });
+            await context.Response.WriteAsJsonAsync(new { error = message, code });
     }
 
     private sealed record RefreshRequest(Guid? Id);
