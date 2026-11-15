@@ -99,7 +99,7 @@ function drawResources() {
   document.querySelector("#chart-device-label").hidden = devices.length < 2;
   const sampleSeconds = view?.settings.sampleSeconds || 2;
   const { stale } = resourceHistory.status(Date.now(), sampleSeconds);
-  document.querySelector("#chart-freshness").textContent = resourceHistory.error ? `Unavailable · ${resourceHistory.error}` : `${stale ? "Stale · " : "Observed "}${new Date(last.at).toLocaleTimeString()}`;
+  document.querySelector("#chart-freshness").textContent = resourceHistory.error ? `Unavailable · ${resourceHistory.error}` : stale ? "Observations stale" : "Live observations";
   const colors = { cpu: "#23624c", gpu: "#9c5c0b", ram: "#386da0", vram: "#7853a4" }, names = { cpu: "Total CPU", gpu: "GPU · busiest engine", ram: "RAM used", vram: "Dedicated VRAM" };
   const patterns = { cpu: "", gpu: "7 4", ram: "2 3", vram: "10 3 2 3" };
   const series = Object.fromEntries(Object.keys(colors).map(key => [key, resourceHistory.series(key, device, Math.max(15000, (view?.settings.sampleSeconds || 2) * 2000))]));

@@ -198,7 +198,11 @@ function showSessionError(error) { status.hidden = false; status.classList.add("
 function syncLocalPreferences() {
   const settings = settingsWriter.value;
   document.querySelector("#rail-contribution").textContent = settings.role === "contributor" ? "Contribution on" : "Contribution off";
-  document.querySelector("#overview-protection").textContent = settings.activityMonitoring ? "Activity protection on" : "Activity protection off";
+  const protection = document.querySelector("#overview-protection");
+  protection.title = settings.activityMonitoring ? "Activity protection on" : "Activity protection off";
+  protection.setAttribute("aria-label", protection.title);
+  protection.querySelector("use").setAttribute("href", `/glyphs.svg#${settings.activityMonitoring ? "protection" : "protection-off"}`);
+  protection.classList.toggle("muted", !settings.activityMonitoring);
   const reduced = !settingsWriter.baseline.reducedReserveConsent && (
     settings.ramReserveMiB != null && settings.ramReserveMiB < view.defaultRamReserveMiB ||
     settings.vramReserveMiB != null && settings.vramReserveMiB < view.defaultVramReserveMiB);

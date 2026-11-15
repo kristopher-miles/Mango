@@ -36,7 +36,9 @@ If the primary settings file is unreadable, Mango reports recovery from the last
 
 ## Find your way around
 
-Mango opens on **Overview**, with contribution, preferred local model, current work, and a ten-minute local resource plot. History starts when the view opens; missing counters and gaps are labeled. Total CPU and GPU activity are distinct from the external activity used by protection. GPU utilization is the busiest reported engine; integrated GPU memory is shared RAM.
+Mango opens on **Overview**, with contribution, current work, and a ten-minute local resource plot. The **This computer** card shows the Tailscale inference API URL when this computer is enrolled and listening. Click the URL to copy it, or double-click it to open **Network → Keys**. The **Keys** link opens the same page. Administration stays in its current lock state, and clients still need an inference key.
+
+Resource history starts when the view opens; missing counters and gaps are labeled. Total CPU and GPU activity are distinct from the external activity used by protection. GPU utilization is the busiest reported engine; integrated GPU memory is shared RAM.
 
 The fixed navigation opens **Overview**, **Serving**, **Activity**, **Network**, **Protection**, and **System**. Related settings use tabs. Only the current page scrolls. Preferences update automatically: text fields after a short pause or when you leave the field, switches and selections immediately. There are no Save buttons. Inline status distinguishes updating, incomplete, failed, and changed-elsewhere values. Failed drafts stay in this tab, with a sidebar link to unfinished changes; review conflicts or retry after correcting the problem. Closing or reloading with unfinished changes warns before discarding them.
 
@@ -48,7 +50,7 @@ Open **Serving**, choose **Add provider**, select the profile for an existing LM
 
 **Attached** mode lets Mango inspect the provider and send inference requests. **Managed** mode authorizes the provider's supported model load and unload operations. To let Mango launch and stop a single-model llama-server, give it the full paths to the existing `llama-server.exe` and local GGUF file. An already running process stays under its original owner. The llama.cpp embeddings profile is for a single server started in embedding mode.
 
-Load the model in its provider or use the authorized **Load** action. Use **Refresh catalog** to observe external changes. Each model card exposes its alias, capability ratings, and relevant fallback limits immediately. **Use locally** gives that deployment preference when otherwise comparable placements are available. `GET /v1/models` lists eligible aliases within the caller's scope. Deployments under one embedding alias need a common vector space. Use a deployment-specific alias or configure an owner-declared compatible family.
+Load the model in its provider or use the authorized **Load** action. Use **Refresh catalog** to observe external changes. Each model card exposes its alias, capability ratings, and relevant fallback limits immediately. **Use locally** gives that deployment preference when otherwise comparable placements are available. To clear the preference, choose **Automatic placement** under **Local model preference** in Serving. `GET /v1/models` lists eligible aliases within the caller's scope. Deployments under one embedding alias need a common vector space. Use a deployment-specific alias or configure an owner-declared compatible family.
 
 Use the loopback host URL and current session bearer for the local API. The command `--url` returns the bearer as the `session` fragment. Keep it private. This PowerShell request invokes a chat alias.
 

@@ -360,6 +360,7 @@ function renderServing() {
     : "This computer · Provider configuration, models and qualification are local until you join a network."
     : "Requested configuration for the selected computer · Local permissions and qualification must be set there.";
   document.querySelector(".serving-quick").hidden = !local;
+  document.querySelector("#local-placement").hidden = !local || !(catalogView.models.length || catalogView.selected || selectionWriter?.pending);
   renderProvider(); renderServingModels();
   if (typeof renderQualification === "function") renderQualification();
   renderAliasScope();
@@ -369,9 +370,9 @@ async function loadProviders(force = false) {
   catalogLoading = (async () => {
     catalogView = await api("providers");
     const warning = document.querySelector("#providers-recovery"); warning.textContent = catalogView.recoveryWarning || ""; warning.hidden = !catalogView.recoveryWarning;
-    const input = document.querySelector("#overview-selection"); input.dataset.setting = "id";
+    const input = document.querySelector("#local-selection");
     selectOptions(input, [["", "Automatic placement"], ...catalogView.models.filter(model => model.eligible || model.id === catalogView.selected || model.id === selectionWriter?.value.id).map(model => [model.id, model.alias])], selectionWriter?.pending ? selectionWriter.value.id : catalogView.selected || "");
-    selectionWriter = recordWriter("selection", { value: { id: catalogView.selected || "" }, label: "Preferred local model", page: "overview",
+    selectionWriter = recordWriter("selection", { value: { id: catalogView.selected || "" }, label: "Local model preference", page: "serving",
       write: async ({ changes }) => { await api("providers/selection", { id: changes.id || null }); return { id: (await api("providers")).selected || "" }; } });
     bindPreferences(selectionWriter, input.parentElement, document.querySelector("#selection-status"), { inputs: () => [input] });
     renderServing();

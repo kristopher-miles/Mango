@@ -8,8 +8,36 @@ const publicForm = document.querySelector("#public-form");
 const publicState = document.querySelector("#public-state");
 const publicCheck = document.querySelector("#public-check");
 const publicFeedback = document.querySelector("#public-feedback");
+const inferenceUrl = document.querySelector("#overview-url");
+const copyInferenceUrl = document.querySelector("#overview-url-copy");
+const inferenceUrlFeedback = document.querySelector("#overview-url-feedback");
 let dashboard;
 let dashboardRetry;
+
+function renderInferenceAddress(network) {
+  const joined = network.localNode && !network.reenroll;
+  const addresses = network.tailnet.addresses;
+  const origin = addresses.includes(network.localNode?.address) ? network.localNode.address : addresses[0];
+  const url = joined && origin ? `${origin}/v1` : "";
+  document.querySelector("#overview-inference").hidden = !joined;
+  document.querySelector("#overview-url-offline").hidden = !!url;
+  copyInferenceUrl.hidden = !url;
+  if (inferenceUrl.textContent !== url) {
+    inferenceUrl.textContent = url;
+    inferenceUrlFeedback.textContent = "";
+  }
+}
+copyInferenceUrl.addEventListener("click", async event => {
+  if (event.detail > 1) return;
+  const url = inferenceUrl.textContent;
+  try {
+    await navigator.clipboard.writeText(url);
+    if (inferenceUrl.textContent === url) inferenceUrlFeedback.textContent = "URL copied.";
+  } catch {
+    if (inferenceUrl.textContent === url) inferenceUrlFeedback.textContent = "Could not copy the URL.";
+  }
+});
+copyInferenceUrl.addEventListener("dblclick", () => navigate("network/keys"));
 
 const attemptStates = { waiting: "Queued", running: "Running", rejected: "Rejected", stopped: "Stopped",
   failed: "Failed", uncertain: "Stop unconfirmed", completed: "Completed" };

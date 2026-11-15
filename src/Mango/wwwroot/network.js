@@ -146,6 +146,7 @@ async function loadNetwork() {
   networkView = network;
   if (!network.unlocked && administration.token && sentAdministration === administration.token && !administration.locking) setAdministration(null);
   const active = network.localNode && !network.reenroll;
+  renderInferenceAddress(network);
   document.querySelector("#setup-membership").hidden = !active;
   document.querySelector("#network-setup").hidden = !!active;
   document.querySelector("[aria-label='Setup path']").hidden = !!active;
