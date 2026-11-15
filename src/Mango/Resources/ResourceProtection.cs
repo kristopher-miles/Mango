@@ -133,7 +133,7 @@ internal sealed partial class ResourceProtection : IDisposable
     {
         lock (sync)
         {
-            if (!ServingAllowed || observed is null || !model.Model.Installed ||
+            if (model.ServingDisabled || !ServingAllowed || observed is null || !model.Model.Installed ||
                 !model.Eligible && !(endpoint.CanLoad && model.Model.SupportsLoad))
                 return false;
             return Operations(model, endpoint).Any(operation =>
@@ -170,6 +170,8 @@ internal sealed partial class ResourceProtection : IDisposable
         {
             var available = IsAvailable(model, endpoint, requested);
             ServingReadiness State(string state, string reason, string? action = null) => new(state, reason, action, available);
+            if (model.ServingDisabled) return State("disabled", "Serving is disabled for this model.");
+            if (model.Model.AmbiguousInstance) return State("device", "LM Studio did not report a uniquely addressable instance for this device.");
             if (!model.Online) return State("offline", "The provider is unreachable. Check its address, credential, and process.", "provider");
             if (!model.Model.Installed) return State("installation", "Install this model in its provider, then refresh the inventory.", "provider");
             if (settings.Value.Role != LocalRole.Contributor) return State("contribution", "Turn on contribution for this computer to serve network requests.", "contribution");
@@ -183,8 +185,6 @@ internal sealed partial class ResourceProtection : IDisposable
             {
                 if (model.Instance is null) return State("load", "Load this model in its provider. This registration has no authorized load action.", "provider");
                 if (model.Context is null) return State("context", "Enter the served context when the provider cannot report it.", "model");
-                if (operations.Contains(InferenceOperation.Embeddings) && model.EmbeddingDimensions is null)
-                    return State("dimensions", "Enter embedding dimensions when the provider cannot report them.", "model");
                 return State("protocol", "The provider has not confirmed this model's serving capabilities.", "provider");
             }
             var candidates = operations.Select(operation => (Operation: operation, Budget: FindBudget(model, endpoint, operation))).ToArray();

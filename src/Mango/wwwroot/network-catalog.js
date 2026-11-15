@@ -2,10 +2,14 @@
 
 let catalogView, catalogLoading = false;
 let servingNode = null, servingProvider = null, servingModel = null, modelPage = 0, addingProvider = false;
+let modelCategory = "all";
 let currentProviderWriter, selectionWriter;
 const modelCards = new Map();
 const providerFields = ["profile", "mode", "address", "executable", "modelFile"];
 const modelFields = ["alias", ...servingFields];
+const modelPageSize = 5;
+const modelCategories = document.querySelector("#model-categories");
+const lmLinkWarning = "For best resource management, run Mango separately on the device hosting LM Link models. Mango may behave in unexpected ways when remote resources are incorrectly served as local.";
 
 function localOwner(owner) { return !owner || owner === "local" || owner === networkView?.localNode?.id; }
 function intentLabel(desired, report) {
@@ -186,18 +190,21 @@ function renderProvider() {
   showProviderFields();
 }
 function modelRecord(desired, local) {
-  if (desired) return { alias: desired.alias, ratings: desired.ratings, ...Object.fromEntries(servingFields.map(key => [key, desired.serving?.[key] ?? null])), revision: desired.revision };
-  return { alias: local.alias, ratings: local.options.ratings, ...Object.fromEntries(servingFields.map(key => [key, local.options[key] ?? null])), revision: local.options.revision };
+  if (desired) return { alias: desired.alias ?? "", ratings: desired.ratings, ...Object.fromEntries(servingFields.map(key => [key, desired.serving?.[key] ?? null])), revision: desired.revision };
+  return { alias: local.alias ?? "", ratings: local.options.ratings, ...Object.fromEntries(servingFields.map(key => [key, local.options[key] ?? null])), revision: local.options.revision };
 }
+function providerIdentifiers(item) { return item.local?.providerIdentifiers ?? item.observed?.providerIdentifiers ?? []; }
+function isLmLinkModel(item) { return (item.local?.model.origin ?? item.observed?.origin) === "lmLink"; }
 function servingModels() {
   if (!catalogView) return [];
   const local = localOwner(servingNode), owner = servingNode;
   const observed = networkView?.catalogs.find(item => item.node === owner)?.models || [];
   const desired = (networkView?.models || []).filter(item => item.owner === owner);
-  if (local) return catalogView.models.filter(item => item.endpointId === servingProvider).map(item => ({ id: item.id, owner,
-    local: item, desired: desired.find(wanted => wanted.deployment === item.id), observed: observed.find(seen => seen.id === item.id) }));
-  return desired.map(item => ({ id: item.deployment, owner, desired: item, observed: observed.find(seen => seen.id === item.deployment) }))
+  const models = local ? catalogView.models.filter(item => item.endpointId === servingProvider).map(item => ({ id: item.id, owner,
+    local: item, desired: desired.find(wanted => wanted.deployment === item.id), observed: observed.find(seen => seen.id === item.id) }))
+    : desired.map(item => ({ id: item.deployment, owner, desired: item, observed: observed.find(seen => seen.id === item.deployment) }))
     .filter(item => item.observed?.endpoint === servingProvider || !item.observed?.endpoint || !servingProvider);
+  return models.sort((left, right) => Number(isLmLinkModel(left)) - Number(isLmLinkModel(right)));
 }
 function modelWriter(item) {
   const local = localOwner(item.owner), key = `model:${local ? "local" : item.owner}:${item.id}`;
@@ -210,7 +217,8 @@ function modelWriter(item) {
     const model = (await api("providers")).models.find(model => model.id === item.id);
     if (!model) throw new Error("The model is no longer in the inventory."); return modelRecord(null, model);
   };
-  return recordWriter(key, { value: modelRecord(item.desired, item.local), label: item.desired?.alias || item.local.alias,
+  return recordWriter(key, { value: modelRecord(item.desired, item.local), label: item.desired?.alias || item.local?.alias ||
+    providerIdentifiers(item)[0] || item.observed?.displayName || "Model",
     page: `serving/${item.owner}/${servingProvider}?model=${item.id}`, requiresAdmin: () => !!networkView?.identity,
     read, write: async ({ baseline, changes }) => {
       const next = { ...baseline, ...changes };
@@ -265,14 +273,20 @@ function renderModelCard(item) {
   if (!card) {
     card = element("article", null, "model-card"); card.dataset.model = item.id;
     const heading = element("div", null, "model-heading"), title = element("h3"), badge = element("span", null, "badge");
-    heading.append(title, badge); card.append(heading, element("p", "", "model-facts muted"), element("p", "", "model-readiness"), element("div", "", "readiness-action"), element("p", "", "model-applied muted"));
+    const meta = element("div", null, "model-heading-meta"), link = element("span", null, "model-link-mark");
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg"), use = document.createElementNS(svg.namespaceURI, "use");
+    svg.setAttribute("class", "glyph"); svg.setAttribute("aria-hidden", "true"); use.setAttribute("href", "/glyphs.svg#lm-link");
+    svg.append(use); link.append(svg); link.tabIndex = 0; link.title = lmLinkWarning;
+    link.setAttribute("role", "img"); link.setAttribute("aria-label", `LM Link. ${lmLinkWarning}`);
+    meta.append(link, badge); heading.append(title, meta);
+    card.append(heading, element("p", "", "model-facts muted"), element("p", "", "model-readiness"), element("div", "", "readiness-action"), element("p", "", "model-applied muted"));
     const form = element("form"), inputs = element("div", null, "inputs");
     for (const [label, name, type] of [["Alias", "alias", "text"], ["Fallback context · tokens", "servedContext", "number"],
       ["Embedding dimensions", "embeddingDimensions", "number"], ["Embedding family", "embeddingFamily", "text"], ["Media tokens per item", "mediaTokensPerItem", "number"]]) {
       const field = labeledInput(label, name, type, writer.value[name]), input = field.lastElementChild;
       if (type === "number") { input.min = "1"; input.max = name === "embeddingDimensions" ? "65536" : "4194304"; }
       else input.maxLength = 200;
-      if (name === "alias") input.required = true;
+      if (name === "alias") input.placeholder = "Optional";
       if (name.startsWith("embedding")) field.hidden = !facts?.operations.includes("embeddings");
       if (name === "mediaTokensPerItem") field.hidden = !facts?.inputs.some(value => ["image", "audio"].includes(value));
       inputs.append(field);
@@ -286,9 +300,13 @@ function renderModelCard(item) {
   card.querySelector("fieldset").refreshRatings();
   for (const input of card.querySelectorAll("[name^=embedding]")) input.closest("label").hidden = !facts?.operations?.includes("embeddings") && !writer.dirty.has(input.name);
   card.querySelector("[name=mediaTokensPerItem]").closest("label").hidden = !facts?.inputs?.some(value => ["image", "audio"].includes(value)) && !writer.dirty.has("mediaTokensPerItem");
-  card.querySelector("h3").textContent = facts?.displayName || writer.value.alias;
+  const identifiers = providerIdentifiers(item);
+  card.querySelector("h3").textContent = facts?.displayName || identifiers[0] || writer.value.alias || "Model";
+  card.querySelector(".model-link-mark").hidden = !isLmLinkModel(item);
   card.querySelector(".badge").textContent = local ? item.local.instance ? item.local.busy || item.local.instance.busy ? "Busy" : "Loaded" : "Unloaded" : "Remote";
-  card.querySelector(".model-facts").textContent = [(facts?.operations || []).map(key => operationNames[key]).join(", "),
+  const origin = facts?.origin === "local" ? "Local to LM Studio" : facts?.origin === "lmLink" ? `LM Link${facts.sourceDevice ? ` · ${facts.sourceDevice}` : ""}` : "";
+  card.querySelector(".model-facts").textContent = [identifiers.length ? `Provider ${identifiers.length === 1 ? "ID" : "IDs"} ${identifiers.join(", ")}` : "",
+    origin, (facts?.operations || []).map(key => operationNames[key]).join(", "),
     facts?.inputs?.length ? `${facts.inputs.join(", ")} → ${(facts.outputs || []).join(", ")}` : "Capabilities unobserved",
     facts?.tools ? "Function tools" : "", facts?.structuredOutput ? "Structured output" : "", `Context ${item.local?.context ?? item.observed?.context ?? "unconfirmed"}`].filter(Boolean).join(" · ");
   card.querySelector(".model-readiness").textContent = readinessText(item);
@@ -307,15 +325,22 @@ function renderModelCard(item) {
       }));
     }
   }
-  card.querySelector(".model-applied").textContent = item.desired ? `${intentLabel(item.desired, item.observed?.intent)} · Applied alias ${item.local?.alias || item.observed?.effectiveAlias || "unobserved"}` : "Settings on this computer";
+  const appliedAlias = item.local ? item.local.alias : item.observed?.effectiveAlias;
+  card.querySelector(".model-applied").textContent = item.desired ?
+    [intentLabel(item.desired, item.observed?.intent), appliedAlias && `Applied alias ${appliedAlias}`].filter(Boolean).join(" · ") : "Settings on this computer";
   const actions = card.querySelector(".actions"), endpoint = selectedProvider();
-  const actionKey = `${local}:${item.local?.instance?.id}:${item.local?.eligible}:${catalogView.selected}:${servingModel}:${endpoint?.canLoad}:${endpoint?.canUnload}`;
+  const disabled = item.local?.servingDisabled === true;
+  const actionKey = `${local}:${item.local?.instance?.id}:${item.local?.eligible}:${disabled}:${catalogView.selected}:${servingModel}:${endpoint?.canLoad}:${endpoint?.canUnload}`;
   if (actions.dataset.key !== actionKey) {
     actions.dataset.key = actionKey; actions.replaceChildren();
     actions.append(action(servingModel === item.id ? "Limits selected" : "View limits", () => {
       servingModel = item.id; renderServingModels(); renderQualification();
     }));
     if (local) {
+      actions.append(action(disabled ? "Enable serving" : "Disable serving", event => providerAction(event.currentTarget,
+        disabled ? "Enabling serving…" : "Disabling serving…",
+        () => api(`providers/models/${item.id}/serving`, { enabled: disabled }),
+        disabled ? "Serving enabled." : "Serving disabled.")));
       const select = action(item.id === catalogView.selected ? "Preferred model" : "Use locally", event => providerAction(event.currentTarget, "Selecting model…", async () => {
         await selectionWriter.change("id", item.id, { immediate: true });
         if (selectionWriter.pending) throw new Error(selectionWriter.state.message);
@@ -331,20 +356,30 @@ function renderModelCard(item) {
 }
 function renderServingModels() {
   let items = servingModels();
-  const query = document.querySelector("#model-search").value.toLowerCase(), operation = document.querySelector("#model-operation").value;
-  items = items.filter(item => (!query || `${item.local?.model.displayName || item.observed?.displayName || ""} ${item.desired?.alias || item.local?.alias || ""}`.toLowerCase().includes(query)) &&
-    (!operation || (item.local?.model.operations || item.observed?.operations || []).includes(operation)));
+  document.querySelector("#model-serving-actions").hidden = !localOwner(servingNode) || addingProvider || items.length === 0;
+  const query = document.querySelector("#model-search").value.toLowerCase(), paginated = modelCategory === "all";
+  items = items.filter(item => (!query || [item.local?.model.displayName || item.observed?.displayName,
+    item.desired?.alias || item.local?.alias, ...providerIdentifiers(item)].filter(Boolean).join(" ").toLowerCase().includes(query)) &&
+    (paginated || (item.local?.model.operations || item.observed?.operations || []).includes(modelCategory)));
   if (!items.some(item => item.id === servingModel)) servingModel = items[0]?.id || null;
-  modelPage = Math.min(modelPage, Math.max(0, Math.ceil(items.length / 5) - 1));
-  const visible = items.slice(modelPage * 5, modelPage * 5 + 5).map(renderModelCard);
+  modelPage = Math.min(modelPage, Math.max(0, Math.ceil(items.length / modelPageSize) - 1));
+  const start = paginated ? modelPage * modelPageSize : 0, end = paginated ? Math.min(items.length, start + modelPageSize) : items.length;
+  const visible = items.slice(start, end).map(renderModelCard);
   const list = document.querySelector("#deployment-list");
+  list.setAttribute("aria-labelledby", `model-category-${modelCategory}`);
+  for (const tab of modelCategories.children) {
+    const active = tab.dataset.category === modelCategory;
+    tab.setAttribute("aria-selected", String(active)); tab.tabIndex = active ? 0 : -1;
+  }
   if (!visible.length) visible.push(element("div", addingProvider ? "Connect a provider to discover its models."
     : selectedProvider()?.pendingRegistration ? "Approve this connection above to discover its models."
       : "No matching models. Refresh the provider inventory or adjust the filters.", "panel muted"));
   if (visible.length !== list.childElementCount || visible.some((card, index) => card !== list.children[index])) list.replaceChildren(...visible);
-  document.querySelector("#model-count").textContent = items.length ? `${modelPage * 5 + 1}–${Math.min(items.length, modelPage * 5 + 5)} of ${items.length} models` : "No models";
-  document.querySelector("#model-previous").disabled = modelPage === 0;
-  document.querySelector("#model-next").disabled = (modelPage + 1) * 5 >= items.length;
+  document.querySelector("#model-count").textContent = !items.length ? "No models" : paginated
+    ? `${start + 1}–${end} of ${items.length} models` : `${items.length} ${items.length === 1 ? "model" : "models"}`;
+  const previous = document.querySelector("#model-previous"), next = document.querySelector("#model-next");
+  previous.hidden = next.hidden = !paginated;
+  previous.disabled = start === 0; next.disabled = end === items.length;
 }
 function renderServing() {
   if (!catalogView) return;
@@ -371,7 +406,7 @@ async function loadProviders(force = false) {
     catalogView = await api("providers");
     const warning = document.querySelector("#providers-recovery"); warning.textContent = catalogView.recoveryWarning || ""; warning.hidden = !catalogView.recoveryWarning;
     const input = document.querySelector("#local-selection");
-    selectOptions(input, [["", "Automatic placement"], ...catalogView.models.filter(model => model.eligible || model.id === catalogView.selected || model.id === selectionWriter?.value.id).map(model => [model.id, model.alias])], selectionWriter?.pending ? selectionWriter.value.id : catalogView.selected || "");
+    selectOptions(input, [["", "Automatic placement"], ...catalogView.models.filter(model => model.eligible || model.id === catalogView.selected || model.id === selectionWriter?.value.id).map(model => [model.id, model.alias || model.providerIdentifiers?.[0] || model.model.displayName])], selectionWriter?.pending ? selectionWriter.value.id : catalogView.selected || "");
     selectionWriter = recordWriter("selection", { value: { id: catalogView.selected || "" }, label: "Local model preference", page: "serving",
       write: async ({ changes }) => { await api("providers/selection", { id: changes.id || null }); return { id: (await api("providers")).selected || "" }; } });
     bindPreferences(selectionWriter, input.parentElement, document.querySelector("#selection-status"), { inputs: () => [input] });
@@ -383,8 +418,29 @@ document.querySelector("#provider-add").addEventListener("click", () => { adding
 document.querySelector("#provider-refresh").addEventListener("click", event => providerAction(event.currentTarget, "Refreshing catalog…", () => api("providers/refresh", { id: servingProvider }), "Catalog refreshed."));
 document.querySelector("#serving-node").addEventListener("change", event => { servingNode = event.target.value; servingProvider = null; servingModel = null; addingProvider = false; modelPage = 0; renderServing(); });
 document.querySelector("#serving-provider").addEventListener("change", event => { servingProvider = event.target.value; addingProvider = false; servingModel = null; modelPage = 0; renderServing(); });
-for (const id of ["model-search", "model-operation"]) document.querySelector(`#${id}`).addEventListener("input", () => { modelPage = 0; renderServingModels(); renderQualification(); });
-for (const [key, label] of Object.entries(operationNames)) { const option = element("option", label); option.value = key; document.querySelector("#model-operation").append(option); }
+document.querySelector("#model-search").addEventListener("input", () => { modelPage = 0; renderServingModels(); renderQualification(); });
+for (const [key, label] of [["all", "All"], ...Object.entries(operationNames)]) {
+  const tab = element("button", label);
+  tab.type = "button"; tab.id = `model-category-${key}`; tab.dataset.category = key;
+  tab.setAttribute("role", "tab"); tab.setAttribute("aria-controls", "deployment-list");
+  tab.addEventListener("click", () => { modelCategory = key; modelPage = 0; renderServingModels(); renderQualification(); });
+  modelCategories.append(tab);
+}
+modelCategories.addEventListener("keydown", event => {
+  const tabs = [...modelCategories.children], index = tabs.indexOf(event.target);
+  if (index < 0 || !["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+  event.preventDefault();
+  const next = event.key === "Home" ? 0 : event.key === "End" ? tabs.length - 1
+    : (index + (event.key === "ArrowLeft" ? -1 : 1) + tabs.length) % tabs.length;
+  tabs[next].focus(); tabs[next].click();
+});
+for (const [id, enabled] of [["model-serve-all", true], ["model-serve-none", false]]) {
+  document.querySelector(`#${id}`).addEventListener("click", event => perform(event.currentTarget, document.querySelector("#catalog-status"), async () => {
+    await api(`providers/${servingProvider}/serving`, { enabled });
+    await loadProviders(true); await Promise.allSettled([loadNetwork(), loadResources()]);
+    return enabled ? "Serving enabled for all models on this provider." : "Serving disabled for all models on this provider.";
+  }));
+}
 document.querySelector("#model-previous").addEventListener("click", () => { modelPage--; renderServingModels(); });
 document.querySelector("#model-next").addEventListener("click", () => { modelPage++; renderServingModels(); });
 document.addEventListener("mango:route", event => {
@@ -393,8 +449,8 @@ document.addEventListener("mango:route", event => {
   if (event.detail.node) { servingNode = event.detail.node; servingProvider = event.detail.provider; addingProvider = false; }
   if (event.detail.model) {
     servingModel = event.detail.model;
-    document.querySelector("#model-search").value = ""; document.querySelector("#model-operation").value = "";
-    modelPage = Math.max(0, Math.floor(servingModels().findIndex(item => item.id === servingModel) / 5));
+    document.querySelector("#model-search").value = ""; modelCategory = "all";
+    modelPage = Math.max(0, Math.floor(servingModels().findIndex(item => item.id === servingModel) / modelPageSize));
   }
   renderServing();
 });
@@ -421,7 +477,7 @@ function renderAliasRating() {
 function renderAliasScope() {
   const shared = !!networkView?.identity;
   const models = shared ? networkView.models : catalogView?.models || [];
-  selectOptions(aliasRatingForm.elements.alias, [...new Set(models.map(item => item.alias))].sort().map(alias => [alias, alias]), aliasRatingForm.elements.alias.value);
+  selectOptions(aliasRatingForm.elements.alias, [...new Set(models.map(item => item.alias).filter(Boolean))].sort().map(alias => [alias, alias]), aliasRatingForm.elements.alias.value);
   renderAliasRating();
 }
 aliasRatingForm.addEventListener("submit", event => event.preventDefault());

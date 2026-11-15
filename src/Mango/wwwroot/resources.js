@@ -14,7 +14,7 @@ function renderResourceProfile(model) {
     profile?.error || (profile?.complete ? "Benchmark complete." : profile?.measurements.length ? "Benchmark measurements are incomplete." : "No benchmark measurements."),
     model.canColdLoad ? "" : "Cold-load measurement is unavailable for this provider."].filter(Boolean).join(" ");
   document.querySelector("#resource-retry").disabled = !model.budget || active;
-  document.querySelector("#measurement-title").textContent = `${model.alias} · ${operationNames[model.operation]}`;
+  document.querySelector("#measurement-title").textContent = `${model.identifier} · ${operationNames[model.operation]}`;
   document.querySelector("#resource-passes").replaceChildren(...(profile?.measurements || []).map(pass => element("li", [pass.pass, pass.elapsed,
     pass.workload.width ? `${pass.workload.width} × ${pass.workload.height}` : "",
     pass.promptTokens == null ? "" : `${pass.promptTokens} prompt tokens`,
@@ -49,8 +49,8 @@ function renderQualification() {
   if (!selected) selected = models.find(model => model.operation === route.operation) || models[0];
   selectOptions(resourceTarget, models.map(model => [resourceKey(model), operationNames[model.operation]]), resourceKey(selected));
   const key = resourceKey(selected), devices = resourceView.observation?.devices || [];
-  document.querySelector("#qualification-title").textContent = selected.alias;
-  document.querySelector("#qualification-scope").textContent = "Local qualification · This computer only";
+  document.querySelector("#qualification-title").textContent = selected.identifier;
+  document.querySelector("#qualification-scope").textContent = selected.budget?.estimated ? "Estimated limits · This computer only" : "Local qualification · This computer only";
   document.querySelector("#resource-units").textContent = ["chat", "embeddings", "systemOne"].includes(selected.operation) ? "Units are tokens per sequence; items are sequences per request."
     : selected.operation === "images" ? "Units are pixels per image; items are images per request." : selected.operation === "speech" ? "Units are input characters." : "Units are input audio bytes.";
   document.querySelector("#resource-attached").hidden = !selected.attached;
@@ -64,7 +64,7 @@ function renderQualification() {
     })));
     delete resourceFeedback.dataset.feedback;
   }
-  budgetWriter = recordWriter(`budget:${key}`, { value, reviewKeys: ["configuration"], label: `${selected.alias} · ${operationNames[selected.operation]} limits`, page: `serving/${servingNode}/${servingProvider}?model=${selected.id}&operation=${selected.operation}`,
+  budgetWriter = recordWriter(`budget:${key}`, { value, reviewKeys: ["configuration"], label: `${selected.identifier} · ${operationNames[selected.operation]} limits`, page: `serving/${servingNode}/${servingProvider}?model=${selected.id}&operation=${selected.operation}`,
     validate: values => Object.entries(values).some(([name, value]) => (name.includes(":") || ["units", "items", "mediaItems", "loadRamMiB", "executeRamMiB", "parallelSlots"].includes(name)) && value == null)
       ? "Complete all workload and memory limits before qualification takes effect." : null,
     read: async () => {
@@ -84,7 +84,7 @@ function renderQualification() {
   });
   bindPreferences(budgetWriter, resourceForm, resourceFeedback, { exclude: ["target"] });
   if (!selected.budget && !budgetWriter.pending && budgetWriter.state.kind === "current") {
-    resourceFeedback.textContent = "Not qualified · enter measured memory peaks and workload limits below.";
+    resourceFeedback.textContent = "Waiting for Windows device observations before estimating limits.";
     delete resourceFeedback.dataset.feedback;
   }
   resourceForm.elements.parallelSlots.disabled = !budgetWriter.value.allowOverlap;

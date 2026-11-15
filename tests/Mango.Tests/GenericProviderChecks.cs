@@ -44,8 +44,9 @@ internal static class GenericProviderChecks
         }, default));
         Check(endpoint is { Online: true, CanLoad: true, CanUnload: true, CanStop: false, MaxLoadedModels: 1 },
             "managed endpoint advertises one slot and HTTP lifecycle");
-        var first = providers.View.Models.Single(model => model.Alias == "sample-a");
-        var second = providers.View.Models.Single(model => model.Alias == "sample-b");
+        var first = providers.View.Models.Single(model => model.Model.NativeId == "sample-a");
+        var second = providers.View.Models.Single(model => model.Model.NativeId == "sample-b");
+        Check(first.Alias is null && second.Alias is null, "provider IDs are not user aliases");
         Check(first.Instance is null && second.Instance is null && !first.Model.StructuredOutput, "unloaded catalog and capabilities");
         await providers.EditAsync(new(first.Id, first.Alias, null, 2048, null, null, null, first.Options.Revision), default);
         await providers.EditAsync(new(second.Id, second.Alias, null, 4096, null, null, null, second.Options.Revision), default);
@@ -80,7 +81,11 @@ internal static class GenericProviderChecks
         var result = await serve(context, default);
         Check(result is { Settled: true, Failure: null } && context.Response.ContentType!.StartsWith("text/event-stream") &&
             Encoding.UTF8.GetString(output.ToArray()) == Stream.Replace("__instance__", instance.Id),
-            "alias routed to the new instance over SSE");
+            "provider model ID routed to the new instance over SSE");
+        var resident = providers.View.Models.Single(model => model.Id == second.Id);
+        Check(resident.ProviderIdentifiers.SequenceEqual(["sample-b", instance.Id]) &&
+            providers.Placement(request.Shape with { Alias = instance.Id }, second.Id) is not null,
+            "the provider's distinct loaded-instance ID also routes to the instance");
 
         await using var restarted = new ProviderCatalog(directory);
         await restarted.InitializeAsync();

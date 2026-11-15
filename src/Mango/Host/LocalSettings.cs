@@ -31,6 +31,7 @@ internal sealed record LocalSettings
     [JsonRequired] public BenchmarkPolicy BenchmarkPolicy { get; init; } = BenchmarkPolicy.Never;
     public bool MaintenanceDeferred { get; init; }
     public bool DailyUpdates { get; init; }
+    public int? NodePort { get; init; }
 
     public static string? Validate(LocalSettings settings)
     {
@@ -46,6 +47,8 @@ internal sealed record LocalSettings
         if (settings.RamReserveMiB is < 0 or > MaximumReserveMiB ||
             settings.VramReserveMiB is < 0 or > MaximumReserveMiB)
             return $"Memory reserves must be between 0 and {MaximumReserveMiB} MiB.";
+        if (settings.NodePort is < 1 or > 65535)
+            return "The node port must be between 1 and 65535.";
         return null;
     }
 

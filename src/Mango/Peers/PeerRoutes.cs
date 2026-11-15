@@ -40,6 +40,8 @@ internal static class PeerRoutes
         });
         network.MapPut("/recover", (RecoverRequest input, HttpContext context) =>
             HandleAsync(context, token => peers.RecoverAsync(input, token)));
+        network.MapPut("/password", (ChangePasswordRequest input, HttpContext context) =>
+            HandleAsync(context, token => peers.ChangePasswordAsync(context.Request, input, token)));
         network.MapPut("/reset", (ResetRequest input, HttpContext context) =>
             HandleAsync(context, token => peers.ResetAsync(context.Request, input, token)));
         network.MapPost("/keys", (KeyIssueRequest input, HttpContext context) =>

@@ -60,7 +60,8 @@ internal static partial class PeerChecks
             var node = owner.Network.Snapshot.Self!.Id;
             var here = first.Network.Snapshot.Self!.Id;
             await Eventually(() => first.Network.Snapshot.Records.Catalogs.Any(item =>
-                item.Node == node && item.Models.Any(model => model.EffectiveAlias == "fixture-speech")), "media provider is advertised");
+                item.Node == node && item.Models.Any(model => model.ProviderIdentifiers!.Contains("fixture-speech") &&
+                    model.EffectiveAlias is null)), "media provider is advertised by its provider ID");
             var issued = await Local(http, first, "network/keys", new
             {
                 name = "logging-fixture-key", priority = "normal", scopes = new[] { "chat", "speech", "transcription" }, neverExpires = true

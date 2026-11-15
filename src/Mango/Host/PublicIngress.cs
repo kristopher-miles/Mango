@@ -27,6 +27,8 @@ internal sealed class PublicIngress(string directory, PeerNetwork peers) : IAsyn
     private string? error;
     private ProbeResult? lastCheck;
 
+    internal int? ConfiguredPort => store.Value.Enabled ? store.Value.Port : null;
+
     public object View()
     {
         var settings = store.Value;

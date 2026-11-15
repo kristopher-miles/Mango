@@ -3,9 +3,12 @@ using System.Text.Json.Nodes;
 
 namespace Mango.Providers;
 
-internal sealed class LmStudioAdapter(HttpClient http, ProviderEndpoint endpoint) : ProviderAdapter(http, endpoint)
+internal sealed class LmStudioAdapter(HttpClient http, ProviderEndpoint endpoint,
+    Func<Uri, CancellationToken, Task<LmStudioDevices?>>? inspectDevices = null) : ProviderAdapter(http, endpoint)
 {
     private bool Generic => Endpoint.Profile == ProviderProfile.Generic;
+    private readonly HashSet<string> deviceAwareKeys = new(StringComparer.Ordinal);
+    private LmStudioDevices? deviceInventory;
 
     public override void Prepare(InferenceOperation operation, JsonObject payload)
     {
@@ -58,14 +61,84 @@ internal sealed class LmStudioAdapter(HttpClient http, ProviderEndpoint endpoint
                 dimensions: row.Number("embedding_dimensions"), encodings: type == "embedding" ? ["float"] : [],
                 artifactBytes: row.Long("size_bytes"), format: row.Text("format")));
         }
-        return new(version, models.ToArray(), Managed, Managed, false,
+        var devices = Generic ? null : await (inspectDevices ?? LmStudioDevices.InspectAsync)(new Uri(Endpoint.Address), cancellation);
+        Volatile.Write(ref deviceInventory, devices);
+        var inventory = Generic ? models.ToArray() : models.GroupBy(model => model.NativeId, StringComparer.Ordinal)
+            .SelectMany(group => ResolveDevices(group.ToArray(), devices)).Take(ProviderLimits.MaxModels).ToArray();
+        return new(version, inventory, Managed, Managed, false,
             MaxLoadedModels: Generic ? result.Number("max_loaded_models") : null);
+    }
+
+    private ProviderModel[] ResolveDevices(ProviderModel[] rows, LmStudioDevices? devices)
+    {
+        var key = rows[0].NativeId;
+        var copies = devices?.Downloaded.Items().Where(item => item.Text("modelKey") == key)
+            .GroupBy(devices.Device, StringComparer.Ordinal).ToArray() ?? [];
+        if (devices is null || copies.Length == 0 || rows.Length > copies.Sum(group => group.Count()))
+        {
+            var model = rows.FirstOrDefault(item => item.Instances.Length > 0) ?? rows[0];
+            return rows.Length > 1 || deviceAwareKeys.Contains(key)
+                ? [model with { AmbiguousInstance = true, Instances = [], SupportsLoad = false, SupportsUnload = false }]
+                : [model];
+        }
+
+        var loaded = devices.Loaded.Items().Where(item => item.Text("modelKey") == key).ToArray();
+        var identifierCounts = devices.Loaded.Items().ToLookup(item => item.Text("identifier"), StringComparer.Ordinal);
+        if (copies.Length > 1 || copies.Any(copy => copy.Key is not null)) deviceAwareKeys.Add(key);
+        var instances = rows.SelectMany(row => row.Instances).ToLookup(instance => instance.Id, StringComparer.Ordinal);
+        return copies.Select(copy =>
+        {
+            var remote = copy.Key is { Length: > 0 };
+            var onDevice = loaded.Where(item => devices.Device(item) == copy.Key).ToArray();
+            var downloaded = copy.First();
+            var known = onDevice.Where(item => item.Text("identifier") is { } id && identifierCounts[id].Count() == 1)
+                .SelectMany(item => instances[item.Text("identifier")!].Take(1)).DistinctBy(item => item.Id).ToArray();
+            var matching = rows.Where(row => row.ArtifactBytes == downloaded.Long("sizeBytes") && row.Format == downloaded.Text("format"));
+            var model = rows.FirstOrDefault(row => row.Instances.Any(item => known.Contains(item))) ?? matching.FirstOrDefault() ?? rows[0];
+            return model with
+            {
+                Id = DeviceModelId(key, copy.Key),
+                Instances = known, Origin = remote ? ModelOrigin.LmLink : ModelOrigin.Local,
+                SourceDevice = remote ? devices.Name(copy.Key!) : null,
+                SupportsLoad = !remote && rows.Length == 1 && copies.Length == 1 && onDevice.Length == known.Length,
+                SupportsUnload = !remote && onDevice.Length == known.Length,
+                AmbiguousInstance = known.Length == 0 && onDevice.Length != 0
+            };
+        }).ToArray();
+    }
+
+    private string DeviceModelId(string key, string? device) => device is null ? ProviderIdentity.Model(Endpoint.Id, key)
+        : ProviderIdentity.Hash(Endpoint.Id.ToString("N"), key, device);
+
+    private async Task<LmStudioDevices?> CurrentInstancesAsync(CancellationToken cancellation)
+    {
+        if (Volatile.Read(ref deviceInventory) is not { } inventory) return null;
+        var loaded = inspectDevices is null ? await LmStudioDevices.ReadLoadedAsync(cancellation)
+            : (await inspectDevices(new Uri(Endpoint.Address), cancellation))?.Loaded ?? default;
+        return loaded.ValueKind == JsonValueKind.Array ? inventory with { Loaded = loaded } : null;
+    }
+
+    public override async Task ConfirmDeploymentAsync(InferenceOperation operation, ProviderModel model, ProviderInstance instance,
+        CancellationToken cancellation)
+    {
+        if (model.Origin is null || model is { Origin: ModelOrigin.Local, SupportsLoad: true }) return;
+        var current = await CurrentInstancesAsync(cancellation);
+        var matches = current?.Loaded.Items().Where(item => item.Text("identifier") == instance.Id).ToArray() ?? [];
+        if (matches.Length != 1 || matches[0].Text("modelKey") != model.NativeId ||
+            DeviceModelId(model.NativeId, current!.Device(matches[0])) != model.Id)
+            throw new ProviderFailure(503, "LM Studio could not confirm the loaded instance on its expected device.");
     }
 
     public override async Task<bool?> CheckIdleAsync(ProviderModel model, CancellationToken cancellation)
     {
         if (!Generic)
-            return null;
+        {
+            if (model.Origin is null || await CurrentInstancesAsync(cancellation) is not { } current) return null;
+            var onDevice = current.Loaded.Items().Where(item => item.Text("modelKey") == model.NativeId &&
+                DeviceModelId(model.NativeId, current.Device(item)) == model.Id).ToArray();
+            if (onDevice.Any(item => item.Text("status") is "generating" || item.Number("queued") > 0)) return false;
+            return onDevice.All(item => item.Text("status") == "idle") ? true : null;
+        }
         var result = await ReadInventoryAsync(cancellation);
         var instances = result.Get("models").Items().SingleOrDefault(row => row.Text("key") == model.NativeId)
             .Get("loaded_instances").Items().ToArray();
@@ -130,6 +203,33 @@ internal sealed class LmStudioAdapter(HttpClient http, ProviderEndpoint endpoint
             return;
         }
         foreach (var instance in model.Instances)
-            await JsonAsync("/api/v1/models/unload", cancellation, new { instance_id = instance.Id }, lifecycle: true);
+        {
+            if (!Generic && !await InstanceStillLoadedAsync(model, instance, cancellation))
+                continue;
+            if (model.Origin == ModelOrigin.Local && !model.SupportsLoad)
+                await ConfirmDeploymentAsync(default, model, instance, cancellation);
+            try
+            {
+                await JsonAsync("/api/v1/models/unload", cancellation, new { instance_id = instance.Id }, lifecycle: true);
+            }
+            catch (ProviderFailure) when (!Generic)
+            {
+                // LM Studio can finish an earlier unload between inventory and this request.
+                // Only accept that outcome when fresh inventory proves the instance is gone.
+                if (await InstanceStillLoadedAsync(model, instance, cancellation)) throw;
+            }
+        }
+    }
+
+    private async Task<bool> InstanceStillLoadedAsync(ProviderModel model, ProviderInstance instance,
+        CancellationToken cancellation)
+    {
+        var inventory = await ReadInventoryAsync(cancellation);
+        var matches = inventory.Get("models").Items()
+            .Where(row => row.Get("loaded_instances").Items().Any(item => item.Text("id") == instance.Id)).ToArray();
+        if (matches.Length == 0) return false;
+        if (matches.Length != 1 || matches[0].Text("key") != model.NativeId)
+            throw new ProviderFailure(503, "LM Studio could not confirm the instance belongs to the intended model.");
+        return true;
     }
 }

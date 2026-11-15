@@ -22,7 +22,7 @@ internal sealed record MemoryCost(long RamBytes, Dictionary<string, long> Device
 internal readonly record struct Workload(InferenceOperation Operation, long Units, int Items = 1, int MediaItems = 0,
     int? Width = null, int? Height = null);
 internal sealed record ResourceBudget(string Deployment, string Configuration, string? Runtime, Workload Workload,
-    MemoryCost Load, MemoryCost Execute, bool AllowOverlap, int ParallelSlots = 1, bool AllowAttached = false);
+    MemoryCost Load, MemoryCost Execute, bool AllowOverlap, int ParallelSlots = 1, bool AllowAttached = false, bool Estimated = false);
 internal sealed record PendingRelease(Guid Endpoint, string Deployment, int[] OwnedProcesses);
 internal sealed record ResourceHold(ContributionState State, string Reason, PendingRelease[]? Pending = null);
 internal sealed record ResourceEvent(DateTimeOffset At, string Reason, bool Loading, bool Running,

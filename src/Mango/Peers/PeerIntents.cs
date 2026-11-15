@@ -25,7 +25,7 @@ internal sealed partial class PeerNetwork
     public async Task<PushResult> SetModelIntentAsync(HttpRequest request, SharedModelUpdate input, CancellationToken cancellation,
         bool local = false)
     {
-        var alias = input.Alias?.Trim();
+        var alias = string.IsNullOrWhiteSpace(input.Alias) ? null : input.Alias.Trim();
         if (input.Owner == Guid.Empty || input.Deployment is not { Length: > 0 and <= 128 } ||
             !PeerValidation.ValidModelSettings(alias, input.Ratings, input.Serving))
             throw new PeerFailure(400, "Enter a valid alias, capability ratings, and serving limits.");
@@ -37,18 +37,22 @@ internal sealed partial class PeerNetwork
             if (!current.Nodes.TryGetValue(input.Owner, out var owner) || owner.Removed)
                 throw new PeerFailure(404, "Select a model on an enrolled node.");
             var existing = current.Records.Models.FirstOrDefault(model => model.Id == id && !model.Removed);
-            if (existing is null && (!local || input.Owner != self.Id || !providers.View.Models.Any(model => model.Id == input.Deployment)))
+            var localModel = input.Owner == self.Id ? providers.View.Models.FirstOrDefault(model => model.Id == input.Deployment) : null;
+            if (existing is null && (!local || localModel is null))
                 throw new PeerFailure(404, "The shared deployment was not found.");
             var justPublished = local && input.Revision is null && existing is not null &&
-                providers.View.Models.FirstOrDefault(model => model.Id == input.Deployment) is { } observed &&
-                Matches(existing, observed.Alias, observed.Options.Ratings, ModelServing.Of(observed.Options));
+                localModel is not null && Matches(existing, localModel);
             if (existing?.Revision != input.Revision && !justPublished)
                 throw new PeerFailure(409, "This requested model configuration changed. Review its current values.", "conflict");
             if (existing is null && current.Records.Models.Length >= PeerLimits.Models)
                 throw new PeerFailure(409, "The network model record limit was reached.");
-            var desired = new SharedModel(id, input.Owner, input.Deployment, Next(current, self.Id), alias!, input.Ratings!,
-                Serving: input.Serving ?? existing?.Serving);
-            if (existing is not null && Matches(existing, desired.Alias, desired.Ratings, desired.Serving))
+            var identifiers = localModel?.ProviderIdentifiers ?? current.Records.Catalogs.FirstOrDefault(catalog =>
+                catalog.Node == input.Owner)?.Models.FirstOrDefault(model => model.Id == input.Deployment)?.ProviderIdentifiers ?? [];
+            var desired = new SharedModel(id, input.Owner, input.Deployment, Next(current, self.Id),
+                alias ?? identifiers.FirstOrDefault(ProviderCatalog.ValidAlias), input.Ratings!,
+                Serving: input.Serving ?? existing?.Serving, AliasExplicit: alias is not null);
+            if (existing is not null && existing.AliasExplicit == desired.AliasExplicit &&
+                Matches(existing, desired.UserAlias, desired.Ratings, desired.Serving))
                 return current.Disk;
             return current.Disk with { Records = current.Records.Merge(NetworkRecords.Empty with
             {
@@ -76,7 +80,7 @@ internal sealed partial class PeerNetwork
         if (model.Options.Revision != input.Revision)
             throw new PeerFailure(409, "This model changed. Review its current values.", "conflict");
         var existing = current.Records.Models.FirstOrDefault(item => item.Owner == self.Id && item.Deployment == input.Id);
-        if (existing is not null && !Matches(existing, model.Alias, model.Options.Ratings, ModelServing.Of(model.Options)))
+        if (existing is not null && !Matches(existing, model))
             throw new PeerFailure(409, "A shared model change is pending. Review its requested settings in Serving.");
         await SetModelIntentAsync(request, new(self.Id, input.Id, existing?.Revision, input.Alias, input.Ratings ?? [],
             new(input.ServedContext, input.EmbeddingDimensions,
@@ -95,9 +99,10 @@ internal sealed partial class PeerNetwork
         {
             var self = RequireMember(current);
             RequireAdmin(current, AdminHeader(request));
+            var localModels = providers.View.Models.ToDictionary(model => model.Id, StringComparer.Ordinal);
             var models = current.Records.Models.Where(model => !model.Removed &&
                 current.Nodes.TryGetValue(model.Owner, out var owner) && !owner.Removed &&
-                string.Equals(model.Alias, alias, StringComparison.OrdinalIgnoreCase)).ToArray();
+                string.Equals(CatalogAlias(model, self.Id, localModels), alias, StringComparison.OrdinalIgnoreCase)).ToArray();
             if (models.Length == 0)
                 throw new PeerFailure(404, "No shared deployments have this alias.");
             var revision = Next(current, self.Id);
@@ -246,9 +251,26 @@ internal sealed partial class PeerNetwork
             throw new PeerFailure(409, "This address is already requested on the host or its registration limit was reached.");
     }
 
-    private static bool Matches(SharedModel desired, string alias, Dictionary<string, int?> ratings, ModelServing? serving) =>
-        desired.Alias == alias && (desired.Serving is null || desired.Serving == serving) &&
+    private static bool Matches(SharedModel desired, string? alias, Dictionary<string, int?> ratings, ModelServing? serving) =>
+        desired.UserAlias == alias && SettingsMatch(desired, ratings, serving);
+
+    private static bool Matches(SharedModel desired, Deployment model) => RequestedAlias(desired, model) == model.Alias &&
+        SettingsMatch(desired, model.Options.Ratings, ModelServing.Of(model.Options));
+
+    private static bool SettingsMatch(SharedModel desired, Dictionary<string, int?> ratings, ModelServing? serving) =>
+        (desired.Serving is null || desired.Serving == serving) &&
         desired.Ratings.Count == ratings.Count && desired.Ratings.All(item => ratings.TryGetValue(item.Key, out var value) && value == item.Value);
+
+    private static string? RequestedAlias(SharedModel desired, Deployment model) =>
+        desired.AliasExplicit is null && ProviderCatalog.IsLegacyDefaultAlias(model.Model, desired.Alias) ? null : desired.UserAlias;
+
+    private static string? CatalogAlias(SharedModel desired, Guid? localNode, Dictionary<string, Deployment> localModels)
+    {
+        if (desired.AliasExplicit.HasValue || desired.Owner != localNode)
+            return desired.UserAlias;
+        // The owner needs a provider observation to distinguish a legacy default from a user edit.
+        return localModels.TryGetValue(desired.Deployment, out var observed) ? RequestedAlias(desired, observed) : null;
+    }
 
     private async Task<(Dictionary<Guid, IntentReport> Endpoints, Dictionary<string, IntentReport> Models)> ApplyIntentsAsync(
         CancellationToken cancellation)
@@ -286,8 +308,8 @@ internal sealed partial class PeerNetwork
                 try
                 {
                     var serving = desired.Serving ?? ModelServing.Of(model.Options);
-                    if (!Matches(desired, model.Alias, model.Options.Ratings, ModelServing.Of(model.Options)))
-                        await providers.EditAsync(new(model.Id, desired.Alias, desired.Ratings, serving.ServedContext,
+                    if (!Matches(desired, model))
+                        await providers.EditAsync(new(model.Id, RequestedAlias(desired, model), desired.Ratings, serving.ServedContext,
                             serving.EmbeddingDimensions, serving.EmbeddingFamily, serving.MediaTokensPerItem, model.Options.Revision),
                             cancellation, automatic: true);
                     models[desired.Deployment] = new(desired.Revision, IntentState.Applied);

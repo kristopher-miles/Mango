@@ -15,6 +15,7 @@ addEventListener("hashchange", () => {
 const workspace = document.querySelector("#workspace");
 const status = document.querySelector("#status");
 const startupForm = document.querySelector("#startup");
+const nodePortForm = document.querySelector("#node-port");
 const maintenanceForm = document.querySelector("#maintenance");
 const providerForm = document.querySelector("#provider-form");
 const providerStatus = document.querySelector("#provider-status");
@@ -27,6 +28,7 @@ const stateNames = { contributor: "Contributing", withdrawing: "Withdrawing", co
 const benchmarkNames = { never: "Never", now: "Now", whenConvenient: "When convenient" };
 const writers = new Map();
 let view, settingsWriter, startupWriter;
+let portConflictShown = false;
 const administration = { token: null, expiresAt: null, timer: null, locking: false, pendingRevocation: null };
 
 async function api(path, body, method = body == null ? "GET" : "PUT", administrationToken) {
@@ -218,6 +220,7 @@ function syncLocalPreferences() {
 }
 async function loadSettings() {
   view = await api("settings");
+  renderNodePort(view.nodePort);
   settingsWriter = recordWriter("settings", { value: view.settings, label: "Local preferences", page: "protection/activity",
     read: async () => (await api("settings")).settings,
     write: async ({ changes, expected }) => {
@@ -262,6 +265,32 @@ async function loadSettings() {
   syncLocalPreferences();
   workspace.hidden = false; status.hidden = true;
 }
+function renderNodePort(state) {
+  const warnings = [];
+  if (state.unavailableLoopbackPort !== null)
+    warnings.push(`Local port ${state.unavailableLoopbackPort} is unavailable. Mango opened settings on a temporary port.`);
+  if (state.tailnetPortUnavailable)
+    warnings.push(`Tailscale port ${state.tailnetPort} is unavailable.`);
+  const notice = document.querySelector("#node-port-conflict");
+  notice.textContent = warnings.join(" "); notice.hidden = warnings.length === 0;
+  document.querySelector("#node-port-current").textContent = state.unavailableLoopbackPort === null
+    ? `Local port ${state.loopbackPort} · Tailscale port ${state.tailnetPort}` : `Tailscale port ${state.tailnetPort}`;
+  nodePortForm.elements.port.defaultValue = state.value;
+  if (warnings.length && !portConflictShown) {
+    portConflictShown = true;
+    if (route.page !== "system/ports") navigate("system/ports");
+  }
+}
+nodePortForm.addEventListener("submit", event => {
+  event.preventDefault();
+  const port = nodePortForm.elements.port.valueAsNumber;
+  perform(event.submitter, document.querySelector("#node-port-feedback"), async () => {
+    await api("node-port", { port });
+    await loadSettings();
+    nodePortForm.reset();
+    return `Port ${port} saved. Quit and reopen Mango to apply it.`;
+  });
+});
 document.querySelector("#settings-memory").elements.acceptReducedReserve.addEventListener("change", () => { syncLocalPreferences(); settingsWriter?.flush(); });
 async function loadRelease() {
   const state = await api("release");

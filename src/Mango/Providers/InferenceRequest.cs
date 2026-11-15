@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Buffers.Binary;
+using System.Buffers.Text;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text;
@@ -28,12 +29,11 @@ internal sealed record InferenceShape(string Alias, InferenceOperation Operation
             ? context ?? ProviderLimits.MaxContext : WorkUnits, Items, MediaItems);
 
     public bool Fits(string[] inputs, bool tools, bool structured, int? context, int? mediaTokens,
-        int? dimensions, string[]? encodings, bool allowUnverifiedContext = false)
+        string[]? encodings, bool allowUnverifiedContext = false)
     {
         if (!Inputs.All(inputs.Contains) || Tools && !tools || Structured && !structured)
             return false;
-        if (Operation == InferenceOperation.Embeddings && (dimensions is null ||
-            Dimensions is not null && Dimensions != dimensions || encodings?.Contains(Encoding) != true))
+        if (Operation == InferenceOperation.Embeddings && encodings?.Contains(Encoding) != true)
             return false;
         if (Operation is not (InferenceOperation.Chat or InferenceOperation.Embeddings or InferenceOperation.SystemOne))
             return true;
@@ -44,7 +44,7 @@ internal sealed record InferenceShape(string Alias, InferenceOperation Operation
             allowUnverifiedContext && CanCountPrompt && MediaItems == 0 && output < limit;
     }
 
-    public bool Valid => Alias is { Length: > 0 and <= 200 } && Enum.IsDefined(Operation) &&
+    public bool Valid => ProviderIdentity.ValidIdentifier(Alias) && Enum.IsDefined(Operation) &&
         Inputs is { Length: <= 3 } && Inputs.All(input => input is "text" or "image" or "audio") &&
         PromptUnits is >= 0 and <= 128L * ProviderLimits.MaxRequestBytes && OutputUnits >= 0 &&
         MediaItems is >= 0 and <= ProviderLimits.MaxRequestBytes && Items is >= 1 and <= 128 &&
@@ -73,7 +73,8 @@ internal sealed class InferenceRequest(InferenceOperation operation, string alia
         if (operation != InferenceOperation.Chat || Bytes > 1024 * 1024 || json?["messages"] is not JsonArray messages)
             return [];
         var prefix = ProviderIdentity.Hash(json["tools"]?.ToJsonString(), json["tool_choice"]?.ToJsonString(),
-            json["response_format"]?.ToJsonString(), json["reasoning_effort"]?.ToJsonString());
+            json["response_format"]?.ToJsonString(), json["reasoning_effort"]?.ToJsonString(),
+            json["chat_template_kwargs"]?.ToJsonString());
         var hashes = new List<string>();
         foreach (var message in messages.Take(32))
         {
@@ -100,7 +101,7 @@ internal sealed class InferenceRequest(InferenceOperation operation, string alia
     private static readonly string[] ChatFields = ("model messages stream stream_options max_tokens max_completion_tokens " +
         "temperature top_p top_k min_p typical_p frequency_penalty presence_penalty repetition_penalty repeat_penalty " +
         "stop seed n logprobs top_logprobs logit_bias response_format tools tool_choice parallel_tool_calls " +
-        "reasoning_effort user").Split(' ');
+        "reasoning_effort chat_template_kwargs user").Split(' ');
     private static readonly string[] EmbeddingFields = ["model", "input", "dimensions", "encoding_format", "user"];
     private static readonly string[] ImageFields = ("model prompt n size width height response_format " +
         "seed steps guidance negative_prompt stream user").Split(' ');
@@ -132,7 +133,7 @@ internal sealed class InferenceRequest(InferenceOperation operation, string alia
                     if (!TranscriptionFields.Contains(entry.Key, StringComparer.Ordinal) ||
                         entry.Value.Count != 1 && !entry.Key.EndsWith("[]", StringComparison.Ordinal))
                         throw new ProviderFailure(400, "The transcription form contains an unsupported or repeated field.");
-                var audio = new InferenceRequest(operation, RequireAlias(form["model"].ToString()), null, form);
+                var audio = new InferenceRequest(operation, RequireIdentifier(form["model"].ToString()), null, form);
                 audio.SetShape(request.ContentLength ?? form.Files[0].Length + form.Sum(entry => entry.Value.ToString().Length * 4L) + 4096);
                 return audio;
             }
@@ -149,7 +150,7 @@ internal sealed class InferenceRequest(InferenceOperation operation, string alia
                 _ => DecisionFields
             });
             RequireMediaScope(request.HttpContext, operation, payload);
-            var result = new InferenceRequest(operation, RequireAlias(String(payload["model"])), payload, null);
+            var result = new InferenceRequest(operation, RequireIdentifier(String(payload["model"])), payload, null);
             result.SetShape(request.ContentLength ?? Encoding.UTF8.GetByteCount(payload.ToJsonString(WireJson)));
             return result;
         }
@@ -311,7 +312,7 @@ internal sealed class InferenceRequest(InferenceOperation operation, string alia
         {
             var bytes = await ProviderAdapter.ReadBoundedAsync(response.Content, ProviderLimits.MaxRequestBytes, cancellation);
             Settled = true;
-            CheckEmbeddingResult(bytes, deployment.EmbeddingDimensions!.Value, embeddingEncoding, embeddingCount);
+            CheckEmbeddingResult(bytes, embeddingEncoding, embeddingCount);
             firstOutput = Stopwatch.GetElapsedTime(send);
             statistics?.Add(bytes);
             for (var offset = 0; offset < bytes.Length; offset += 16 * 1024)
@@ -592,9 +593,6 @@ internal sealed class InferenceRequest(InferenceOperation operation, string alia
         var encoding = String(payload["encoding_format"]) ?? "float";
         if (!deployment.Model.EmbeddingEncodings.Contains(encoding))
             throw new ProviderFailure(422, "The deployment does not support this embedding encoding.");
-        if (deployment.EmbeddingDimensions is not { } dimensions ||
-            payload["dimensions"] is { } requested && Positive(requested, "dimensions") != dimensions)
-            throw new ProviderFailure(422, "The requested embedding dimensions do not match the deployment.");
         var rows = EmbeddingRows(payload);
         var largest = 0;
         var allReported = true;
@@ -620,7 +618,7 @@ internal sealed class InferenceRequest(InferenceOperation operation, string alia
         throw new ProviderFailure(400, "Supply text, token IDs, or a bounded batch of one input type.");
     }
 
-    private static void CheckEmbeddingResult(byte[] bytes, int dimensions, string encoding, int count)
+    private static void CheckEmbeddingResult(byte[] bytes, string encoding, int count)
     {
         try
         {
@@ -629,6 +627,7 @@ internal sealed class InferenceRequest(InferenceOperation operation, string alia
             if (data.ValueKind != JsonValueKind.Array || data.GetArrayLength() != count)
                 throw new ProviderFailure(502, "The provider returned an unexpected embedding batch shape.");
             var indexes = new HashSet<int>();
+            int? vectorLength = null;
             foreach (var row in data.Items())
             {
                 var index = row.Get("index");
@@ -636,20 +635,27 @@ internal sealed class InferenceRequest(InferenceOperation operation, string alia
                     value < 0 || value >= count || !indexes.Add(value))
                     throw new ProviderFailure(502, "The provider returned invalid embedding indexes.");
                 var embedding = row.Get("embedding");
-                var matches = encoding == "float"
-                    ? embedding.ValueKind == JsonValueKind.Array && embedding.GetArrayLength() == dimensions &&
-                      embedding.Items().All(item => item.ValueKind == JsonValueKind.Number)
-                    : embedding.ValueKind == JsonValueKind.String &&
-                      Convert.TryFromBase64String(embedding.GetString()!, new byte[dimensions * sizeof(float)], out var size) &&
-                      size == dimensions * sizeof(float);
-                if (!matches)
-                    throw new ProviderFailure(502, "The provider returned incompatible embedding dimensions or encoding.");
+                var length = EmbeddingLength(embedding, encoding);
+                if (length == 0 || vectorLength is { } first && length != first)
+                    throw new ProviderFailure(502, "The provider returned invalid or inconsistent embedding vectors.");
+                vectorLength = length;
             }
         }
         catch (JsonException)
         {
             throw new ProviderFailure(502, "The provider returned invalid embedding data.");
         }
+    }
+
+    private static int EmbeddingLength(JsonElement embedding, string encoding)
+    {
+        if (encoding == "float")
+            return embedding.ValueKind == JsonValueKind.Array &&
+                embedding.EnumerateArray().All(item => item.ValueKind == JsonValueKind.Number)
+                ? embedding.GetArrayLength() : 0;
+        return embedding.ValueKind == JsonValueKind.String &&
+            Base64.IsValid(embedding.GetString(), out var bytes) && bytes % sizeof(float) == 0
+            ? bytes / sizeof(float) : 0;
     }
 
     private static void CheckImage(JsonObject payload)
@@ -756,8 +762,8 @@ internal sealed class InferenceRequest(InferenceOperation operation, string alia
     private static string? String(JsonNode? node) =>
         node is JsonValue value && value.TryGetValue<string>(out var text) ? text : null;
 
-    private static string RequireAlias(string? value) => value is { Length: > 0 and <= 200 } ? value
-        : throw new ProviderFailure(400, "Specify a Mango model alias.");
+    private static string RequireIdentifier(string? value) => ProviderIdentity.ValidIdentifier(value) ? value!
+        : throw new ProviderFailure(400, "Specify a model identifier or a user-set alias.");
 
     private static void RequireFields(JsonObject payload, string[] allowed)
     {

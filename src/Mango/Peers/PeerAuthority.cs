@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Http.Json;
+using System.Collections.Concurrent;
 using System.Text.Json;
 using Mango.Host;
 
@@ -13,6 +14,8 @@ internal sealed record EnrollmentRequest(Guid Network, Guid Node, string Device,
 internal sealed record NetworkSetup(NetworkIdentity Identity, Guid Node, string? RecoveryRecord);
 internal sealed record UnlockRequest(string? Password);
 internal sealed record RecoverRequest(string? RecoveryRecord, string? NewPassword);
+internal sealed record ChangePasswordRequest(string? NewPassword, bool AllowPending = false);
+internal sealed record PasswordChangeResult(string[] UnreachableNodes, PushResult? Delivery);
 internal sealed record ResetRequest(bool Confirm, string? NewPassword);
 internal sealed record KeyIssueRequest(string? Name, InferenceScope[]? Scopes, KeyPriority? Priority, bool? NeverExpires,
     DateTimeOffset? ExpiresAt);
@@ -264,6 +267,42 @@ internal sealed partial class PeerNetwork
     {
         if (!HasAdmin(current, token))
             throw new PeerFailure(403, "Unlock network administration with the master password.", "admin_required");
+    }
+
+    public async Task<PasswordChangeResult> ChangePasswordAsync(HttpRequest request, ChangePasswordRequest input,
+        CancellationToken cancellation)
+    {
+        var baseline = Snapshot;
+        var admin = AdminHeader(request);
+        RequireMember(baseline);
+        RequireAdmin(baseline, admin);
+        PeerCredentials.ValidatePassword(input.NewPassword);
+        var peers = baseline.Others.ToArray();
+        var pending = new ConcurrentBag<string>();
+        await Parallel.ForEachAsync(peers, new ParallelOptions { MaxDegreeOfParallelism = 12, CancellationToken = cancellation },
+            async (peer, token) =>
+            {
+                if (await SendAsync<object>(baseline, peer, "ping", null, token) is not { Authenticated: true })
+                    pending.Add(peer.Name);
+            });
+        var unreachable = pending.Order(StringComparer.OrdinalIgnoreCase).ToArray();
+        if (unreachable.Length != 0 && !input.AllowPending)
+        {
+            RequireAdmin(Snapshot, admin);
+            return new(unreachable, null);
+        }
+
+        var (before, after) = await ChangeAsync(current =>
+        {
+            var self = RequireMember(current);
+            RequireAdmin(current, admin);
+            if (!current.Others.Select(peer => peer.Id).SequenceEqual(peers.Select(peer => peer.Id)))
+                throw new PeerFailure(409, "Network membership changed while checking computers. Try again.");
+            var authority = current.Records.Authority!;
+            var replacement = PeerCredentials.Password(input.NewPassword, authority.RecoveryVerifier, Next(current, self.Id));
+            return current.Disk with { Records = current.Records with { Authority = replacement } };
+        }, cancellation);
+        return new(unreachable, await PushChangesAsync(before, after, stopping.Token));
     }
 
     public async Task<PushResult> RecoverAsync(RecoverRequest input, CancellationToken cancellation)

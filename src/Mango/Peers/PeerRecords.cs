@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Mango.Host;
 using Mango.Logging;
 using Mango.Providers;
@@ -33,8 +34,12 @@ internal sealed record PeerNode(Guid Id, string Device, string Name, string Addr
     Revision Revision, string Verifier, bool Removed = false);
 internal sealed record InferenceKey(Guid Id, string Name, InferenceScope[] Scopes, KeyPriority Priority,
     DateTimeOffset? ExpiresAt, Guid CreatedBy, Revision Revision, string Verifier, bool Revoked = false);
-internal sealed record SharedModel(string Id, Guid Owner, string Deployment, Revision Revision, string Alias,
-    Dictionary<string, int?> Ratings, bool Removed = false, ModelServing? Serving = null);
+internal sealed record SharedModel(string Id, Guid Owner, string Deployment, Revision Revision, string? Alias,
+    Dictionary<string, int?> Ratings, bool Removed = false, ModelServing? Serving = null, bool? AliasExplicit = null)
+{
+    // Older peers read Alias as the routing name. Use a native ID there when they can read it.
+    [JsonIgnore] public string? UserAlias => AliasExplicit == false ? null : Alias;
+}
 internal sealed record SharedProvider(Guid Id, Guid Owner, Revision Revision, ProviderProfile Profile, string Address, bool Enabled);
 internal sealed record IntentReport(Revision Revision, IntentState State, string? Reason = null);
 internal sealed record ObservedProvider(Guid Id, ProviderProfile? Profile, string? Address, string? Version,
@@ -46,7 +51,8 @@ internal sealed record ObservedDeployment(string Id, string DisplayName, string?
     int? MediaTokensPerItem = null, string[]? EmbeddingEncodings = null, string? PlacementEpoch = null,
     ObservedWorkload[]? Workloads = null, Guid? Endpoint = null, string? EffectiveAlias = null,
     Dictionary<string, int?>? EffectiveRatings = null, ModelServing? EffectiveServing = null, IntentReport? Intent = null,
-    bool Busy = false, int BenchmarksComplete = 0, int BenchmarksPartial = 0, ServingReadiness? Readiness = null);
+    bool Busy = false, int BenchmarksComplete = 0, int BenchmarksPartial = 0, ServingReadiness? Readiness = null,
+    ModelOrigin? Origin = null, string? SourceDevice = null, string[]? ProviderIdentifiers = null);
 internal sealed record ObservedWorkload(Workload Limit, double? PromptMilliseconds, double? CacheSavingsMilliseconds, int Slots = 1);
 internal sealed record NodeCatalog(Guid Node, Revision Revision, string Name, LocalRole Role, ObservedDeployment[] Models,
     ContributionState? ResourceState = null, string? SchedulingEpoch = null, ObservedProvider[]? Providers = null,
@@ -237,7 +243,7 @@ internal static class PeerValidation
 
     public static bool ValidModelSettings(string? alias, Dictionary<string, int?>? ratings, ModelServing? serving)
     {
-        if (alias is null || ratings is null)
+        if (ratings is null)
             return false;
         var options = new ModelOptions(alias, ratings, null, null, null, null, 0);
         try { ProviderCatalog.ValidateModel(serving?.ApplyTo(options) ?? options); return true; }
@@ -297,9 +303,12 @@ internal static class PeerValidation
                 (catalog.SchedulingEpoch is null || Guid.TryParseExact(catalog.SchedulingEpoch, "N", out _)) &&
                 catalog.Models is { Length: <= PeerLimits.ModelsPerNode } &&
                 catalog.Models.All(model => model is not null && Text(model.Id, 128) && Text(model.DisplayName, 512) &&
+                    (model.Origin is null || Enum.IsDefined(model.Origin.Value)) && (model.SourceDevice is null || Text(model.SourceDevice, 100)) &&
                     model.Inputs is { Length: <= 16 } && model.Outputs is { Length: <= 16 } &&
                     model.Operations is { Length: <= 6 } && model.Operations.All(Enum.IsDefined) &&
                     model.EmbeddingEncodings is null or { Length: <= 8 } &&
+                    (model.ProviderIdentifiers is null || model.ProviderIdentifiers.Length <= 2 &&
+                        model.ProviderIdentifiers.All(ProviderIdentity.ValidIdentifier)) &&
                     (model.EffectiveAlias is null || ValidModelSettings(model.EffectiveAlias, model.EffectiveRatings, model.EffectiveServing)) &&
                     ValidIntent(model.Intent) && model.BenchmarksComplete is >= 0 and <= 6 && model.BenchmarksPartial is >= 0 and <= 6 &&
                     (model.Readiness is null || Text(model.Readiness.State, 40) && Text(model.Readiness.Reason, 600) &&

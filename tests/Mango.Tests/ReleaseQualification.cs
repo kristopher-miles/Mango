@@ -96,10 +96,10 @@ internal static partial class PeerChecks
                     mediaItems = 0, loadRamMiB = 1024, executeRamMiB = 128, parallelSlots = 1,
                     allowOverlap = false, allowAttached = true
                 }, expected: 204);
-            var ownAlias = catalog[0].GetProperty("alias").GetString()!;
+            var ownModel = catalog[0].GetProperty("providerIdentifiers")[0].GetString()!;
             await WaitFor(async () => (await LocalCall("network")).GetProperty("models").GetArrayLength() == 100);
             var knownKey = PeerCredentials.Key(keyId, keySecret);
-            var body = new { model = ownAlias, messages = new[] { new { role = "user", content = "release qualification" } }, max_tokens = 16 };
+            var body = new { model = ownModel, messages = new[] { new { role = "user", content = "release qualification" } }, max_tokens = 16 };
             var inference = origin + "/v1/chat/completions";
             async Task Send() => await Request(http, HttpMethod.Post, inference, knownKey, body);
             await Send();

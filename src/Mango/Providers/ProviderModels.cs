@@ -8,6 +8,7 @@ internal enum ProviderProfile { LmStudio, UnslothStudio, UnslothRun, LlamaSingle
 internal enum ProviderMode { Attached, Managed }
 internal enum InferenceOperation { Chat, Embeddings, Images, Transcription, Speech, SystemOne }
 internal enum LimitSource { Reported, Configured }
+internal enum ModelOrigin { Local, LmLink }
 
 internal sealed record ProviderEndpoint(Guid Id, ProviderProfile Profile, ProviderMode Mode, string Address,
     string? ProtectedToken, string? Executable, string? ModelFile);
@@ -16,8 +17,11 @@ internal sealed record EndpointUpdate(Guid? Id, [property: JsonRequired] Provide
     [property: JsonRequired] ProviderMode Mode, string? Address,
     string? Token, bool ClearToken, string? Executable, string? ModelFile, string? ExpectedConfiguration = null);
 
-internal sealed record ModelOptions(string Alias, Dictionary<string, int?> Ratings, int? ServedContext,
-    int? EmbeddingDimensions, string? EmbeddingFamily, int? MediaTokensPerItem, long Revision);
+internal sealed record ModelOptions(string? Alias, Dictionary<string, int?> Ratings, int? ServedContext,
+    int? EmbeddingDimensions, string? EmbeddingFamily, int? MediaTokensPerItem, long Revision, bool ServingDisabled = false,
+    bool? ServingOverride = null, bool? AliasExplicit = null);
+
+internal sealed record ModelServingUpdate([property: JsonRequired] bool Enabled);
 
 internal sealed record ModelUpdate(string Id, string? Alias, Dictionary<string, int?>? Ratings, int? ServedContext,
     int? EmbeddingDimensions, string? EmbeddingFamily, int? MediaTokensPerItem, long Revision);
@@ -49,7 +53,8 @@ internal sealed record ProviderModel(string Id, string NativeId, string Manageme
     string? Variant, string[] Inputs, string[] Outputs, InferenceOperation[] Operations, ProviderInstance[] Instances,
     int? TheoreticalContext, bool ClientTools, bool StructuredOutput, int? EmbeddingDimensions,
     string[] EmbeddingEncodings, long? ArtifactBytes = null, bool Installed = true,
-    bool SupportsLoad = true, bool SupportsUnload = true, string? Format = null);
+    bool SupportsLoad = true, bool SupportsUnload = true, string? Format = null,
+    ModelOrigin? Origin = null, string? SourceDevice = null, bool AmbiguousInstance = false);
 
 internal sealed record ProviderInventory(string? Version, ProviderModel[] Models, bool CanLoad, bool CanUnload,
     bool CanStop, int? OwnedProcessId = null, int? MaxLoadedModels = null);
@@ -58,18 +63,23 @@ internal sealed record Deployment(Guid EndpointId, ProviderModel Model, ModelOpt
     string? Version, string? Configuration = null, string? PlacementEpoch = null)
 {
     public string Id => Model.Id;
-    public string Alias => Options.Alias;
+    public string? Alias => Options.Alias;
     public ProviderInstance? Instance => Model.Instances.FirstOrDefault(instance => !instance.Busy)
         ?? Model.Instances.FirstOrDefault();
+    public string[] ProviderIdentifiers => new[] { Model.NativeId, Instance?.Id }
+        .OfType<string>().Where(ProviderIdentity.ValidIdentifier).Distinct(StringComparer.Ordinal).ToArray();
+    public bool AcceptsIdentifier(string identifier) => ProviderIdentifiers.Contains(identifier, StringComparer.Ordinal) ||
+        string.Equals(Alias, identifier, StringComparison.OrdinalIgnoreCase);
     public int? Context => Instance?.Context ?? Options.ServedContext;
     public LimitSource? ContextSource => Instance?.Context is not null ? LimitSource.Reported
         : Options.ServedContext is not null ? LimitSource.Configured : null;
     public int? EmbeddingDimensions => Model.EmbeddingDimensions ?? Options.EmbeddingDimensions;
     public string EmbeddingSpace => Options.EmbeddingFamily is { } family ? $"family:{family}" : Id;
-    public bool Eligible => Online && Model.Installed && Instance is not null && Model.Operations.Any(operation => operation switch
+    public bool ServingDisabled => Options.ServingOverride is { } enabled ? !enabled
+        : Options.ServingDisabled || Model.Origin == ModelOrigin.LmLink;
+    public bool Eligible => !ServingDisabled && Online && Model.Installed && Instance is not null && Model.Operations.Any(operation => operation switch
     {
-        InferenceOperation.Chat or InferenceOperation.SystemOne => Context is not null,
-        InferenceOperation.Embeddings => Context is not null && EmbeddingDimensions is not null,
+        InferenceOperation.Chat or InferenceOperation.Embeddings or InferenceOperation.SystemOne => Context is not null,
         _ => true
     });
     public bool Available => Eligible && !Busy && Instance is { Busy: false };
@@ -102,6 +112,9 @@ internal sealed class ProviderFailure(int status, string message, bool allocatio
 
 internal static class ProviderIdentity
 {
+    public static bool ValidIdentifier(string? value) =>
+        value is { Length: > 0 and <= 512 } && !string.IsNullOrWhiteSpace(value) && !value.Any(char.IsControl);
+
     public static string Hash(params string?[] parts) =>
         Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(string.Join('\0', parts))));
 

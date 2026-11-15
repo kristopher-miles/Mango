@@ -90,7 +90,7 @@ internal sealed partial class ResourceProtection
             var targets = Targets(catalog).Select(target => new
             {
                 Id = target.Model.Id,
-                target.Model.Alias,
+                identifier = target.Model.Alias ?? target.Model.Model.NativeId,
                 target.Operation,
                 Budget = target.Budget,
                 QualificationConfiguration = target.Configuration + ":" + target.Model.Instance?.ResourceFingerprint,
@@ -180,6 +180,8 @@ internal sealed partial class ResourceProtection
     {
         var target = Targets(providers.View).FirstOrDefault(item => item.Model.Id == deployment && item.Operation == operation)
             ?? throw new ProviderFailure(404, "This deployment was not found.");
+        if (target.Model.ServingDisabled)
+            throw new ProviderFailure(409, "Enable serving for this model before benchmarking it.");
         if (target.Budget is not { } budget)
             throw new ProviderFailure(409, "Set a local memory limit before benchmarking this deployment.");
         lock (sync)
@@ -222,8 +224,8 @@ internal sealed partial class ResourceProtection
         var stored = store.Value.Budgets.FirstOrDefault(item => item.Deployment == model.Id &&
             item.Workload.Operation == operation && item.Configuration == configuration &&
             (item.Runtime is null || runtime is null || item.Runtime == runtime));
-        if (stored is null)
-            return null;
+        stored ??= EstimateBudget(model, operation, configuration, runtime);
+        if (stored is null) return null;
         var profile = MatchProfile(model.Id, operation, configuration, runtime);
         if (profile is null)
             return stored;
@@ -238,6 +240,39 @@ internal sealed partial class ResourceProtection
                     run = Maximum(run, observedCost);
             }
         return stored with { Load = load, Execute = run };
+    }
+
+    private ResourceBudget? EstimateBudget(Deployment model, InferenceOperation operation, string configuration, string? runtime)
+    {
+        if (observed is not { Hardware: not null } hardware) return null;
+
+        var text = operation is InferenceOperation.Chat or InferenceOperation.Embeddings or InferenceOperation.SystemOne;
+        var context = Math.Clamp(model.Context ?? model.Model.TheoreticalContext ?? 4096, 1, ProviderLimits.MaxContext);
+        var workload = operation switch
+        {
+            InferenceOperation.Embeddings => new Workload(operation, context, 16),
+            InferenceOperation.SystemOne => new Workload(operation, context, 4, model.Options.MediaTokensPerItem is null ? 0 : 1),
+            InferenceOperation.Chat => new Workload(operation, context, 1, model.Options.MediaTokensPerItem is null ? 0 : 1),
+            InferenceOperation.Images => new Workload(operation, 1024 * 1024),
+            InferenceOperation.Transcription => new Workload(operation, ProviderLimits.MaxAudioBytes),
+            InferenceOperation.Speech => new Workload(operation, 4096),
+            _ => throw new ArgumentOutOfRangeException(nameof(operation))
+        };
+
+        // Reserve working memory in addition to resident weights already counted by Windows.
+        var weightBytes = model.Model.ArtifactBytes.GetValueOrDefault();
+        var limit = (long)LocalSettings.MaximumReserveMiB * MiB;
+        var inputBytes = text ? workload.Units * workload.Items * (operation == InferenceOperation.Embeddings ? 32 * 1024L : 128 * 1024L)
+            : workload.Units * (operation == InferenceOperation.Images ? 64 : 4);
+        if (model.Model.Origin == ModelOrigin.LmLink)
+            return new(model.Id, configuration, runtime, workload, MemoryCost.Empty, new(128 * MiB, []),
+                AllowOverlap: false, Estimated: true);
+        var executeBytes = Math.Min(limit, 256 * MiB + Math.Max(inputBytes, weightBytes / 8));
+        var loadBytes = weightBytes > 0 && weightBytes <= limit - executeBytes ? weightBytes + executeBytes : 0;
+        MemoryCost Cost(long bytes) => new(bytes, hardware.Devices.Where(device => !device.Integrated && device.TotalBytes is not null)
+            .ToDictionary(device => device.Id, _ => bytes));
+        return new(model.Id, configuration, runtime, workload, Cost(loadBytes), Cost(executeBytes),
+            AllowOverlap: false, Estimated: true);
     }
 
     private static MemoryCost Maximum(MemoryCost first, MemoryCost second) => new(Math.Max(first.RamBytes, second.RamBytes),
@@ -301,14 +336,14 @@ internal sealed partial class ResourceProtection
                 !unsafePlacements.Contains(FaultKey(item.Budget)) &&
                 item.Profile?.Error is null && AttributionAllows(item.Endpoint, current, observed, item.Budget.AllowAttached) &&
                 !(requestedBenchmark is null && current.BenchmarkPolicy == BenchmarkPolicy.WhenConvenient &&
-                    item.Model.Instance is not null && item.Model.Id == catalog.Selected && item.CanColdLoad &&
+                    PreserveLoadedBenchmark(item, catalog) && item.CanColdLoad &&
                     item.Profile?.Measurements.Any(pass => pass.Pass is "reuse" or "warm") == true &&
                     !item.Profile.Measurements.Any(pass => pass.Pass == "cold")) &&
                 (item.Model.Instance is not null || item.Endpoint.CanLoad && item.Model.Model.SupportsLoad));
             if (target is null)
                 return;
             var protectSelected = requestedBenchmark is null && current.BenchmarkPolicy == BenchmarkPolicy.WhenConvenient &&
-                target.Model.Id == catalog.Selected;
+                PreserveLoadedBenchmark(target, catalog);
             requestedBenchmark = null;
             benchmarkStop = CancellationTokenSource.CreateLinkedTokenSource(stopping);
             benchmarkDeployment = target.Model.Id;
@@ -322,6 +357,12 @@ internal sealed partial class ResourceProtection
         }
     }
 
+    // LM Studio load defaults do not reproduce a live instance's context, GPU placement or slots.
+    // Background qualification may measure it warm, but must not replace that configuration.
+    private static bool PreserveLoadedBenchmark(Target target, CatalogView catalog) =>
+        target.Model.Instance is not null &&
+        (target.Model.Id == catalog.Selected || target.Endpoint.Profile == ProviderProfile.LmStudio);
+
     private void SetBenchmarkReady(bool ready)
     {
         if (benchmarksReady != ready)
@@ -331,7 +372,8 @@ internal sealed partial class ResourceProtection
         }
     }
 
-    private bool IsPending(Target item) => (item.Model.Online || item.Endpoint.CanLoad) &&
+    private bool IsPending(Target item) => !item.Model.ServingDisabled &&
+        (item.Model.Online && item.Model.Instance is not null || item.Endpoint.CanLoad && item.Model.Model.SupportsLoad) &&
         (item.Profile?.Complete != true || item.Budget is null || unsafePlacements.Contains(FaultKey(item.Budget)));
 
     private void CatalogChanged(CatalogView catalog)
@@ -524,7 +566,7 @@ internal sealed partial class ResourceProtection
             InferenceOperation.Transcription => item.Workload is { Units: <= ProviderLimits.MaxAudioBytes, Items: 1, MediaItems: 0 },
             InferenceOperation.Speech => item.Workload is { Units: <= 4096, Items: 1, MediaItems: 0 },
             InferenceOperation.Chat => item.Workload is { Units: <= ProviderLimits.MaxContext, Items: <= 8 },
-            InferenceOperation.SystemOne => item.Workload is { Units: <= ProviderLimits.MaxContext, Items: 1 },
+            InferenceOperation.SystemOne => item.Workload.Units <= ProviderLimits.MaxContext,
             _ => item.Workload.Units <= ProviderLimits.MaxContext
         }) &&
         ValidCost(item.Load) && ValidCost(item.Execute);

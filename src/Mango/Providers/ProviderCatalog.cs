@@ -233,9 +233,10 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
             var model = Find(input.Id);
             if (model.Options.Revision != input.Revision)
                 throw new ProviderFailure(409, "This model changed. Review its current values.", code: "conflict");
-            var updated = new ModelOptions(input.Alias?.Trim() ?? "", input.Ratings ?? [],
+            var updated = new ModelOptions(BlankToNull(input.Alias), input.Ratings ?? [],
                 input.ServedContext, input.EmbeddingDimensions, BlankToNull(input.EmbeddingFamily),
-                input.MediaTokensPerItem, model.Options.Revision + 1);
+                input.MediaTokensPerItem, model.Options.Revision + 1, model.Options.ServingDisabled, model.Options.ServingOverride,
+                AliasExplicit: true);
             ValidateModel(updated);
             RequireCompatibleAlias(model with { Options = updated }, View.Models);
             if (ModelServing.Of(model.Options) != ModelServing.Of(updated) && WorkInProgress(model.EndpointId))
@@ -246,12 +247,46 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
         finally { ReleaseOperation(); }
     }
 
+    public Task SetServingAsync(string id, bool enabled, CancellationToken cancellation) =>
+        UpdateServingAsync(() => [Find(id)], enabled, cancellation);
+
+    public Task SetProviderServingAsync(Guid id, bool enabled, CancellationToken cancellation) =>
+        UpdateServingAsync(() =>
+        {
+            var catalog = View;
+            if (!catalog.Endpoints.Any(item => item.Id == id))
+                throw new ProviderFailure(404, "Provider endpoint does not exist.");
+            return catalog.Models.Where(model => model.EndpointId == id).ToArray();
+        }, enabled, cancellation);
+
+    private async Task UpdateServingAsync(Func<Deployment[]> select, bool enabled, CancellationToken cancellation)
+    {
+        await operation.WaitAsync(cancellation);
+        try
+        {
+            var changed = select().Where(model => model.Options.ServingOverride != enabled).ToArray();
+            if (changed.Length == 0) return;
+            await store.UpdateAsync(value =>
+            {
+                var models = new Dictionary<string, ModelOptions>(value.Models);
+                foreach (var model in changed)
+                    models[model.Id] = model.Options with
+                    {
+                        ServingDisabled = !enabled, ServingOverride = enabled, Revision = model.Options.Revision + 1
+                    };
+                return value with { Models = models, Selected = !enabled && changed.Any(model => model.Id == value.Selected) ? null : value.Selected };
+            }, cancellation);
+            Publish();
+        }
+        finally { ReleaseOperation(); }
+    }
+
     public async Task ApplyRatingsAsync(string alias, Dictionary<string, int?> ratings, CancellationToken cancellation)
     {
         await operation.WaitAsync(cancellation);
         try
         {
-            var matches = View.Models.Where(item => SameAlias(item.Alias, alias)).ToArray();
+            var matches = View.Models.Where(item => item.Alias is not null && SameAlias(item.Alias, alias)).ToArray();
             if (matches.Length == 0)
                 throw new ProviderFailure(404, "No deployments have this alias.");
             var updated = new Dictionary<string, ModelOptions>(store.Value.Models);
@@ -300,6 +335,8 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
         {
             var model = Find(id);
             target = model;
+            if (load && (scheduled || benchmark.HasValue) && model.ServingDisabled)
+                throw new ProviderFailure(409, "Serving is disabled for this model.");
             var adapter = adapters[model.EndpointId];
             if (WorkInProgress(model.EndpointId, includeUncertain: load))
                 throw new ProviderFailure(409, "Work on this provider must settle before changing model state.");
@@ -455,9 +492,9 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
 
     private ServingPlacement? Placement(InferenceShape shape, Deployment model, CatalogView snapshot, bool allowUnverifiedContext)
     {
-        if (!SameAlias(model.Alias, shape.Alias) || !model.Model.Installed || !model.Model.Operations.Contains(shape.Operation) ||
+        if (model.ServingDisabled || !model.AcceptsIdentifier(shape.Alias) || !model.Model.Installed || !model.Model.Operations.Contains(shape.Operation) ||
             !shape.Fits(model.Model.Inputs, model.Model.ClientTools, model.Model.StructuredOutput, model.Context,
-                model.Options.MediaTokensPerItem, model.EmbeddingDimensions, model.Model.EmbeddingEncodings, allowUnverifiedContext) ||
+                model.Options.MediaTokensPerItem, model.Model.EmbeddingEncodings, allowUnverifiedContext) ||
             uncertainModels.ContainsKey(model.Id))
             return null;
         var endpoint = snapshot.Endpoints.First(item => item.Id == model.EndpointId);
@@ -682,9 +719,10 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
                     var adapter = adapters[endpoint.Id];
                     var ownedPid = adapter.OwnedProcessId;
                     var owned = ownedPid.HasValue;
-                    if (uncertainModels.Values.Contains(endpoint.Id) && !owned)
+                    if (!owned)
                         await RefreshOneAsync(endpoint.Id, deadline.Token);
-                    var models = View.Models.Where(item => item.EndpointId == endpoint.Id && item.Instance is not null).ToArray();
+                    var models = View.Models.Where(item => item.EndpointId == endpoint.Id && item.Instance is not null &&
+                        item.Model.Origin != ModelOrigin.LmLink).ToArray();
                     if (models.Length == 0 && !owned && !uncertainModels.Values.Contains(endpoint.Id))
                         continue;
                     using var unload = CancellationTokenSource.CreateLinkedTokenSource(deadline.Token);
@@ -704,7 +742,7 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
                     await RefreshOneAsync(endpoint.Id, deadline.Token, settleOwnedExit: !owned);
                     var refreshed = View;
                     if ((!owned && !refreshed.Endpoints.Any(item => item.Id == endpoint.Id && item.Online)) ||
-                        refreshed.Models.Any(item => item.EndpointId == endpoint.Id && item.Instance is not null) ||
+                        refreshed.Models.Any(item => item.EndpointId == endpoint.Id && item.Instance is not null && item.Model.Origin != ModelOrigin.LmLink) ||
                         !owned && uncertainModels.Values.Contains(endpoint.Id))
                         return new(released.ToArray(), "Mango could not verify that the managed provider released its models.");
                     released.Add(new(endpoint.Id, ownedPid));
@@ -797,7 +835,9 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
                 inventory?.MaxLoadedModels, observation?.CredentialNeeded == true, ConfigurationRevision(endpoint)));
             foreach (var model in inventory?.Models ?? [])
             {
-                var options = value.Models.GetValueOrDefault(model.Id) ?? new ModelOptions(DefaultAlias(model), [], null, null, null, null, 0);
+                var options = value.Models.GetValueOrDefault(model.Id) ?? new ModelOptions(null, [], null, null, null, null, 0);
+                if (options.AliasExplicit is null && IsLegacyDefaultAlias(model, options.Alias))
+                    options = options with { Alias = null };
                 var configuration = ProviderIdentity.Hash(endpoint.Profile.ToString(), endpoint.Mode.ToString(), endpoint.Address,
                     FileStamp(endpoint.Executable), FileStamp(endpoint.ModelFile), options.ServedContext?.ToString(),
                     options.EmbeddingDimensions?.ToString(), options.MediaTokensPerItem?.ToString());
@@ -877,11 +917,14 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
     private Deployment Find(string id) => View.Models.FirstOrDefault(item => item.Id == id)
         ?? throw new ProviderFailure(404, "The deployment was not found in the local inventory.");
 
-    private static string DefaultAlias(ProviderModel model)
+    internal static bool IsLegacyDefaultAlias(ProviderModel model, string? alias)
     {
+        if (alias is null)
+            return false;
         var basename = model.NativeId.Contains('\\') || Path.IsPathRooted(model.NativeId)
             ? Path.GetFileNameWithoutExtension(model.NativeId) : model.NativeId;
-        return ValidAlias(basename) ? basename : $"model-{model.Id[..12].ToLowerInvariant()}";
+        return ValidAlias(basename) ? string.Equals(alias, basename, StringComparison.Ordinal)
+            : string.Equals(alias, $"model-{model.Id[..12].ToLowerInvariant()}", StringComparison.Ordinal);
     }
 
     internal static string DefaultAddress(ProviderProfile profile) => profile switch
@@ -952,7 +995,7 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
 
     internal static void ValidateModel(ModelOptions value)
     {
-        if (value is null || !ValidAlias(value.Alias) || value.Ratings is null || value.Ratings.Count > 64 ||
+        if (value is null || value.Alias is not null && !ValidAlias(value.Alias) || value.Ratings is null || value.Ratings.Count > 64 ||
             value.Ratings.Any(rating => string.IsNullOrWhiteSpace(rating.Key) || rating.Key.Length > 100 ||
                 rating.Key.Any(char.IsControl) || rating.Value is < 0 or > 5) ||
             value.ServedContext is < 1 or > ProviderLimits.MaxContext ||
@@ -964,7 +1007,9 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
 
     internal static void RequireCompatibleAlias(Deployment model, IEnumerable<Deployment> others)
     {
-        foreach (var other in others.Where(item => item.Id != model.Id && SameAlias(item.Alias, model.Alias)))
+        if (model.Alias is null)
+            return;
+        foreach (var other in others.Where(item => !item.ServingDisabled && item.Id != model.Id && SameAlias(item.Alias, model.Alias)))
         {
             if (!model.Model.Inputs.ToHashSet().SetEquals(other.Model.Inputs) ||
                 !model.Model.Outputs.ToHashSet().SetEquals(other.Model.Outputs))
@@ -976,9 +1021,9 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
         }
     }
 
-    private static bool ValidAlias(string? value) => value is { Length: > 0 and <= 200 } && !SameAlias(value, "best") &&
+    internal static bool ValidAlias(string? value) => value is { Length: > 0 and <= 200 } && !SameAlias(value, "best") &&
         value.All(character => char.IsAsciiLetterOrDigit(character) || character is '.' or '-' or '_' or '/' or ':');
-    private static bool SameAlias(string left, string right) => string.Equals(left, right, StringComparison.OrdinalIgnoreCase);
+    private static bool SameAlias(string? left, string? right) => string.Equals(left, right, StringComparison.OrdinalIgnoreCase);
     private static string? BlankToNull(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
     private static string ConfigurationRevision(ProviderEndpoint endpoint) => ProviderIdentity.Hash(
         endpoint.Id.ToString(), endpoint.Profile.ToString(), endpoint.Mode.ToString(), endpoint.Address,

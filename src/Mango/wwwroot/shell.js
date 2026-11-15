@@ -18,6 +18,7 @@
     "protection/memory": ["Memory reserves", "Leave room for your operating system and other work."],
     "protection/benchmarks": ["Benchmarks", "Choose when Mango may qualify local models."],
     "system/startup": ["Windows startup", "Choose how Mango starts on this computer."],
+    "system/ports": ["Node port", "Choose the port clients use to reach this computer."],
     "system/updates": ["Updates", "Release availability and local maintenance preferences."],
     "system/logging": ["Logging policy", "Choose what is retained, for how long, and where day boundaries fall."],
     "system/data": ["Data", "Local storage and retained-record clearing."]
@@ -27,7 +28,7 @@
     activity: [["activity/live", "Live"], ["activity/history", "History"]],
     network: ["nodes", "queue", "keys", "public", "recovery", "setup"].map(x => [`network/${x}`, { nodes: "Computers", queue: "Queue", keys: "Keys", public: "Public access", recovery: "Recovery", setup: "Setup" }[x]]),
     protection: [["protection/activity", "Activity"], ["protection/memory", "Memory"], ["protection/benchmarks", "Benchmarks"]],
-    system: [["system/startup", "Startup"], ["system/updates", "Updates"], ["system/logging", "Logging policy"], ["system/data", "Data"]]
+    system: [["system/startup", "Startup"], ["system/ports", "Node port"], ["system/updates", "Updates"], ["system/logging", "Logging policy"], ["system/data", "Data"]]
   };
   const aliases = { "private-network": "network/nodes", providers: "serving", models: "serving",
     "live-requests": "activity/live", "public-inference": "network/public", logging: "activity/history", settings: "protection/activity",

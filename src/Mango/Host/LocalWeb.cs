@@ -11,13 +11,14 @@ namespace Mango.Host;
 
 internal sealed class LocalWeb
 {
+    internal const int DefaultPort = 53781;
     private const string LoopbackHost = "127.0.0.1";
     private readonly string token = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
 
     public string BrowserUrl(string origin) => $"{origin}/#session={token}";
 
     public WebApplication Build(int port, string dataDirectory, SnapshotFile<LocalSettings> settings, LoginStartup startup,
-        ProviderCatalog providers, PeerNetwork peers, PublicIngress? ingress = null)
+        ProviderCatalog providers, PeerNetwork peers, PublicIngress? ingress = null, int? unavailablePort = null)
     {
         var builder = WebApplication.CreateSlimBuilder(new WebApplicationOptions
         {
@@ -63,6 +64,12 @@ internal sealed class LocalWeb
             }
             if (context.Request.Path.StartsWithSegments("/v1"))
             {
+                if (unavailablePort is not null)
+                {
+                    context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+                    await context.Response.WriteAsJsonAsync(new { error = new { message = "The local inference port is unavailable. Open Mango's Node port settings." } });
+                    return;
+                }
                 headers.CacheControl = "no-store";
                 await peers.InferenceAsync(context, next, HasSession(context));
                 return;
@@ -74,13 +81,21 @@ internal sealed class LocalWeb
 
         var defaultRamMiB = LocalSettings.DefaultRamReserveMiB(WindowsMemory.PhysicalBytes());
         var local = app.MapGroup("/api/local");
-        local.MapGet("/settings", () =>
+        local.MapGet("/settings", (HttpContext context) =>
         {
             var current = settings.Value;
             return new
             {
                 dataDirectory,
                 settings = current,
+                nodePort = new
+                {
+                    value = current.NodePort ?? (unavailablePort ?? (port == 0 ? peers.ServicePort : port)),
+                    loopbackPort = context.Connection.LocalPort,
+                    unavailableLoopbackPort = unavailablePort,
+                    tailnetPort = peers.ServicePort,
+                    tailnetPortUnavailable = peers.ServicePortUnavailable
+                },
                 defaultRamReserveMiB = defaultRamMiB,
                 defaultVramReserveMiB = LocalSettings.DefaultVramReserveMiB,
                 effectiveRamReserveMiB = current.EffectiveRamReserveMiB(defaultRamMiB),
@@ -106,7 +121,8 @@ internal sealed class LocalWeb
                     {
                         ReducedReserveConsent = current.ReducedReserveConsent || (reduced && update.AcceptReducedReserve),
                         MaintenanceDeferred = current.MaintenanceDeferred,
-                        DailyUpdates = current.DailyUpdates
+                        DailyUpdates = current.DailyUpdates,
+                        NodePort = current.NodePort
                     };
                 }, cancellationToken);
                 return Results.NoContent();
@@ -120,6 +136,14 @@ internal sealed class LocalWeb
                 return Results.Problem(title: "Mango could not save local settings.", detail: error.Message);
             }
         });
+        local.MapPut("/node-port", (NodePortUpdate update, HttpContext context) => PeerRoutes.HandleAsync(context, async token =>
+        {
+            if (update.Port is < 1 or > 65535)
+                throw new PeerFailure(400, "Enter a port between 1 and 65535.");
+            if (ingress?.ConfiguredPort == update.Port)
+                throw new PeerFailure(409, "Choose a different port from the public HTTPS upstream.");
+            await settings.UpdateAsync(current => current with { NodePort = update.Port }, token);
+        }));
         local.MapPut("/startup", (StartupUpdate update) =>
         {
             try
@@ -199,6 +223,7 @@ internal sealed class LocalWeb
 
     private sealed record SettingsUpdate(LocalSettings? Settings, bool AcceptReducedReserve);
     private sealed record StartupUpdate([property: JsonRequired] bool Enabled);
+    private sealed record NodePortUpdate([property: JsonRequired] int Port);
     private sealed record MaintenanceUpdate([property: JsonRequired] bool Deferred, bool? Daily);
     private sealed record ShareUpdate(bool AllowPartial);
 }

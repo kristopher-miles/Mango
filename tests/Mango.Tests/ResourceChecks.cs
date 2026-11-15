@@ -16,6 +16,7 @@ internal static class ResourceChecks
 
     public static async Task RunAsync(string root)
     {
+        await CheckLoadedLmStudioBenchmarkAsync(root);
         var directory = Directory.CreateDirectory(Path.Combine(root, "resources")).FullName;
         var settings = new SnapshotFile<LocalSettings>(Path.Combine(directory, "local-settings.json"), LocalSettings.Validate);
         await settings.LoadAsync(new LocalSettings
@@ -75,7 +76,13 @@ internal static class ResourceChecks
         var update = new BudgetUpdate(model.Id, Chat.Operation, Chat.Units, 1, 0, 1200, 600, null, null,
             AllowOverlap: true, ParallelSlots: 2, AllowAttached: true);
         resources.ApplyObservation(Sample(clock.GetUtcNow()));
-        Check(resources.Readiness(model, endpoint, Chat.Operation).State == "limits", "readiness identifies absent local qualification");
+        var managed = endpoint with { Mode = ProviderMode.Managed, CanLoad = true, CanUnload = true };
+        Check(resources.Readiness(model, managed, Chat.Operation) is { State: "ready", Available: true } &&
+            resources.Estimate(model, managed, Chat.Operation) is { Estimated: true, Workload.Items: 1, AllowOverlap: false } &&
+            resources.Estimate(model, managed, InferenceOperation.Embeddings) is { Estimated: true, Workload.Items: 16 } &&
+            resources.Estimate(model, managed, InferenceOperation.SystemOne) is { Estimated: true, Workload.Items: 4 },
+            "observed hardware supplies usable operation-specific fallback limits before any owner edit");
+        Check(resources.Readiness(model, endpoint, Chat.Operation).State == "attached", "estimated limits require attached-provider consent");
         await resources.SaveBudgetAsync(update, providers, default);
         Check(resources.Readiness(model, endpoint, Chat.Operation) is { State: "ready", Available: true } && !resources.HasWork(endpoint.Id),
             "readiness accepts unrated models without reserving resources");
@@ -94,7 +101,6 @@ internal static class ResourceChecks
         catch (ProviderFailure error) when (error.Status == 409) { }
         await resources.SaveBudgetAsync(update, providers, default);
 
-        var managed = endpoint with { Mode = ProviderMode.Managed, CanLoad = true, CanUnload = true };
         Check(resources.TryAdmit(model, managed, Chat, ResourceWork.Load).Status == AdmissionStatus.Wait,
             "a transient load peak can exceed memory even when execution would fit");
         free = 1450 * MiB;
@@ -266,6 +272,77 @@ internal static class ResourceChecks
             }
             Check(resumed.Status.State == expected, $"withdrawal should reach {expected}");
         }
+    }
+
+    private static async Task CheckLoadedLmStudioBenchmarkAsync(string root)
+    {
+        var directory = Directory.CreateDirectory(Path.Combine(root, "lmstudio-benchmark")).FullName;
+        var settings = new SnapshotFile<LocalSettings>(Path.Combine(directory, "local-settings.json"), LocalSettings.Validate);
+        await settings.LoadAsync(new LocalSettings { Role = LocalRole.Contributor,
+            BenchmarkPolicy = BenchmarkPolicy.WhenConvenient });
+        var clock = new Clock();
+        var calls = 0;
+        var loads = 0;
+        var unloads = 0;
+        var loaded = true;
+        var endpointId = Guid.Empty;
+        var builder = WebApplication.CreateSlimBuilder();
+        builder.Logging.ClearProviders();
+        builder.WebHost.ConfigureKestrel(server => server.Listen(IPAddress.Loopback, 0));
+        await using var fixture = builder.Build();
+        fixture.MapGet("/api/v1/models", () => new { models = new[] { new {
+            key = "bounded", type = "llm", max_context_length = 32768, size_bytes = MiB,
+            loaded_instances = loaded ? new[] { new { id = "bounded-live", config = new { context_length = 512, parallel = 1 } } } : []
+        } } });
+        fixture.MapPost("/api/v1/models/unload", () => { unloads++; loaded = false; return Results.Ok(); });
+        fixture.MapPost("/api/v1/models/load", () => { loads++; loaded = true; return Results.Ok(); });
+        fixture.MapPost("/v1/chat/completions", async (HttpContext context) =>
+        {
+            var tokens = await PromptAsync(context);
+            Interlocked.Increment(ref calls);
+            context.Response.ContentType = "text/event-stream";
+            await context.Response.WriteAsync($"data: {{\"choices\":[{{\"delta\":{{\"content\":\"ok\"}}}}],\"usage\":{{\"prompt_tokens\":{tokens},\"completion_tokens\":1}}}}\n\ndata: [DONE]\n\n");
+        });
+        await fixture.StartAsync();
+        ResourceObservation Sample() => new(clock.GetUtcNow(), Total, Total - (loaded ? 1024 * MiB : 0), 1, 1, [], "fixture", new()
+            { [endpointId] = new([1234], loaded ? 1024 * MiB : 0, [], 1024 * MiB) }, true, null);
+        using var resources = new ResourceProtection(directory, settings, (_, _) => Sample(),
+            () => ((ulong)Total, (ulong)(Total - 1024 * MiB)), clock);
+        await resources.InitializeAsync();
+        await using var providers = new ProviderCatalog(directory, resources);
+        await providers.InitializeAsync();
+        var endpoint = await providers.ConfigureAsync(new(null, ProviderProfile.LmStudio, ProviderMode.Managed,
+            fixture.Urls.Single(), null, false, null, null), default);
+        endpointId = endpoint.Id;
+        resources.ApplyObservation(Sample());
+        resources.AdvanceBenchmarks(providers, default);
+        clock.Advance(301);
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        JsonElement Profile() => JsonSerializer.SerializeToElement(resources.View(providers), SnapshotFile<ResourceData>.Json)
+            .GetProperty("models")[0].GetProperty("profile");
+        while (Profile().ValueKind == JsonValueKind.Null || Profile().GetProperty("measurements").GetArrayLength() < 4)
+        {
+            resources.ApplyObservation(Sample());
+            resources.AdvanceBenchmarks(providers, deadline.Token);
+            await Task.Delay(25, deadline.Token);
+        }
+        Check(calls == 4 && loads == 0 && unloads == 0 && loaded,
+            "idle LM Studio qualification measures warm passes without replacing the loaded configuration");
+        clock.Advance(301);
+        resources.ApplyObservation(Sample());
+        resources.AdvanceBenchmarks(providers, deadline.Token);
+        await Task.Delay(100, deadline.Token);
+        Check(calls == 4 && !Profile().GetProperty("complete").GetBoolean(),
+            "deferred cold qualification stays incomplete and does not repeat warm work");
+        await settings.UpdateAsync(value => value with { Role = LocalRole.Leech });
+        while (resources.Status.State == ContributionState.Withdrawing)
+        {
+            await resources.AdvanceWithdrawalAsync(providers, deadline.Token);
+            resources.ApplyObservation(Sample());
+            await Task.Delay(25, deadline.Token);
+        }
+        Check(!loaded && unloads == 1 && resources.Status.State == ContributionState.ManualLeech,
+            "resource withdrawal still unloads the same protected LM Studio instance");
     }
 
     private static async Task<int> PromptAsync(HttpContext context)

@@ -43,6 +43,7 @@ internal sealed partial class PeerNetwork(string directory, int port, ProviderCa
     private WebApplication? listener;
     private IPAddress[] bound = [];
     private string? listenerError;
+    private bool servicePortUnavailable;
     private volatile bool ready;
     private int refreshInterface;
     private int refreshCatalog;
@@ -52,6 +53,8 @@ internal sealed partial class PeerNetwork(string directory, int port, ProviderCa
 
     public PeerSnapshot Snapshot => Volatile.Read(ref snapshot);
     public bool Ready => ready;
+    internal int ServicePort => port;
+    internal bool ServicePortUnavailable => Volatile.Read(ref servicePortUnavailable);
     public bool IsMember => Snapshot.Self is not null && !DeviceChanged(Snapshot);
     public bool AllowsLocalInference => Snapshot.Self is null || Ready;
     internal bool Draining => serving.Draining;
@@ -88,6 +91,7 @@ internal sealed partial class PeerNetwork(string directory, int port, ProviderCa
     {
         var current = Snapshot;
         var status = Volatile.Read(ref tailnet);
+        var localModels = providers.View.Models.ToDictionary(model => model.Id, StringComparer.Ordinal);
         var reconciliationStatus = Volatile.Read(ref lastReconciliation);
         var members = current.Nodes.Values.Where(node => !node.Removed).OrderBy(node => node.Joined).ThenBy(node => node.Id)
             .Select((node, index) => (Node: node, JoinOrder: index + 1)).ToArray();
@@ -116,7 +120,8 @@ internal sealed partial class PeerNetwork(string directory, int port, ProviderCa
             RecoveryWarning = store.RecoveryWarning,
             Nodes = contact.ToArray(),
             Keys = current.Records.Keys.Select(KeyView).ToArray(),
-            Models = current.Records.Models.Where(model => !model.Removed).ToArray(),
+            Models = current.Records.Models.Where(model => !model.Removed)
+                .Select(model => model with { Alias = CatalogAlias(model, current.Self?.Id, localModels) }).ToArray(),
             ProviderIntents = current.Records.Providers ?? [],
             Catalogs = current.Records.Catalogs,
             QueueWaitSeconds,
@@ -149,7 +154,7 @@ internal sealed partial class PeerNetwork(string directory, int port, ProviderCa
         settings.Changed += QueueCatalog;
     }
 
-    public async Task RunAsync(CancellationToken hostStopping)
+    public async Task RunAsync(CancellationToken hostStopping, bool refreshTransport = true)
     {
         using var registration = hostStopping.Register(stopping.Cancel);
         var cancellation = stopping.Token;
@@ -157,7 +162,8 @@ internal sealed partial class PeerNetwork(string directory, int port, ProviderCa
         NetworkChange.NetworkAddressChanged += AddressChanged;
         try
         {
-            await RefreshTransportAsync(cancellation);
+            if (refreshTransport)
+                await RefreshTransportAsync(cancellation);
             await ReconcileAsync(cancellation, gate: true);
             for (var retry = 0; !Ready && retry < 3; retry++)
             {
@@ -237,7 +243,7 @@ internal sealed partial class PeerNetwork(string directory, int port, ProviderCa
             Wake();
     }
 
-    private async Task<bool> RefreshTransportAsync(CancellationToken cancellation)
+    internal async Task<bool> RefreshTransportAsync(CancellationToken cancellation)
     {
         await transport.WaitAsync(cancellation);
         try
@@ -258,15 +264,20 @@ internal sealed partial class PeerNetwork(string directory, int port, ProviderCa
                         listener = await PeerRoutes.StartAsync(this, status.LocalAddresses, port, cancellation);
                         bound = status.LocalAddresses;
                         listenerError = null;
+                        Volatile.Write(ref servicePortUnavailable, false);
                     }
-                    catch (IOException)
+                    catch (Exception error) when (error is IOException || PortBinding.IsUnavailable(error))
                     {
                         listenerError = $"Mango could not bind the Tailscale service port {port}.";
+                        Volatile.Write(ref servicePortUnavailable, PortBinding.IsUnavailable(error));
                     }
                 }
             }
             if (bound.Length == 0 && status.LocalAddresses.Length == 0)
+            {
                 listenerError = null;
+                Volatile.Write(ref servicePortUnavailable, false);
+            }
             return changed;
         }
         finally { transport.Release(); }
@@ -386,20 +397,29 @@ internal sealed partial class PeerNetwork(string directory, int port, ProviderCa
             var changed = existing is null || !JsonSerializer.SerializeToUtf8Bytes(catalog with
                 { Revision = existing.Revision, ObservedAt = existing.ObservedAt }, Json)
                 .AsSpan().SequenceEqual(JsonSerializer.SerializeToUtf8Bytes(existing, Json));
-            var existingModels = current.Records.Models.Select(model => model.Id).ToHashSet(StringComparer.Ordinal);
-            var created = view.Models.Where(model => !existingModels.Contains(PeerValidation.ModelId(self.Id, model.Id)))
+            var existingModels = current.Records.Models.ToDictionary(model => model.Id, StringComparer.Ordinal);
+            var created = view.Models.Where(model => !existingModels.ContainsKey(PeerValidation.ModelId(self.Id, model.Id)))
                 .Take(PeerLimits.Models - existingModels.Count).Select(model => ToShared(self.Id, model, catalog.Revision)).ToArray();
+            var migrated = view.Models.Select(model =>
+            {
+                if (!existingModels.TryGetValue(PeerValidation.ModelId(self.Id, model.Id), out var prior) || prior.Removed ||
+                    prior.AliasExplicit == true || RequestedAlias(prior, model) is not null)
+                    return null;
+                var identifier = model.ProviderIdentifiers.FirstOrDefault(ProviderCatalog.ValidAlias);
+                return prior.Alias == identifier && prior.AliasExplicit == false ? null :
+                    prior with { Alias = identifier, AliasExplicit = false, Revision = catalog.Revision };
+            }).OfType<SharedModel>().ToArray();
             var providerIntents = current.Records.Providers ?? [];
             var addedEndpoints = view.Endpoints.Where(endpoint => providerIntents.All(item => item.Owner != self.Id || item.Id != endpoint.Id))
                 .Take(PeerLimits.Providers - providerIntents.Length).Select(endpoint => new SharedProvider(endpoint.Id, self.Id,
                     catalog.Revision, endpoint.Profile, endpoint.Address, true)).ToArray();
-            if (!changed && created.Length == 0 && addedEndpoints.Length == 0)
+            if (!changed && created.Length == 0 && migrated.Length == 0 && addedEndpoints.Length == 0)
                 return current.Disk;
             var records = current.Records.Merge(NetworkRecords.Empty with
             {
                 Identity = current.Records.Identity,
                 Catalogs = changed ? [catalog] : [],
-                Models = created, Providers = addedEndpoints
+                Models = [.. created, .. migrated], Providers = addedEndpoints
             });
             return current.Disk with { Records = records };
         }, cancellation);
@@ -411,7 +431,8 @@ internal sealed partial class PeerNetwork(string directory, int port, ProviderCa
 
     private static SharedModel ToShared(Guid node, Deployment deployment, Revision revision) =>
         new(PeerValidation.ModelId(node, deployment.Id), node, deployment.Id, revision,
-            deployment.Alias, deployment.Options.Ratings, Serving: ModelServing.Of(deployment.Options));
+            deployment.Alias ?? deployment.ProviderIdentifiers.FirstOrDefault(ProviderCatalog.ValidAlias),
+            deployment.Options.Ratings, Serving: ModelServing.Of(deployment.Options), AliasExplicit: deployment.Alias is not null);
 
     public async ValueTask DisposeAsync()
     {

@@ -132,10 +132,19 @@ input[type=checkbox]{accent-color:var(--green);width:18px;height:18px;margin:0;f
 .model-toolbar{display:flex;align-items:center;gap:10px;margin-bottom:12px}
 .model-toolbar h2{margin:0 auto 0 0;white-space:nowrap}
 .model-toolbar input{max-width:210px}
-.model-toolbar select{max-width:155px}
+.model-tabs{margin-bottom:12px}
+.model-tabs button{padding:7px 10px;font-size:12px}
+.model-tabs button:focus-visible{outline-offset:-3px}
+#model-serving-actions{margin:0 0 12px}
+#model-serving-actions button{min-height:30px;padding:4px 9px;font-size:12px}
+#catalog-status:empty{display:none}
 .model-card{border:1px solid var(--line);border-radius:10px;background:#fff;margin-bottom:12px;padding:16px}
 .model-card.selected{border-color:var(--green);box-shadow:0 0 0 1px var(--green)}
 .model-card .model-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:5px}
+.model-heading-meta{display:flex;align-items:center;gap:6px;flex:none}
+.model-link-mark{display:inline-flex;color:var(--green)}
+.model-link-mark .glyph{width:14px;height:14px}
+.model-link-mark:focus-visible{outline:2px solid #a8670b;outline-offset:2px;border-radius:2px}
 .model-card h3{font-size:15px;margin:0;overflow-wrap:anywhere}
 .model-card p{font-size:12px;margin:7px 0}
 .model-card .inputs{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
@@ -206,7 +215,7 @@ main{padding:22px 20px}
 @media(max-width:900px){
 .overview-grid{grid-template-columns:1fr}
 .overview-grid>aside{display:grid;grid-template-columns:1fr 1fr;gap:16px}
-.serving-grid{grid-template-columns:1fr}
+.serving-grid{grid-template-columns:minmax(0,1fr)}
 .qualification{position:static}
 .qualification .inputs{grid-template-columns:repeat(3,1fr)}
 .serving-toolbar label{min-width:0;flex:1}
@@ -240,7 +249,6 @@ h1{font-size:24px}
 .serving-quick .switch{width:100%}
 .serving-quick>label:last-child{white-space:normal;flex-direction:column;align-items:stretch;width:100%}
 .panel-heading{flex-wrap:wrap}
-.model-toolbar select{max-width:140px}
 .model-heading{align-items:flex-start!important}
 .model-card .badge{white-space:normal}
 .rating-row{flex-wrap:wrap}
@@ -265,7 +273,6 @@ button.metric:hover{background:var(--canvas);filter:none}
 }
 @media(max-width:600px){.overview-grid>aside{grid-template-columns:1fr}
 .model-toolbar input{min-width:80px}
-.model-toolbar select{max-width:125px}
 .serving-quick .switch{min-width:0}
 .request-counts{gap:12px}
 }

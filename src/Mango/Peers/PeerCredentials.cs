@@ -16,10 +16,15 @@ internal static class PeerCredentials
 
     public static AuthorityRecord Password(string? password, string recoveryVerifier, Revision revision)
     {
+        ValidatePassword(password);
+        var salt = RandomNumberGenerator.GetBytes(16);
+        return new(revision, Convert.ToHexString(salt), Convert.ToHexString(Derive(password!, salt)), recoveryVerifier);
+    }
+
+    public static void ValidatePassword(string? password)
+    {
         if (password is not { Length: >= 12 and <= 256 } || string.IsNullOrWhiteSpace(password))
             throw new PeerFailure(400, "Enter a master password of 12 to 256 characters.");
-        var salt = RandomNumberGenerator.GetBytes(16);
-        return new(revision, Convert.ToHexString(salt), Convert.ToHexString(Derive(password, salt)), recoveryVerifier);
     }
 
     public static bool VerifyPassword(string? password, AuthorityRecord authority) =>

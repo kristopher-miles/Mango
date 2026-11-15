@@ -30,7 +30,7 @@ dotnet .\src\Mango\bin\Release\net10.0-windows\Mango.dll --url
 dotnet .\src\Mango\bin\Release\net10.0-windows\Mango.dll --quit
 ```
 
-Settings live in `%LOCALAPPDATA%\Mango`. For isolated runs, pass `--data-dir <private directory>` to each command. Windows startup registration uses the default directory. The GUI uses an available IPv4 loopback port by default. Use `--port <port>` to request a specific port when launching the host.
+Settings live in `%LOCALAPPDATA%\Mango`. With that directory, Mango listens at `http://127.0.0.1:53781` by default. Configure inference clients on this machine with `http://127.0.0.1:53781/v1` and a scoped inference key from **Network → Keys**. If a listener cannot take its port at startup, Mango opens **System → Node port**. Choose another port and restart Mango to use it for both local and Tailscale connections, then update your client's base URL. For isolated runs, pass `--data-dir <private directory>` to each command. Without a saved node port, isolated runs pick an available loopback port, and `--port <port>` can select an explicit one. Windows startup registration uses the default data directory.
 
 If the primary settings file is unreadable, Mango reports recovery from the last good snapshot in the browser. A subsequent settings change retains the unreadable file as `local-settings.json.invalid-*`. If neither copy is usable, check `startup-error.txt` in the data directory. This diagnostic also reports startup binding failures.
 
@@ -50,7 +50,7 @@ Open **Serving**, choose **Add provider**, select the profile for an existing LM
 
 **Attached** mode lets Mango inspect the provider and send inference requests. **Managed** mode authorizes the provider's supported model load and unload operations. To let Mango launch and stop a single-model llama-server, give it the full paths to the existing `llama-server.exe` and local GGUF file. An already running process stays under its original owner. The llama.cpp embeddings profile is for a single server started in embedding mode.
 
-Load the model in its provider or use the authorized **Load** action. Use **Refresh catalog** to observe external changes. Each model card exposes its alias, capability ratings, and relevant fallback limits immediately. **Use locally** gives that deployment preference when otherwise comparable placements are available. To clear the preference, choose **Automatic placement** under **Local model preference** in Serving. `GET /v1/models` lists eligible aliases within the caller's scope. Deployments under one embedding alias need a common vector space. Use a deployment-specific alias or configure an owner-declared compatible family.
+Load the model in its provider or use the authorized **Load** action. Use **Refresh catalog** to observe external changes. Each model card shows its provider ID, optional alias, capability ratings, and relevant fallback limits. **Use locally** gives that deployment preference when otherwise comparable placements are available. To clear the preference, choose **Automatic placement** under **Local model preference** in Serving. `GET /v1/models` lists eligible provider IDs and any user-set aliases within the caller's scope. Deployments under one embedding alias need a common vector space. Use a deployment-specific alias or configure an owner-declared compatible family.
 
 Use the loopback host URL and current session bearer for the local API. The command `--url` returns the bearer as the `session` fragment. Keep it private. This PowerShell request invokes a chat alias.
 
@@ -72,9 +72,11 @@ The inference surface includes chat completions, embeddings, images, audio trans
 
 ### Enable local inference
 
-1. In **Contribution**, select **Contributor** and save. Choose **Never** for owner-configured limits, **Now** to finish benchmarks before serving, or **When convenient** to benchmark after five minutes without client work. You can also choose the local benchmark policy when creating or joining a network.
-2. In **Serving**, select **View limits** on the model and choose its operation in the adjacent qualification panel. Enter measured workload and incremental RAM limits; complete valid limits update automatically. On hosts with discrete GPUs, enter the load and execution VRAM allowance for each GPU. To use an attached provider, confirm that its model may remain resident after Mango withdraws.
+1. In **Contribution**, select **Contributor** and save. Choose **Never** to use estimated or owner-configured limits without automatic benchmarks, **Now** to finish benchmarks before serving, or **When convenient** to benchmark after five minutes without client work. You can also choose the local benchmark policy when creating or joining a network.
+2. Models are enabled for serving by default except identified LM Link models, which you can enable on their cards. Use **Serve all models** or **Serve no models** to update all currently listed models on the selected provider, including models in other categories. Use **Disable serving** on a single card to stop routing new work to it. Mango estimates memory limits and allows 16 embedding inputs, four System One items, or one item for other operations by default. Select **View limits** to override the estimates. To use an attached provider, confirm that its model may remain resident after Mango withdraws.
 3. On the same **Serving** screen, load the deployment if its provider requires a manual load. Mango can load eligible managed deployments on demand. With **Now**, the resource panel shows benchmark progress or the reason it is waiting. Mango withdraws and verifies release of managed resources when Windows reports pressure or sustained external activity. See the [Windows qualification and limits](plan/04-resource-protection.md#windows-qualification).
+
+When Mango can confirm the loopback LM Studio server with the installed `lms` CLI, Serving shows separate cards for local and LM Link copies of the same model key. Mango routes to uniquely identified loaded instances. Choose the desired device in LM Studio for a shared model key that needs loading. LM Link execution runs on the linked device, while Mango's local limits cover the relay on this computer.
 
 ## Set up a private Mango network
 
@@ -88,9 +90,9 @@ Unlock network administration to change shared aliases and ratings or issue and 
 
 The serving node queues work when capacity is busy. Network administrators can change the five-minute maximum wait under **Private network → Inference queue**. The wait budget carries across retries. Mango returns HTTP 503 for unavailable capacity and 504 when the wait expires. Disconnecting cancels the request. Mango can retry a confirmed failure before output begins while the client is still connected.
 
-Use the optional `Mango-Session` request header to identify a conversation. The value is scoped to the authenticated key and model alias. Mango can also recognize related chat requests from their message prefixes. Cache affinity lasts five minutes after completion and depends on an eligible live model instance.
+Use the optional `Mango-Session` request header to identify a conversation. The value is scoped to the authenticated key and the requested model identifier or alias. Mango can also recognize related chat requests from their message prefixes. Cache affinity lasts five minutes after completion and depends on an eligible live model instance.
 
-Use **Recover a forgotten password** to replace the master password and keep existing inference keys. **Full network reset** is a separate, confirmed action that removes keys and private request state and requires peers to reenroll. It preserves reusable model settings and benchmarks. A recovery record cannot reconstruct missing data.
+To rotate the master password, unlock administration and use **Change master password** in **Network → Recovery**. Existing nodes, inference keys, and the recovery record stay valid. Mango checks enrolled computers first and asks for confirmation if any are unreachable. Those nodes receive the new password verifier when they reconnect. Use **Recover a forgotten password** if you need to regain access with the recovery record. **Full network reset** removes keys and private request state and requires peers to reenroll. It preserves reusable model settings and benchmarks. A recovery record cannot reconstruct missing data.
 
 **Live requests** shows ingress placement and retries, plus this host's loading, queue, and execution state. The open page subscribes to local changes. The view keeps a bounded recent history in memory.
 
@@ -143,7 +145,7 @@ New networks use the first host's IANA timezone. Existing networks with no saved
 
 ## Serving readiness and qualification
 
-**Serving** keeps provider connection, model configuration, local lifecycle actions, contribution, benchmark policy, and qualification together. The computer selector changes the owning host; remote credentials, process permission, and resource limits cannot be edited here. Remote readiness is labeled with its observation time, rather than presented as a live measurement. Filter models by name or operation; five models are shown per page.
+**Serving** keeps provider connection, model configuration, local lifecycle actions, contribution, benchmark policy, and qualification together. The computer selector changes the owning host; remote credentials, process permission, and resource limits cannot be edited here. Remote readiness is labeled with its observation time, rather than presented as a live measurement. **All** shows five models per page. Each category shows its whole list on one page. Models on the provider's own device appear before LM Link models.
 
 Readiness comes from the same host facts used by admission: contribution/protection state, provider reachability and supported operations, context, local budgets and attached-provider permission, benchmark policy, live reservations, pressure, and allocation failures. An unloaded model with supported on-demand loading is not blocked merely because it is unloaded. Unrated capabilities do not imply unavailable inference.
 

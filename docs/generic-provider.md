@@ -66,12 +66,12 @@ Mango allows up to five minutes for each lifecycle response and then polls inven
 
 ## Serve inference by instance ID
 
-Mango accepts a model alias from the client and sends the loaded instance's `id` as the request's `model`. Resolve that exact instance. Return an HTTP error if it is gone, busy, or incompatible. Keep just-in-time loading and automatic eviction disabled on these routes, and stop active inference promptly when its HTTP connection is cancelled. Keep provider-executed tools, web access, and MCP execution disabled for these requests.
+Mango accepts the provider model identifier or a user-set alias from the client and sends the loaded instance's `id` as the request's `model`. Resolve that exact instance. Return an HTTP error if it is gone, busy, or incompatible. Keep just-in-time loading and automatic eviction disabled on these routes, and stop active inference promptly when its HTTP connection is cancelled. Keep provider-executed tools, web access, and MCP execution disabled for these requests.
 
 | Inventory `type` | Inference contract |
 | --- | --- |
 | `llm` | `POST /v1/chat/completions`. Support normal JSON completions and streamed chunks with `Content-Type: text/event-stream` ending in `data: [DONE]`. Use `max_tokens` for the output limit. Return an error when a request cannot fit. |
-| `embedding` | `POST /v1/embeddings`. Return indexed float vectors for each input. Report the fixed output length as `embedding_dimensions` or have the owner configure it in Mango. |
+| `embedding` | `POST /v1/embeddings`. Return one indexed float vector per input, all the same length within a batch. `embedding_dimensions` is optional metadata. Mango forwards a client's `dimensions` parameter to the provider. |
 | `decision` | `POST /v1/systemone`. Accept System One `state` and named `questions`, and return the corresponding `answers`. |
 | `image` | `POST /v1/images/generations`. Accept a text `prompt` and `response_format: "b64_json"`. Mango forwards options such as `size` and `steps` using those field names. Return synchronous image bytes encoded in `data[].b64_json`. |
 | `transcription` | `POST /v1/audio/transcriptions`. Accept a multipart `file` and `model` instance ID, plus supported language, response format, and timestamp options. Return the requested text or structured transcription. |

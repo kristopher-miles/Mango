@@ -13,7 +13,7 @@ $session = .\Mango.exe --url | Select-Object -First 1
 .\Mango.exe --quit | Out-Null
 ```
 
-The session URL contains a temporary bearer in its fragment. Keep it private. `--background` starts the tray host without opening the browser. **System → Startup** registers the executable for the current Windows user and uses the saved contribution and resource settings. Isolated runs can supply `--data-dir <private directory>` with each command. Startup registration uses `%LOCALAPPDATA%\Mango`.
+The session URL contains a temporary bearer in its fragment. Keep it private. The default installation uses `http://127.0.0.1:53781` for the browser and `http://127.0.0.1:53781/v1` for local inference with a scoped key. `--background` starts the tray host without opening the browser. **System → Startup** registers the executable for the current Windows user and uses the saved contribution and resource settings. Isolated runs can supply `--data-dir <private directory>` with each command. Startup registration uses `%LOCALAPPDATA%\Mango`.
 
 ## Join and serve
 

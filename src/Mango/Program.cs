@@ -82,9 +82,11 @@ internal static class Program
     {
         var settings = new SnapshotFile<LocalSettings>(Path.Combine(directory, "local-settings.json"), LocalSettings.Validate);
         settings.LoadAsync(new LocalSettings()).GetAwaiter().GetResult();
+        var nodePort = settings.Value.NodePort;
+        var loopbackPort = nodePort ?? options.Port ?? (options.DataDirectory is null ? LocalWeb.DefaultPort : 0);
         using var resources = new ResourceProtection(directory, settings);
         var providers = new ProviderCatalog(directory, resources);
-        var peers = new PeerNetwork(directory, options.PeerPort, providers, settings);
+        var peers = new PeerNetwork(directory, nodePort ?? options.PeerPort ?? PeerLimits.DefaultPort, providers, settings);
         using var updates = new WindowsUpdates(directory, options.RestartArguments(), settings, peers, options.UpdateReady is not null);
         peers.Updates = updates;
         var ingress = new PublicIngress(directory, peers);
@@ -96,10 +98,21 @@ internal static class Program
             resources.RestoreUnsettled(providers);
             peers.InitializeAsync().GetAwaiter().GetResult();
             ingress.InitializeAsync().GetAwaiter().GetResult();
-            var app = web.Build(options.Port, directory, settings, new LoginStartup(options.DataDirectory), providers, peers, ingress);
+            var startup = new LoginStartup(options.DataDirectory);
+            var app = web.Build(loopbackPort, directory, settings, startup, providers, peers, ingress);
+            int? unavailablePort = null;
             try
             {
-                RunHost(app, options, directory, instance, diagnostic, settings, web, providers, peers, updates);
+                try { app.StartAsync().GetAwaiter().GetResult(); }
+                catch (Exception error) when (loopbackPort != 0 && PortBinding.IsUnavailable(error))
+                {
+                    app.DisposeAsync().AsTask().GetAwaiter().GetResult();
+                    unavailablePort = loopbackPort;
+                    app = web.Build(0, directory, settings, startup, providers, peers, ingress, unavailablePort);
+                    app.StartAsync().GetAwaiter().GetResult();
+                }
+                peers.RefreshTransportAsync(app.Lifetime.ApplicationStopping).GetAwaiter().GetResult();
+                RunHost(app, options, directory, instance, diagnostic, settings, web, providers, peers, updates, unavailablePort);
             }
             finally
             {
@@ -115,16 +128,17 @@ internal static class Program
     }
 
     private static void RunHost(WebApplication app, LaunchOptions options, string directory, InstanceControl instance, string diagnostic,
-        SnapshotFile<LocalSettings> settings, LocalWeb web, ProviderCatalog providers, PeerNetwork peers, WindowsUpdates updates)
+        SnapshotFile<LocalSettings> settings, LocalWeb web, ProviderCatalog providers, PeerNetwork peers, WindowsUpdates updates,
+        int? unavailableLoopbackPort)
     {
-        app.StartAsync().GetAwaiter().GetResult();
         var inventory = providers.RunAsync(app.Lifetime.ApplicationStopping);
-        var network = peers.RunAsync(app.Lifetime.ApplicationStopping);
+        var network = peers.RunAsync(app.Lifetime.ApplicationStopping, refreshTransport: false);
         var protection = providers.Resources!.RunAsync(providers, app.Lifetime.ApplicationStopping);
         var updateChecks = updates.RunAsync(app.Lifetime);
         try
         {
             var url = web.BrowserUrl(app.Urls.Single());
+            var portUnavailable = unavailableLoopbackPort is not null || peers.ServicePortUnavailable;
             var control = instance.ServeAsync(url, app.Lifetime);
             if (control.IsFaulted)
                 control.GetAwaiter().GetResult();
@@ -136,7 +150,13 @@ internal static class Program
             }
             try
             {
-                File.Delete(diagnostic);
+                if (portUnavailable)
+                {
+                    var message = unavailableLoopbackPort is { } port ? $"Mango could not bind 127.0.0.1:{port}."
+                        : $"Mango could not bind the Tailscale port {peers.ServicePort}.";
+                    File.WriteAllText(diagnostic, $"{message} Open System → Node port to choose another port.");
+                }
+                else File.Delete(diagnostic);
             }
             catch (Exception error) when (error is IOException or UnauthorizedAccessException)
             {
@@ -146,7 +166,7 @@ internal static class Program
             try
             {
                 if (!options.Headless)
-                    Tray.Run(settings, app.Lifetime, () => OpenBrowser(url), openOnStartup: !options.Background);
+                    Tray.Run(settings, app.Lifetime, () => OpenBrowser(url), openOnStartup: !options.Background || portUnavailable);
             }
             finally
             {
@@ -176,12 +196,13 @@ internal static class Program
         }
     }
 
-    private sealed record LaunchOptions(bool Headless, bool Background, bool Quit, bool PrintUrl, string? DataDirectory, int Port,
-        int PeerPort, string? UpdateReady)
+    private sealed record LaunchOptions(bool Headless, bool Background, bool Quit, bool PrintUrl, string? DataDirectory, int? Port,
+        int? PeerPort, string? UpdateReady)
     {
         public bool ControlOnly => Quit || PrintUrl;
 
-        public string RestartArguments() => $"{(Headless ? "--headless" : "--background")} --port {Port} --peer-port {PeerPort}" +
+        public string RestartArguments() => (Headless ? "--headless" : "--background") +
+            (Port is { } port ? $" --port {port}" : "") + (PeerPort is { } peerPort ? $" --peer-port {peerPort}" : "") +
             (DataDirectory is null ? "" : " --data-dir \"" + DataDirectory +
                 (Path.EndsInDirectorySeparator(DataDirectory) ? "\\" : "") + "\"");
 
@@ -191,8 +212,8 @@ internal static class Program
             var background = false;
             var quit = false;
             var printUrl = false;
-            var port = 0;
-            var peerPort = PeerLimits.DefaultPort;
+            int? port = null;
+            int? peerPort = null;
             string? directory = null;
             string? updateReady = null;
             for (var index = 0; index < args.Length; index++)
@@ -209,10 +230,12 @@ internal static class Program
                     case "--data-dir" when index + 1 < args.Length:
                         directory = Path.TrimEndingDirectorySeparator(Path.GetFullPath(args[++index]));
                         break;
-                    case "--port" when index + 1 < args.Length && int.TryParse(args[index + 1], out port) && port is >= 0 and <= 65535:
+                    case "--port" when index + 1 < args.Length && int.TryParse(args[index + 1], out var localPort) && localPort is >= 0 and <= 65535:
+                        port = localPort;
                         index++;
                         break;
-                    case "--peer-port" when index + 1 < args.Length && int.TryParse(args[index + 1], out peerPort) && peerPort is >= 1 and <= 65535:
+                    case "--peer-port" when index + 1 < args.Length && int.TryParse(args[index + 1], out var servicePort) && servicePort is >= 1 and <= 65535:
+                        peerPort = servicePort;
                         index++;
                         break;
                     default:

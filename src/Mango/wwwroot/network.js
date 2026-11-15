@@ -1,7 +1,7 @@
 "use strict";
 
 const networkFeedback = document.querySelector("#network-status");
-const networkForms = Object.fromEntries(["discover", "join", "create", "unlock", "issue", "recover", "reset", "queue"].map(name => [name, document.querySelector(`#network-${name}`)]));
+const networkForms = Object.fromEntries(["discover", "join", "create", "unlock", "issue", "password", "recover", "reset", "queue"].map(name => [name, document.querySelector(`#network-${name}`)]));
 const networkScopes = { ...operationNames, imageInput: "Image input", audioInput: "Audio input" };
 const networkSecretPanel = document.querySelector("#network-secret");
 const networkSecret = document.querySelector("#network-secret-value");
@@ -58,7 +58,7 @@ function renderAdministration() {
   document.querySelector("#admin-lock").textContent = administration.pendingRevocation ? "Retry sign-out" : "Lock";
   document.querySelector("#admin-lock").disabled = administration.locking;
   document.querySelector("#admin-control").disabled = administration.locking;
-  for (const form of [networkForms.issue, networkForms.reset, networkForms.queue]) form.querySelector("fieldset") ? form.querySelector("fieldset").disabled = !unlocked : [...form.elements].forEach(input => input.disabled = !unlocked);
+  for (const form of [networkForms.issue, networkForms.password, networkForms.reset, networkForms.queue]) form.querySelector("fieldset") ? form.querySelector("fieldset").disabled = !unlocked : [...form.elements].forEach(input => input.disabled = !unlocked);
   const feedback = document.querySelector("#queue-feedback");
   if (!unlocked) { feedback.textContent = "Unlock administration in the sidebar to change the queue."; delete feedback.dataset.feedback; }
   else if (queueWriter) feedbackFor(queueWriter, feedback);
@@ -225,6 +225,18 @@ networkForm("issue", "key-feedback", async (values, fields) => {
   const result = await api("network/keys", { name: values.name, priority: values.priority, scopes: fields.getAll("scopes"),
     neverExpires: values.expiry === "never", expiresAt: values.expiry === "date" ? new Date(values.expiresAt).toISOString() : null }, "POST");
   showNetworkSecret(result.secret, false); await loadNetwork(); return showDelivery(result.delivery);
+});
+networkForm("password", "recovery-feedback", async fields => {
+  const change = { newPassword: fields.newPassword };
+  let result = await api("network/password", change);
+  if (!result.delivery) {
+    if (!confirm(`Mango could not reach ${result.unreachableNodes.join(", ")}. These computers will keep using the previous password until they reconnect. Change the password now?`))
+      return "Password change cancelled.";
+    result = await api("network/password", { ...change, allowPending: true });
+  }
+  setAdministration(null);
+  await Promise.allSettled([loadNetwork(), loadLogs()]);
+  return `Master password changed. ${showDelivery(result.delivery)}`;
 });
 networkForm("recover", "recovery-feedback", async fields => {
   const result = await api("network/recover", fields); setAdministration(null); await Promise.allSettled([loadNetwork(), loadLogs()]); return showDelivery(result);

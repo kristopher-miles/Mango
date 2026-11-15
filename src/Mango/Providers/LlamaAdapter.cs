@@ -24,9 +24,10 @@ internal sealed class LlamaAdapter(HttpClient http, ProviderEndpoint endpoint) :
                 return null;
             var id = Path.GetFileNameWithoutExtension(Endpoint.ModelFile!);
             var embedding = Endpoint.Profile == ProviderProfile.LlamaEmbedding;
-            return Model(id, id, null, ["text"], embedding ? ["embedding"] : ["text"],
+            return Model(Endpoint.ModelFile!, id, null, ["text"], embedding ? ["embedding"] : ["text"],
                 [embedding ? InferenceOperation.Embeddings : InferenceOperation.Chat], [], null,
-                structured: !embedding, encodings: embedding ? ["base64", "float"] : [], installed: File.Exists(Endpoint.ModelFile));
+                structured: !embedding, encodings: embedding ? ["base64", "float"] : [], installed: File.Exists(Endpoint.ModelFile))
+                with { Id = ProviderIdentity.Model(Endpoint.Id, id) };
         }
     }
 
@@ -79,13 +80,15 @@ internal sealed class LlamaAdapter(HttpClient http, ProviderEndpoint endpoint) :
             var generation = Router ? Volatile.Read(ref inventoryGeneration).ToString(System.Globalization.CultureInfo.InvariantCulture) : null;
             var instances = loaded ? new[] { new ProviderInstance(id, context, props.Number("total_slots"), fingerprint,
                 NativeGeneration: generation) } : [];
-            models.Add(Model(id, id, meta.Text("ftype") ?? props.Text("model_ftype"),
+            var configured = OwnedProcessId.HasValue ? ConfiguredModel : null;
+            var model = Model(id, configured?.DisplayName ?? id, meta.Text("ftype") ?? props.Text("model_ftype"),
                 inputs, outputs, operations, instances, meta.Number("n_ctx_train") ?? row.Number("context_length"),
                 tools: caps.IsTrue("supports_tools") || caps.IsTrue("supports_tool_calls"),
                 structured: operations.Contains(InferenceOperation.Chat),
                 dimensions: operations.Contains(InferenceOperation.Embeddings) ? meta.Number("n_embd") : null,
                 encodings: operations.Contains(InferenceOperation.Embeddings) ? ["base64", "float"] : [],
-                artifactBytes: meta.Long("size"), installed: state is not ("downloading" or "incomplete"), format: "gguf"));
+                artifactBytes: meta.Long("size"), installed: state is not ("downloading" or "incomplete"), format: "gguf");
+            models.Add(configured is null ? model : model with { Id = configured.Id });
         }
         return new(version, models.ToArray(), Managed && (Router || CanLaunch), Managed && (Router || OwnedProcessId.HasValue),
             OwnedProcessId.HasValue, OwnedProcessId, Router && root.Number("max_instances") is > 0 and <= ProviderLimits.MaxModels
@@ -190,7 +193,7 @@ internal sealed class LlamaAdapter(HttpClient http, ProviderEndpoint endpoint) :
             RedirectStandardError = true
         };
         foreach (var argument in new[] { "--host", uri.Host, "--port", uri.Port.ToString(),
-                     "--model", Endpoint.ModelFile!, "--alias", model.NativeId, "--parallel", "1",
+                     "--model", Endpoint.ModelFile!, "--parallel", "1",
                      "--no-webui", "--jinja", "--no-context-shift" })
             start.ArgumentList.Add(argument);
         if (context.HasValue)

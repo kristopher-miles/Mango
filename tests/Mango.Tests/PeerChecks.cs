@@ -15,6 +15,7 @@ internal static partial class PeerChecks
     private const string Password = "Mango test master password";
     private const string Recovered = "Mango recovered master password";
     private const string Reset = "Mango reset master password";
+    private const string FixtureModel = @"C:\Provider Models\Fixture.gguf";
     private static readonly JsonSerializerOptions Json = PeerNetwork.Json;
 
     public static async Task RunAsync(string root)
@@ -101,15 +102,40 @@ internal static partial class PeerChecks
             var catalog = await Local(http, first, "providers");
             var model = catalog.GetProperty("models")[0];
             var deployment = model.GetProperty("id").GetString()!;
+            Check(model.GetProperty("alias").ValueKind == JsonValueKind.Null &&
+                model.GetProperty("providerIdentifiers")[0].GetString() == FixtureModel,
+                "the catalog leaves the alias empty and preserves the exact provider identifier");
+            var listed = await Request(http, HttpMethod.Get, first.TailAddress + "/v1/models", key);
+            Check(listed.GetProperty("data").EnumerateArray().Select(item => item.GetProperty("id").GetString())
+                .SequenceEqual([FixtureModel]), "model discovery publishes the exact provider identifier without a generated alias");
+            Check(listed.GetProperty("data")[0].GetProperty("capabilities").EnumerateArray()
+                .Any(item => item.GetString() == "chat"), "model discovery identifies chat capability");
+            var messages = new[] { new { role = "user", content = "hello" } };
+            var nativeChat = new { model = FixtureModel, messages };
+            await Request(http, HttpMethod.Post, first.TailAddress + "/v1/chat/completions", key, nativeChat);
             var edit = new { id = deployment, alias = "shared-fixture", ratings = new { reasoning = 4 }, revision = 0 };
             await Local(http, first, "providers/models", edit, expected: 403);
             await Local(http, first, "providers/models", edit, firstAdmin, expected: 204);
             await Eventually(() => second.Network.Snapshot.Records.Models.Any(entry => entry.Alias == "shared-fixture"),
                 "peer receives independently revised catalog alias");
             await Local(http, first, "providers/selection", new { id = deployment }, expected: 204);
-            var chat = new { model = "shared-fixture", messages = new[] { new { role = "user", content = "hello" } } };
+            var chat = new { model = "shared-fixture", messages };
             var response = await Request(http, HttpMethod.Post, first.TailAddress + "/v1/chat/completions", key, chat);
             Check(response.GetProperty("id").GetString() == "fixture-response", "inference credential reaches the selected provider");
+            await Request(http, HttpMethod.Post, first.TailAddress + "/v1/chat/completions", key, nativeChat);
+            await Local(http, first, $"providers/models/{deployment}/serving", new { enabled = false }, expected: 204);
+            await Request(http, HttpMethod.Post, first.TailAddress + "/v1/chat/completions", key, chat, expected: 503);
+            var disabled = (await Local(http, first, "providers")).GetProperty("models")[0];
+            Check(disabled.GetProperty("instance").ValueKind == JsonValueKind.Object &&
+                disabled.GetProperty("options").GetProperty("servingDisabled").GetBoolean(),
+                "disabling serving keeps the provider's model loaded");
+            await Local(http, first, $"providers/models/{deployment}/serving", new { enabled = true }, expected: 204);
+            await Request(http, HttpMethod.Post, first.TailAddress + "/v1/chat/completions", key, chat);
+            var providerId = catalog.GetProperty("endpoints")[0].GetProperty("id").GetGuid();
+            await Local(http, first, $"providers/{providerId}/serving", new { enabled = false }, expected: 204);
+            await Request(http, HttpMethod.Post, first.TailAddress + "/v1/chat/completions", key, chat, expected: 503);
+            await Local(http, first, $"providers/{providerId}/serving", new { enabled = true }, expected: 204);
+            await Request(http, HttpMethod.Post, first.TailAddress + "/v1/chat/completions", key, chat);
             await Request(http, HttpMethod.Post, first.LocalAddress + "/v1/chat/completions", key,
                 new
                 {
@@ -132,6 +158,14 @@ internal static partial class PeerChecks
                 await Request(http, HttpMethod.Get, first.LocalAddress + "/v1/models", activeSecret, expected: 401);
             }
             await TestReroutesAsync(http, first, second, firstAdmin, secondAdmin, key);
+            const string rotated = "Mango rotated master password";
+            await Local(http, first, "network/password", new { newPassword = rotated }, expected: 403);
+            var changed = await Local(http, first, "network/password", new { newPassword = rotated }, firstAdmin);
+            Check(changed.GetProperty("unreachableNodes").GetArrayLength() == 0 &&
+                changed.GetProperty("delivery").GetProperty("confirmed").GetInt32() == 1,
+                "password change proceeds without confirmation when every peer is reachable");
+            await Local(http, second, "network/unlock", new { password = Password }, expected: 401);
+            secondAdmin = await Unlock(http, second, rotated);
             await Local(http, first, "network/recover", new { recoveryRecord = recovery, newPassword = Recovered });
             await Issue(http, second, secondAdmin, "old-admin-refused", expected: 403);
             await Request(http, HttpMethod.Get, second.LocalAddress + "/v1/models", key);
@@ -143,8 +177,19 @@ internal static partial class PeerChecks
             await Issue(http, second, secondAdmin, "isolated-refused", expected: 409);
             await Local(http, second, $"network/keys/{keyId}", admin: secondAdmin, method: HttpMethod.Delete, expected: 409);
 
+            const string pendingPassword = "Mango rotation with an offline peer";
+            var authorityBefore = second.Network.Snapshot.Records.Authority;
+            var offline = await Local(http, second, "network/password", new { newPassword = pendingPassword }, secondAdmin);
+            Check(offline.GetProperty("unreachableNodes").GetArrayLength() == 1 &&
+                offline.GetProperty("delivery").ValueKind == JsonValueKind.Null && second.Network.Snapshot.Records.Authority == authorityBefore,
+                "password change waits for confirmation when an enrolled peer cannot be reached");
+            var confirmed = await Local(http, second, "network/password", new { newPassword = pendingPassword, allowPending = true }, secondAdmin);
+            Check(confirmed.GetProperty("delivery").GetProperty("pending").GetInt32() == 1, "offline peer delivery remains pending");
+            secondAdmin = await Unlock(http, second, pendingPassword);
+
             first = await Host.StartAsync(firstPath, status, firstPort);
-            firstAdmin = await Unlock(http, first, Recovered);
+            firstAdmin = await Unlock(http, first, pendingPassword);
+            await Request(http, HttpMethod.Get, first.TailAddress + "/v1/models", key);
             var issuedWithPeer = await Issue(http, second, secondAdmin, "one-peer-online");
             Check(issuedWithPeer.GetProperty("delivery").GetProperty("confirmed").GetInt32() == 1, "one peer confirms issuance");
 
@@ -190,6 +235,13 @@ internal static partial class PeerChecks
             Check(!view.ToString().Contains("verifier", StringComparison.OrdinalIgnoreCase) &&
                 !view.ToString().Contains("protectedSecret", StringComparison.OrdinalIgnoreCase) &&
                 !saved.Contains(Reset) && !saved.Contains(preResetKey), "administration view and disk omit reusable plaintext credentials");
+            var resetAdmin = await Unlock(http, first, Reset);
+            var clearKey = (await Issue(http, first, resetAdmin, "clear-alias")).GetProperty("secret").GetString()!;
+            var revision = first.Network.Snapshot.Records.Models.Single(entry => entry.Deployment == deployment).Revision;
+            await Local(http, first, "network/models", new { owner = first.Network.Snapshot.Self!.Id,
+                deployment, revision, alias = "", ratings = new { reasoning = 4 } }, resetAdmin);
+            await Request(http, HttpMethod.Post, first.TailAddress + "/v1/chat/completions", clearKey, chat, expected: 503);
+            await Request(http, HttpMethod.Post, first.TailAddress + "/v1/chat/completions", clearKey, nativeChat);
         }
         finally
         {
@@ -287,7 +339,7 @@ internal static partial class PeerChecks
         builder.WebHost.ConfigureKestrel(options => options.Listen(IPAddress.Loopback, 0));
         var app = builder.Build();
         app.MapGet("/props", () => new { default_generation_settings = new { n_ctx = 2048 }, build_info = "fixture" });
-        app.MapGet("/v1/models", () => new { data = new[] { new { id = "fixture" } } });
+        app.MapGet("/v1/models", () => new { data = new[] { new { id = FixtureModel } } });
         var uncertain = 0;
         app.MapGet("/slots", () => new[] { new { is_processing = Volatile.Read(ref uncertain) != 0 } });
         app.MapPost("/v1/chat/completions/input_tokens", () => new { input_tokens = 12 });
@@ -296,6 +348,8 @@ internal static partial class PeerChecks
             Check(providerToken is null ? context.Request.Headers.Authorization.Count == 0 :
                 context.Request.Headers.Authorization.ToString() == $"Bearer {providerToken}", "Mango credentials stay outside provider requests");
             using var body = await JsonDocument.ParseAsync(context.Request.Body, cancellationToken: context.RequestAborted);
+            Check(body.RootElement.GetProperty("model").GetString() == FixtureModel,
+                "the provider receives its exact model identifier");
             var prompt = body.RootElement.GetProperty("messages")[0].GetProperty("content").GetString();
             if (prompt == "fail before first output")
             {
@@ -343,6 +397,12 @@ internal static partial class PeerChecks
         await Eventually(() => ingress.Network.Snapshot.Records.Catalogs.Any(catalog => catalog.Role == LocalRole.Contributor &&
             catalog.Models.Any(model => model.LocallyAvailable == true)), "remote fixture advertises contribution");
         await Eventually(() => serving.Network.Snapshot.Digest == ingress.Network.Snapshot.Digest, "routing fixtures reach the same digest");
+        var models = await Request(http, HttpMethod.Get, ingress.LocalAddress + "/v1/models", key);
+        var names = models.GetProperty("data").EnumerateArray().Select(item => item.GetProperty("id").GetString()).ToArray();
+        Check(names.Contains(FixtureModel) && names.Contains("shared-fixture"),
+            "a peer advertises both the exact provider identifier and the explicit alias");
+        await Request(http, HttpMethod.Post, ingress.LocalAddress + "/v1/chat/completions", key,
+            new { model = FixtureModel, messages = new[] { new { role = "user", content = "native ID from another node" } } });
         var before = await Local(http, ingress, "network/scheduling");
         foreach (var session in new[] { "before", "after", "ambiguous" })
         {

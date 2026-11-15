@@ -11,6 +11,7 @@ internal static class ProviderChecks
     private const string NativeSecret = "provider-fixture-secret";
     private const string ChatBody = """
         {"model":"test","messages":[{"role":"user","content":"Hello"}],"temperature":0.25,
+         "chat_template_kwargs":{"enable_thinking":false},"reasoning_effort":"low",
          "stream":true,"stream_options":{"include_usage":true},"max_tokens":25,
          "tools":[{"type":"function","function":{"name":"lookup","parameters":{"type":"object"}}}]}
         """;
@@ -48,6 +49,8 @@ internal static class ProviderChecks
             if (request.RequestUri!.AbsolutePath.EndsWith("count_tokens", StringComparison.Ordinal))
                 return Response(HttpStatusCode.OK, """{"input_tokens":10}""");
             Check(root.GetProperty("temperature").GetDouble() == 0.25 &&
+                !root.GetProperty("chat_template_kwargs").GetProperty("enable_thinking").GetBoolean() &&
+                root.GetProperty("reasoning_effort").GetString() == "low" &&
                 root.GetProperty("stream_options").GetProperty("include_usage").GetBoolean() &&
                 root.GetProperty("tools")[0].GetProperty("function").GetProperty("name").GetString() == "lookup",
                 "supported inference parameters and client tools survive forwarding");
@@ -82,12 +85,7 @@ internal static class ProviderChecks
               "image_url":{"url":"http://127.0.0.1/private"}}]}]}
             """, vision, adapter));
 
-        using var malformed = new HttpClient(new Handler(_ => Task.FromResult(Response(HttpStatusCode.OK,
-            """{"data":[{"index":0,"embedding":[0.5]}]}"""))));
-        var lm = new LmStudioAdapter(malformed, endpoint with { Profile = ProviderProfile.LmStudio });
-        await Fails(502, () => Run(InferenceOperation.Embeddings, """{"model":"test","input":"small"}""", embedding, lm));
-        await Fails(422, () => Run(InferenceOperation.Embeddings,
-            """{"model":"test","input":"small","dimensions":3}""", embedding, lm));
+        await CheckEmbeddingsAsync(endpoint, embedding);
 
         using var upstreamError = new HttpClient(new Handler(_ => Task.FromResult(Response(HttpStatusCode.Unauthorized,
             $"{{\"error\":\"{NativeSecret}\"}}"))));
@@ -114,8 +112,51 @@ internal static class ProviderChecks
         Check(invalidStream.Message.Contains("event stream"), "unlabeled chat streams are rejected as invalid provider responses");
         await CheckGenericInventoryAsync(endpoint);
         await CheckGenericMediaAsync(endpoint);
+        await CheckLmStudioUnloadAsync(endpoint);
         await CheckResidentImageAsync(endpoint);
         Console.WriteLine("Provider fixture checks passed.");
+    }
+
+    private static async Task CheckLmStudioUnloadAsync(ProviderEndpoint endpoint)
+    {
+        var loaded = true;
+        var race = false;
+        var refuse = false;
+        var unavailable = false;
+        var key = "sample";
+        var unloads = 0;
+        using var fixture = new HttpClient(new Handler(request =>
+        {
+            if (request.Method == HttpMethod.Get)
+                return Task.FromResult(unavailable ? Response(HttpStatusCode.ServiceUnavailable, "{}") :
+                    Response(HttpStatusCode.OK, JsonSerializer.Serialize(new { models = new[] { new {
+                        key, type = "llm", loaded_instances = loaded ? new[] { new { id = "loaded" } } : []
+                    } } })));
+            unloads++;
+            if (race) loaded = false;
+            if (race || refuse) return Task.FromResult(Response(HttpStatusCode.Conflict, "{}"));
+            loaded = false;
+            return Task.FromResult(Response(HttpStatusCode.OK, "{}"));
+        }));
+        var adapter = new LmStudioAdapter(fixture, endpoint with { Profile = ProviderProfile.LmStudio },
+            (_, _) => Task.FromResult<LmStudioDevices?>(null));
+        var model = (await adapter.InspectAsync(default)).Models.Single();
+        loaded = false;
+        await adapter.UnloadAsync(model, default);
+        Check(unloads == 0, "an already unloaded LM Studio instance is verified without a duplicate unload");
+        loaded = race = true;
+        await adapter.UnloadAsync(model, default);
+        Check(unloads == 1 && !loaded, "an unload race succeeds only after fresh inventory confirms absence");
+        loaded = refuse = true;
+        race = false;
+        await Fails(409, () => adapter.UnloadAsync(model, default));
+        unavailable = true;
+        await Fails(503, () => adapter.UnloadAsync(model, default));
+        unavailable = false;
+        key = "replacement-model";
+        var before = unloads;
+        await Fails(503, () => adapter.UnloadAsync(model, default));
+        Check(unloads == before, "a reused instance identifier cannot unload a different model");
     }
 
     private static async Task CheckGenericInventoryAsync(ProviderEndpoint endpoint)
@@ -248,6 +289,86 @@ internal static class ProviderChecks
         sentImage = false;
         await Fails(409, () => Run(InferenceOperation.Images, body, deployment, adapter));
         Check(!sentImage, "a replaced resident image must not receive the request");
+    }
+
+    private static async Task CheckEmbeddingsAsync(ProviderEndpoint endpoint, Deployment embedding)
+    {
+        endpoint = endpoint with { Profile = ProviderProfile.LmStudio };
+        int? requestedDimensions = null;
+        var output = """{"data":[{"index":0,"embedding":[0.5,0.25]},{"index":1,"embedding":[0.1,0.2]}]}""";
+        using var fixture = new HttpClient(new Handler(async request =>
+        {
+            if (request.RequestUri!.AbsolutePath == "/api/v1/models")
+                return Response(HttpStatusCode.OK, """
+                    {"models":[
+                      {"key":"native-model","type":"embedding","loaded_instances":[]},
+                      {"key":"native-model","type":"embedding","loaded_instances":[
+                        {"id":"instance-id","config":{"context_length":512}}]}
+                    ]}
+                    """);
+            using var body = JsonDocument.Parse(await request.Content!.ReadAsStringAsync());
+            var hasDimensions = body.RootElement.TryGetProperty("dimensions", out var dimensions);
+            Check((hasDimensions ? dimensions.GetInt32() : (int?)null) == requestedDimensions,
+                "embedding requests preserve the client's dimension parameter");
+            return Response(HttpStatusCode.OK, output);
+        }));
+        var devices = new LmStudioDevices(Json("""{"deviceIdentifier":"here"}"""), Json("""
+            [{"modelKey":"native-model"},{"modelKey":"native-model","deviceIdentifier":"linked"}]
+            """), Json("""
+            [{"modelKey":"native-model","deviceIdentifier":"linked","identifier":"instance-id"}]
+            """));
+        var adapter = new LmStudioAdapter(fixture, endpoint, (_, _) => Task.FromResult<LmStudioDevices?>(devices));
+        var models = (await adapter.InspectAsync(default)).Models;
+        var local = models.Single(model => model.Origin == ModelOrigin.Local);
+        var discovered = models.Single(model => model.Origin == ModelOrigin.LmLink);
+        Check(local.Id != discovered.Id && local.Instances.Length == 0 && !local.SupportsLoad &&
+            discovered.Instances.Single().Id == "instance-id" && discovered.EmbeddingDimensions is null,
+            "LM Studio's shared model keys preserve separate device identities and exact loaded instance ownership");
+        var unreported = embedding with { Model = discovered };
+        Check(unreported.ServingDisabled && !unreported.Eligible && !(embedding with { Model = local }).ServingDisabled &&
+            (embedding with { Model = local, Options = embedding.Options with { ServingDisabled = true } }).ServingDisabled,
+            "existing settings default LM Link copies off, leave local copies on, and retain an old disabled choice");
+        unreported = unreported with { Options = unreported.Options with { ServingOverride = true } };
+        var batch = Context("""{"model":"test","input":["first","second"]}""");
+        using (var request = await InferenceRequest.ReadAsync(InferenceOperation.Embeddings, batch.Request, default))
+        {
+            Check(unreported.Eligible && request.Shape.Fits(["text"], false, false, unreported.Context, null, ["float"]),
+                "an enabled embedding model with a served context needs no reported vector length");
+            await request.ForwardAsync(unreported, adapter, batch, default);
+            Check(ReadBody(batch) == output, "an embedding batch with unreported dimensions is returned unchanged");
+        }
+
+        requestedDimensions = 3;
+        output = """{"data":[{"index":0,"embedding":[0.5,0.25,0.1]}]}""";
+        const string resized = """{"model":"test","input":"small","dimensions":3}""";
+        await Run(InferenceOperation.Embeddings, resized, embedding, adapter);
+
+        output = """{"data":[{"index":0,"embedding":[]}]}""";
+        await Fails(502, () => Run(InferenceOperation.Embeddings, resized, embedding, adapter));
+        output = """{"data":[{"index":0,"embedding":[0.5]},{"index":1,"embedding":[0.25,0.1]}]}""";
+        await Fails(502, () => Run(InferenceOperation.Embeddings,
+            """{"model":"test","input":["first","second"],"dimensions":3}""", embedding, adapter));
+
+        var base64 = embedding with { Model = embedding.Model with { EmbeddingEncodings = ["float", "base64"] } };
+        const string encoded = """{"model":"test","input":"small","encoding_format":"base64","dimensions":3}""";
+        output = """{"data":[{"index":0,"embedding":"AAAAAA=="}]}""";
+        await Run(InferenceOperation.Embeddings, encoded, base64, adapter);
+        output = """{"data":[{"index":0,"embedding":"AA=="}]}""";
+        await Fails(502, () => Run(InferenceOperation.Embeddings, encoded, base64, adapter));
+
+        devices = devices with { Loaded = Json("""
+            [{"modelKey":"native-model","identifier":"instance-id"},
+             {"modelKey":"native-model","deviceIdentifier":"linked","identifier":"instance-id"}]
+            """) };
+        Check((await adapter.InspectAsync(default)).Models.All(model => model.Instances.Length == 0 && model.AmbiguousInstance),
+            "an identifier shared by loaded copies cannot safely select either device");
+        await Fails(503, () => adapter.ConfirmDeploymentAsync(InferenceOperation.Embeddings, discovered, discovered.Instances[0], default));
+
+        static JsonElement Json(string value)
+        {
+            using var document = JsonDocument.Parse(value);
+            return document.RootElement.Clone();
+        }
     }
 
     private static Deployment DeploymentFor(Guid endpoint, InferenceOperation operation)

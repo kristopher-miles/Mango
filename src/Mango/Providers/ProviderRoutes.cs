@@ -23,6 +23,10 @@ internal static class ProviderRoutes
             CommandAsync(context, cancellation => providers.RefreshAsync(request.Id, cancellation)));
         local.MapPut("/providers/models", (ModelUpdate update, HttpContext context) =>
             CommandAsync(context, cancellation => peers.EditLocalModelAsync(context.Request, update, cancellation)));
+        local.MapPut("/providers/models/{id}/serving", (string id, ModelServingUpdate update, HttpContext context) =>
+            CommandAsync(context, cancellation => providers.SetServingAsync(id, update.Enabled, cancellation)));
+        local.MapPut("/providers/{id:guid}/serving", (Guid id, ModelServingUpdate update, HttpContext context) =>
+            CommandAsync(context, cancellation => providers.SetProviderServingAsync(id, update.Enabled, cancellation)));
         local.MapPut("/providers/ratings", (RatingsRequest request, HttpContext context) =>
             CommandAsync(context, cancellation => peers.EditRatingsAsync(context.Request, request.Alias ?? "", request.Ratings ?? [], cancellation)));
         local.MapPut("/providers/selection", (SelectionRequest request, HttpContext context) =>

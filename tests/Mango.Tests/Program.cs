@@ -16,6 +16,12 @@ if (args is ["--generic-provider-fixture"])
 var directory = Directory.CreateTempSubdirectory("mango-check-").FullName;
 try
 {
+    if (args is ["--provider-resource-checks"])
+    {
+        await ProviderChecks.RunAsync();
+        await ResourceChecks.RunAsync(directory);
+        return;
+    }
     if (args is ["--qualify-release", var executable])
     {
         await PeerChecks.QualifyReleaseAsync(directory, Path.GetFullPath(executable));
@@ -166,9 +172,59 @@ static async Task TestHostAsync(string directory)
     try
     {
         var port = ((IPEndPoint)occupied.LocalEndpoint).Port;
-        Check((await LaunchCommandAsync(directory, "--headless", "--port", port.ToString())).Code != 0,
-            "Binding conflict prevents startup");
-        Check((await File.ReadAllTextAsync(diagnostic)).Contains($"127.0.0.1:{port}"), "Binding conflict startup diagnostic");
+        int nextPort;
+        using (var free = new TcpListener(IPAddress.Loopback, 0))
+        {
+            free.Start();
+            nextPort = ((IPEndPoint)free.LocalEndpoint).Port;
+        }
+        using (var recovery = Launch(directory, "--headless", "--port", port.ToString(), "--peer-port", port.ToString()))
+        {
+            try
+            {
+                var settingsUrl = await SettingsUrlAsync(http, directory, recovery);
+                Check(settingsUrl.Port != port, "Conflicting loopback port opens settings on a temporary port");
+                using var state = await http.GetFromJsonAsync<JsonDocument>(settingsUrl);
+                Check(state!.RootElement.GetProperty("nodePort").GetProperty("unavailableLoopbackPort").GetInt32() == port,
+                    "Settings identify the occupied port");
+                using var inference = await http.GetAsync(new Uri(settingsUrl, "/v1/models"));
+                Check(inference.StatusCode == HttpStatusCode.ServiceUnavailable, "Temporary settings port does not serve inference");
+                using var saved = await http.PutAsJsonAsync(new Uri(settingsUrl, "/api/local/node-port"), new { port = nextPort });
+                Check(saved.StatusCode == HttpStatusCode.NoContent, "Choose a different node port from recovery settings");
+                Check((await File.ReadAllTextAsync(diagnostic)).Contains($"127.0.0.1:{port}"), "Binding conflict startup diagnostic");
+                await StopAsync(directory, recovery);
+            }
+            finally { TerminateIfRunning(recovery); }
+        }
+
+        using (var serving = Launch(directory, "--headless", "--port", port.ToString()))
+        {
+            try
+            {
+                var settingsUrl = await SettingsUrlAsync(http, directory, serving);
+                using var state = await http.GetFromJsonAsync<JsonDocument>(settingsUrl);
+                Check(settingsUrl.Port == nextPort && state!.RootElement.GetProperty("nodePort").GetProperty("tailnetPort").GetInt32() == nextPort,
+                    "Saved node port supersedes the startup flags for both listeners");
+                await StopAsync(directory, serving);
+            }
+            finally { TerminateIfRunning(serving); }
+        }
+
+        var nonce = Guid.NewGuid().ToString("N");
+        using var updated = Launch(directory, "--headless", "--port", port.ToString(), "--update-ready", nonce);
+        try
+        {
+            var settingsUrl = await SettingsUrlAsync(http, directory, updated);
+            using var state = await http.GetFromJsonAsync<JsonDocument>(settingsUrl);
+            var binding = state!.RootElement.GetProperty("nodePort");
+            using var inference = await http.GetAsync(new Uri(settingsUrl, "/v1/models"));
+            Check(settingsUrl.Port == nextPort && binding.GetProperty("unavailableLoopbackPort").ValueKind == JsonValueKind.Null &&
+                !binding.GetProperty("tailnetPortUnavailable").GetBoolean() && inference.IsSuccessStatusCode,
+                "An update can reuse both listeners after the previous host shuts down");
+            Check(File.Exists(UpdateInstall.ReadyPath(directory, nonce)), "The replacement reports startup to the update helper");
+            await StopAsync(directory, updated);
+        }
+        finally { TerminateIfRunning(updated); }
     }
     finally
     {

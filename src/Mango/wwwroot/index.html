@@ -71,9 +71,10 @@
 
             <button type="button" id="provider-refresh" class="secondary">Refresh catalog</button>
           </div>
-        </form><div id="provider-extra-actions" class="actions"></div><p id="provider-status" role="status" class="field-status"></p><p id="provider-applied" class="muted"></p><div class="serving-quick"><label class="switch">Contribute this computer<input type="checkbox" data-setting="role" data-role-switch></label><span class="field-status" data-setting-status="role"></span><label>Benchmark policy<select data-setting="benchmarkPolicy"><option value="never">Never</option><option value="now">Now · before serving</option><option value="whenConvenient">When convenient</option></select></label></div></section><div class="serving-grid"><section><div class="model-toolbar"><h2>Models and readiness</h2><label class="sr-only" for="model-search">Find a model</label><input id="model-search" type="search" placeholder="Find a model…"><label class="sr-only" for="model-operation">Filter by operation</label><select id="model-operation"><option value="">All operations</option></select></div>
+        </form><div id="provider-extra-actions" class="actions"></div><p id="provider-status" role="status" class="field-status"></p><p id="provider-applied" class="muted"></p><div class="serving-quick"><label class="switch">Contribute this computer<input type="checkbox" data-setting="role" data-role-switch></label><span class="field-status" data-setting-status="role"></span><label>Benchmark policy<select data-setting="benchmarkPolicy"><option value="never">Never</option><option value="now">Now · before serving</option><option value="whenConvenient">When convenient</option></select></label></div></section><div class="serving-grid"><section><div class="model-toolbar"><h2>Models and readiness</h2><label class="sr-only" for="model-search">Find a model</label><input id="model-search" type="search" placeholder="Find a model…"></div>
+<div id="model-serving-actions" class="actions" role="group" aria-label="Serving controls for the selected provider" hidden><button type="button" id="model-serve-all" class="quiet">Serve all models</button><button type="button" id="model-serve-none" class="quiet">Serve no models</button></div>
 <div id="local-placement" class="panel" hidden><label>Local model preference<select id="local-selection" name="id" aria-describedby="selection-help"><option value="">Automatic placement</option></select></label><p id="selection-help" class="muted">Favors this model when it is eligible and other placements are comparable.</p><p id="selection-status" class="field-status" role="status"></p></div>
-<p id="catalog-status" role="status"></p><div id="deployment-list"></div><div class="pagination"><span id="model-count" class="muted"></span><button id="model-previous" type="button" class="quiet">Previous</button><button id="model-next" type="button" class="quiet">Next</button></div></section><aside class="panel qualification"><h2 id="qualification-title">Model qualification</h2><p id="qualification-scope" class="muted">Select a model to inspect its local limits.</p><p id="resource-feedback" class="field-status" role="status"></p><form id="resource-form" hidden>
+<p id="catalog-status" class="field-status" role="status"></p><div id="model-categories" class="page-tabs model-tabs" role="tablist" aria-label="Model categories"></div><div id="deployment-list" role="tabpanel" tabindex="0"></div><div class="pagination"><span id="model-count" class="muted"></span><button id="model-previous" type="button" class="quiet">Previous</button><button id="model-next" type="button" class="quiet">Next</button></div></section><aside class="panel qualification"><h2 id="qualification-title">Model qualification</h2><p id="qualification-scope" class="muted">Select a model to inspect its local limits.</p><p id="resource-feedback" class="field-status" role="status"></p><form id="resource-form" hidden>
           <fieldset>
             <legend>Local deployment limits</legend>
             <label>Deployment and operation<select name="target" required></select></label>
@@ -176,7 +177,11 @@
               <button id="public-check" type="button" class="secondary" disabled>Check HTTPS from this node</button></div>
           </fieldset>
         </form><p id="public-feedback" class="field-status" role="status"></p></section></section>
-<section data-page="network/recovery" class="page " hidden><section class="panel settings-panel"><h2>Recover a forgotten password</h2><form id="network-recover">
+<section data-page="network/recovery" class="page " hidden><section class="panel settings-panel"><h2>Change master password</h2><form id="network-password">
+              <p class="muted">Unlock administration in the sidebar to change the password. Existing computers, inference keys, and the recovery record stay valid.</p>
+              <fieldset disabled><label>New master password<input name="newPassword" type="password" minlength="12" maxlength="256" autocomplete="new-password" required></label>
+              <button type="submit">Change master password</button></fieldset>
+            </form></section><section class="panel settings-panel"><h2>Recover a forgotten password</h2><form id="network-recover">
               <p class="muted">Recovery keeps existing keys and configuration. A recovery record cannot recreate data missing from every peer.</p>
               <label>Recovery record<input name="recoveryRecord" type="password" maxlength="112" autocomplete="off" required></label>
               <label>New master password<input name="newPassword" type="password" minlength="12" maxlength="256" autocomplete="new-password" required></label>
@@ -287,6 +292,14 @@
 
         <p id="startup-status" class="action-status" role="status"></p>
       </form><p id="startup-unavailable" class="muted" hidden>Windows startup is available when Mango uses its default data directory.</p></section></section>
+<section data-page="system/ports" class="page" hidden><section class="panel settings-panel"><form id="node-port">
+        <p id="node-port-conflict" class="warning" role="status" hidden></p>
+        <p id="node-port-current" class="muted"></p>
+        <label>Node port<input name="port" type="number" min="1" max="65535" step="1" required aria-describedby="node-port-help"></label>
+        <p id="node-port-help" class="muted">The saved port applies to local and Tailscale connections when Mango restarts. Update client addresses if you change it.</p>
+        <button type="submit">Use this port</button>
+        <p id="node-port-feedback" class="field-status" role="status"></p>
+      </form></section></section>
 <section data-page="system/updates" class="page " hidden><section class="panel settings-panel"><h2>Mango updates</h2><p id="release-status" class="muted"></p><form id="maintenance">
           <label class="check"><input name="daily" type="checkbox"> Check for safe updates daily</label>
           <label class="check"><input name="deferred" type="checkbox"> Defer future maintenance on this host</label>
