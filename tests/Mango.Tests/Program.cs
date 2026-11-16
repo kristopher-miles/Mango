@@ -16,10 +16,24 @@ if (args is ["--generic-provider-fixture"])
 var directory = Directory.CreateTempSubdirectory("mango-check-").FullName;
 try
 {
+    if (args is ["--yolo-checks"])
+    {
+        await YoloChecks.RunAsync(directory);
+        Console.WriteLine("YOLO checks passed.");
+        return;
+    }
+    if (args is ["--cold-route-checks"])
+    {
+        await ColdRouteChecks.RunAsync(directory);
+        Console.WriteLine("Cold route checks passed.");
+        return;
+    }
     if (args is ["--provider-resource-checks"])
     {
         await ProviderChecks.RunAsync();
         await ResourceChecks.RunAsync(directory);
+        await YoloChecks.RunAsync(directory);
+        await ColdRouteChecks.RunAsync(directory);
         return;
     }
     if (args is ["--qualify-release", var executable])
@@ -34,6 +48,8 @@ try
     await GenericProviderChecks.RunAsync(directory);
     await PeerChecks.RunAsync(directory);
     await ResourceChecks.RunAsync(directory);
+    await YoloChecks.RunAsync(directory);
+    await ColdRouteChecks.RunAsync(directory);
     await SchedulingChecks.RunAsync();
     Console.WriteLine("Mango host checks passed.");
 }

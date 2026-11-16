@@ -148,8 +148,8 @@ internal static partial class PeerChecks
             Check((await LogPage(first.Network.Logs, here)).Entries.Count(item => item.Kind == LogKind.Operation) == operations,
                 "operational logging can be disabled while Everything stays enabled");
 
-            var rejected = "{\"model\":\"fixture-chat\",\"api_key\":\"fixture-credential-in-body\"}"u8.ToArray();
-            await SendLogBody(http, first.TailAddress, key, "/v1/chat/completions", rejected, "application/json", expected: 400);
+            var sensitiveBody = "{\"model\":\"fixture-chat\",\"api_key\":\"fixture-credential-in-body\"}"u8.ToArray();
+            await SendLogBody(http, first.TailAddress, key, "/v1/chat/completions", sensitiveBody, "application/json");
             originalRequests++;
             await SendLogBody(http, first.TailAddress, key, "/v1/audio/transcriptions", LogMultipart(wav, "Authorization: Bearer fixture-hidden-part\r\n"),
                 "multipart/form-data; boundary=mango-log-test");

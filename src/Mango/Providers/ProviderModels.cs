@@ -19,7 +19,9 @@ internal sealed record EndpointUpdate(Guid? Id, [property: JsonRequired] Provide
 
 internal sealed record ModelOptions(string? Alias, Dictionary<string, int?> Ratings, int? ServedContext,
     int? EmbeddingDimensions, string? EmbeddingFamily, int? MediaTokensPerItem, long Revision, bool ServingDisabled = false,
-    bool? ServingOverride = null, bool? AliasExplicit = null);
+    bool? ServingOverride = null, bool? AliasExplicit = null, bool Yolo = false);
+
+internal sealed record ModelYoloUpdate([property: JsonRequired] bool Enabled, [property: JsonRequired] long Revision);
 
 internal sealed record ModelServingUpdate([property: JsonRequired] bool Enabled);
 
@@ -54,7 +56,8 @@ internal sealed record ProviderModel(string Id, string NativeId, string Manageme
     int? TheoreticalContext, bool ClientTools, bool StructuredOutput, int? EmbeddingDimensions,
     string[] EmbeddingEncodings, long? ArtifactBytes = null, bool Installed = true,
     bool SupportsLoad = true, bool SupportsUnload = true, string? Format = null,
-    ModelOrigin? Origin = null, string? SourceDevice = null, bool AmbiguousInstance = false);
+    ModelOrigin? Origin = null, string? SourceDevice = null, bool AmbiguousInstance = false,
+    int? ReportedMediaTokensPerItem = null);
 
 internal sealed record ProviderInventory(string? Version, ProviderModel[] Models, bool CanLoad, bool CanUnload,
     bool CanStop, int? OwnedProcessId = null, int? MaxLoadedModels = null);
@@ -63,6 +66,8 @@ internal sealed record Deployment(Guid EndpointId, ProviderModel Model, ModelOpt
     string? Version, string? Configuration = null, string? PlacementEpoch = null)
 {
     public string Id => Model.Id;
+    // Local operator policy, bound to this host's stable deployment identity, never an alias.
+    public bool Yolo => Options.Yolo;
     public string? Alias => Options.Alias;
     public ProviderInstance? Instance => Model.Instances.FirstOrDefault(instance => !instance.Busy)
         ?? Model.Instances.FirstOrDefault();
@@ -74,6 +79,8 @@ internal sealed record Deployment(Guid EndpointId, ProviderModel Model, ModelOpt
     public LimitSource? ContextSource => Instance?.Context is not null ? LimitSource.Reported
         : Options.ServedContext is not null ? LimitSource.Configured : null;
     public int? EmbeddingDimensions => Model.EmbeddingDimensions ?? Options.EmbeddingDimensions;
+    public int? MediaTokensPerItem => Model.ReportedMediaTokensPerItem is { } reported
+        ? Math.Max(reported, Options.MediaTokensPerItem ?? 0) : Options.MediaTokensPerItem;
     public string EmbeddingSpace => Options.EmbeddingFamily is { } family ? $"family:{family}" : Id;
     public bool ServingDisabled => Options.ServingOverride is { } enabled ? !enabled
         : Options.ServingDisabled || Model.Origin == ModelOrigin.LmLink;

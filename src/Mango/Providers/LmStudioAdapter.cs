@@ -7,12 +7,13 @@ internal sealed class LmStudioAdapter(HttpClient http, ProviderEndpoint endpoint
     Func<Uri, CancellationToken, Task<LmStudioDevices?>>? inspectDevices = null) : ProviderAdapter(http, endpoint)
 {
     private bool Generic => Endpoint.Profile == ProviderProfile.Generic;
+    public override bool TransparentInference => Generic;
     private readonly HashSet<string> deviceAwareKeys = new(StringComparer.Ordinal);
     private LmStudioDevices? deviceInventory;
 
     public override void Prepare(InferenceOperation operation, JsonObject payload)
     {
-        if (operation == InferenceOperation.Chat && payload["max_completion_tokens"] is not null)
+        if (!Generic && operation == InferenceOperation.Chat && payload["max_completion_tokens"] is not null)
             throw new ProviderFailure(422, Generic ? "Use max_tokens to limit output on the generic profile."
                 : "Use max_tokens to limit output on this LM Studio profile.");
     }
@@ -31,6 +32,13 @@ internal sealed class LmStudioAdapter(HttpClient http, ProviderEndpoint endpoint
             var variant = row.Text("selected_variant") ?? row.Get("quantization").Text("name") ?? row.Text("format");
             var input = Generic && type == "transcription" ? new[] { "audio" } :
                 capabilities.IsTrue("vision") || row.IsTrue("has_vision_adapter") ? ["image", "text"] : ["text"];
+            if (Generic)
+            {
+                var reportedInputs = row.Get("input_modalities").Strings();
+                if (reportedInputs.Length != 0 && reportedInputs.All(value => value is "text" or "image" or "audio"))
+                    input = reportedInputs;
+                else if (capabilities.Strings().Contains("vision")) input = ["image", "text"];
+            }
             var instances = row.Get("loaded_instances").Items().Where(instance => instance.Text("id") is { Length: > 0 })
                 .Select(instance =>
                 {
@@ -38,7 +46,7 @@ internal sealed class LmStudioAdapter(HttpClient http, ProviderEndpoint endpoint
                     var id = instance.Text("id")!;
                     var configuration = ProviderIdentity.Hash(Endpoint.Id.ToString("N"), key, version, variant,
                         row.Long("size_bytes")?.ToString(), config.ValueKind == JsonValueKind.Undefined ? null : config.GetRawText());
-                    return new ProviderInstance(id, config.Number("context_length"), config.Number("parallel"),
+                    return new ProviderInstance(id, config.Number("context_length") ?? (Generic ? config.Number("context_size") : null), config.Number("parallel"),
                         ProviderIdentity.Hash(Endpoint.Id.ToString("N"), key, id, version, variant,
                             config.ValueKind == JsonValueKind.Undefined ? null : config.GetRawText()),
                         Busy: Generic && instance.IsTrue("busy"),
@@ -56,10 +64,13 @@ internal sealed class LmStudioAdapter(HttpClient http, ProviderEndpoint endpoint
             };
             models.Add(Model(key, row.Text("display_name") ?? key, variant,
                 input, outputs, operations, instances, row.Number("max_context_length"),
-                tools: capabilities.IsTrue("trained_for_tool_use"),
+                tools: capabilities.IsTrue("trained_for_tool_use") || Generic &&
+                    (row.IsTrue("client_tools") || row.IsTrue("supports_tools") || capabilities.IsTrue("client_tools") ||
+                     capabilities.IsTrue("tools") || capabilities.Strings().Contains("tools")),
                 structured: type == "llm" && (!Generic || capabilities.IsTrue("structured_output")),
                 dimensions: row.Number("embedding_dimensions"), encodings: type == "embedding" ? ["float"] : [],
-                artifactBytes: row.Long("size_bytes"), format: row.Text("format")));
+                artifactBytes: row.Long("size_bytes"), format: row.Text("format"),
+                mediaTokensPerItem: Generic ? row.Number("media_tokens_per_item") : null));
         }
         var devices = Generic ? null : await (inspectDevices ?? LmStudioDevices.InspectAsync)(new Uri(Endpoint.Address), cancellation);
         Volatile.Write(ref deviceInventory, devices);
@@ -168,6 +179,9 @@ internal sealed class LmStudioAdapter(HttpClient http, ProviderEndpoint endpoint
         {
             var key = row.Text("key");
             var instances = row.Get("loaded_instances");
+            if (row.Get("media_tokens_per_item").ValueKind is not (JsonValueKind.Undefined or JsonValueKind.Null) &&
+                row.Number("media_tokens_per_item") is not (>= 1 and <= ProviderLimits.MaxContext))
+                throw new ProviderFailure(502, "Generic media_tokens_per_item must be a positive bounded token count.");
             if (string.IsNullOrWhiteSpace(key) || !keys.Add(key) || string.IsNullOrWhiteSpace(row.Text("type")) ||
                 instances.ValueKind != JsonValueKind.Array)
                 throw new ProviderFailure(502, "Each generic model requires a unique key, a type, and a loaded_instances array.");
@@ -207,7 +221,19 @@ internal sealed class LmStudioAdapter(HttpClient http, ProviderEndpoint endpoint
             if (!Generic && !await InstanceStillLoadedAsync(model, instance, cancellation))
                 continue;
             if (model.Origin == ModelOrigin.Local && !model.SupportsLoad)
+            {
                 await ConfirmDeploymentAsync(default, model, instance, cancellation);
+                // Panini embedding instances are exposed in HTTP inventory but require
+                // the native local lifecycle control to release their allocations.
+                if (!Generic && new Uri(Endpoint.Address).IsLoopback &&
+                    model.Operations.SequenceEqual([InferenceOperation.Embeddings]))
+                {
+                    await LmStudioDevices.UnloadLocalAsync(instance.Id, cancellation);
+                    if (await InstanceStillLoadedAsync(model, instance, cancellation))
+                        throw new ProviderFailure(503, "LM Studio did not release the verified local embedding instance.");
+                    continue;
+                }
+            }
             try
             {
                 await JsonAsync("/api/v1/models/unload", cancellation, new { instance_id = instance.Id }, lifecycle: true);

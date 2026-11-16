@@ -32,6 +32,19 @@ internal sealed partial class ResourceProtection
             return FindBudget(model, endpoint, operation);
     }
 
+    // A cold routing bound is qualification evidence, never advertised loaded context.
+    public long? QualifiedUnits(Deployment model, EndpointStatus endpoint, InferenceOperation operation)
+    {
+        lock (sync)
+        {
+            if (FindBudget(model, endpoint, operation) is { Estimated: false } budget)
+                return budget.Workload.Units;
+            var profile = MatchProfile(model.Id, operation, Configuration(model), model.Instance?.ResourceFingerprint);
+            return profile is { Complete: true } ? profile.Measurements.Where(item => item.Workload.Operation == operation)
+                .Select(item => (long?)item.Workload.Units).Max() : null;
+        }
+    }
+
     public (int Complete, int Partial) BenchmarkCounts(Deployment model)
     {
         lock (sync)
@@ -251,8 +264,8 @@ internal sealed partial class ResourceProtection
         var workload = operation switch
         {
             InferenceOperation.Embeddings => new Workload(operation, context, 16),
-            InferenceOperation.SystemOne => new Workload(operation, context, 4, model.Options.MediaTokensPerItem is null ? 0 : 1),
-            InferenceOperation.Chat => new Workload(operation, context, 1, model.Options.MediaTokensPerItem is null ? 0 : 1),
+            InferenceOperation.SystemOne => new Workload(operation, context, 4, model.MediaTokensPerItem is null ? 0 : 1),
+            InferenceOperation.Chat => new Workload(operation, context, 1, model.MediaTokensPerItem is null ? 0 : 1),
             InferenceOperation.Images => new Workload(operation, 1024 * 1024),
             InferenceOperation.Transcription => new Workload(operation, ProviderLimits.MaxAudioBytes),
             InferenceOperation.Speech => new Workload(operation, 4096),
@@ -321,7 +334,7 @@ internal sealed partial class ResourceProtection
                 benchmarkDeployment = benchmarkPass = null;
             }
             var catalog = providers.View;
-            var pending = Targets(catalog).Where(IsPending).ToArray();
+            var pending = Targets(catalog).Where(item => !item.Model.Yolo).Where(IsPending).ToArray();
             SetBenchmarkReady(current.BenchmarkPolicy == BenchmarkPolicy.Never || pending.Length == 0);
             if (benchmark is not null || status.State != ContributionState.Contributor ||
                 reservations.Any(item => !item.Settled) || observed is null)

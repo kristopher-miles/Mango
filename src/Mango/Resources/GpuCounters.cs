@@ -62,6 +62,20 @@ internal sealed unsafe class GpuCounters : IDisposable
             processRows = ReadCounter(processes);
             sharedRows = ReadCounter(shared);
         }
+        if (query != 0 && (engineRows is null || memoryRows is null || adapters is null))
+        {
+            // Newly created GPU process/rate instances need two collections. Never
+            // substitute cached utilization or zero for missing telemetry.
+            Thread.Sleep(1000);
+            if (adapters is null) Volatile.Write(ref adapters, ReadAdapters());
+            if (PdhCollectQueryData(query) == 0)
+            {
+                engineRows = ReadCounter(engines);
+                memoryRows = ReadCounter(memory);
+                processRows = ReadCounter(processes);
+                sharedRows = ReadCounter(shared);
+            }
+        }
         var devices = Devices(adapters ?? [], memoryRows);
         var hardware = adapters is null ? null : ProviderIdentity.Hash(Environment.GetEnvironmentVariable("PROCESSOR_IDENTIFIER"),
             string.Join("|", adapters.Select(adapter => $"{adapter.Id}:{adapter.Driver}:{adapter.Integrated}:{adapter.Bytes}").Order()));

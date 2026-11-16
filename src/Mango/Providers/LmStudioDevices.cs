@@ -48,6 +48,29 @@ internal sealed record LmStudioDevices(JsonElement Link, JsonElement Downloaded,
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or Win32Exception or JsonException) { return default; }
     }
 
+    public static async Task UnloadLocalAsync(string instance, CancellationToken cancellation)
+    {
+        var start = new ProcessStartInfo(Cli) { UseShellExecute = false, CreateNoWindow = true,
+            RedirectStandardOutput = true, RedirectStandardError = true };
+        start.ArgumentList.Add("unload");
+        start.ArgumentList.Add(instance);
+        using var process = Process.Start(start) ?? throw new IOException("Could not start the LM Studio CLI.");
+        try
+        {
+            var output = process.StandardOutput.ReadToEndAsync(cancellation);
+            var error = process.StandardError.ReadToEndAsync(cancellation);
+            await process.WaitForExitAsync(cancellation);
+            await output;
+            await error;
+            if (process.ExitCode != 0) throw new ProviderFailure(503, "LM Studio could not release the verified local instance.");
+        }
+        finally
+        {
+            if (!process.HasExited)
+                try { process.Kill(); } catch (Exception error) when (error is InvalidOperationException or Win32Exception) { }
+        }
+    }
+
     private static async Task<JsonElement> ReadAsync(string[] arguments, CancellationToken cancellation)
     {
         var start = new ProcessStartInfo(Cli)

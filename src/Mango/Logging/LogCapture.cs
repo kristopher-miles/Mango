@@ -1,4 +1,5 @@
 using System.Net.Http.Headers;
+using System.Text.Json.Nodes;
 
 namespace Mango.Logging;
 
@@ -91,6 +92,28 @@ internal sealed class LogCapture(LogStore store, LogConfiguration configuration,
         reservedInput = 0;
         input.Clear();
     }
+
+    public void ExcludeCredentialFields(JsonNode payload)
+    {
+        if (!wantsInput || inputAbandoned || !ContainsCredentialField(payload)) return;
+        inputExcluded = true;
+        AbandonInput();
+        inputAbandoned = true;
+    }
+
+    private static readonly HashSet<string> CredentialFields = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "authorization", "proxy-authorization", "cookie", "set-cookie", "x-api-key", "api-key", "api_key", "apikey",
+        "mango-admin", "mango-session", "x-provider-token", "x-auth-token", "access_token", "refresh_token",
+        "client_secret", "password", "secret", "token"
+    };
+
+    private static bool ContainsCredentialField(JsonNode? value) => value switch
+    {
+        JsonObject fields => fields.Any(field => CredentialFields.Contains(field.Key) || ContainsCredentialField(field.Value)),
+        JsonArray values => values.Any(ContainsCredentialField),
+        _ => false
+    };
 
     public void Finish(LogEntry fallback)
     {

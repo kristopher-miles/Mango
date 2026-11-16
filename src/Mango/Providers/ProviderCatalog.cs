@@ -14,7 +14,7 @@ internal sealed record EndpointStatus(Guid Id, ProviderProfile Profile, Provider
 internal sealed record CatalogView(EndpointStatus[] Endpoints, Deployment[] Models, string? Selected, string? RecoveryWarning);
 internal sealed record ProviderLifecycle(string DeploymentId, bool Loading, TimeSpan Elapsed);
 internal sealed record ReleasedEndpoint(Guid Id, int? StoppedProcess);
-internal sealed record ReleaseResult(ReleasedEndpoint[] Released, string? Error = null);
+internal sealed record ReleaseResult(ReleasedEndpoint[] Released, string? Error = null, bool AwaitingStop = false);
 internal sealed record ServingPlacement(Deployment Model, EndpointStatus Endpoint, ResourceBudget? Budget, Workload Workload);
 internal sealed record ExecutionResult(bool Settled, ProviderFailure? Failure, ProviderExecution? Timing);
 internal sealed record StartExecution(AdmissionStatus Status, string? Reason,
@@ -54,18 +54,30 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
         uncertainModels.Select(item => (item.Value, item.Key)).ToArray();
 
     public bool HasUnsettled(string deployment) => uncertainModels.ContainsKey(deployment);
+    internal bool HasActiveRequests => !activeModels.IsEmpty;
 
-    internal void RestoreUnsettled(Guid endpoint, string deployment)
+    private readonly ConcurrentDictionary<string, byte> uncertainLoads = new();
+    internal bool HasUnsettledLoad(string deployment) => uncertainLoads.ContainsKey(deployment);
+
+    internal void RestoreUnsettled(Guid endpoint, string deployment, bool loading = false)
     {
         if (adapters.ContainsKey(endpoint))
+        {
             uncertainModels[deployment] = endpoint;
+            if (loading) uncertainLoads[deployment] = 0;
+        }
     }
 
-    internal void ConfirmReleased(Guid endpoint)
+    internal void ConfirmReleased(Guid endpoint, bool includeYolo = true)
     {
-        foreach (var item in uncertainModels.Where(item => item.Value == endpoint))
+        foreach (var item in uncertainModels.Where(item => item.Value == endpoint && (includeYolo || !IsYolo(item.Key))))
+        {
             uncertainModels.TryRemove(item.Key, out _);
+            uncertainLoads.TryRemove(item.Key, out _);
+        }
     }
+
+    private bool IsYolo(string id) => View.Models.Any(model => model.Id == id && model.Yolo);
 
     public CatalogView View
     {
@@ -236,7 +248,7 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
             var updated = new ModelOptions(BlankToNull(input.Alias), input.Ratings ?? [],
                 input.ServedContext, input.EmbeddingDimensions, BlankToNull(input.EmbeddingFamily),
                 input.MediaTokensPerItem, model.Options.Revision + 1, model.Options.ServingDisabled, model.Options.ServingOverride,
-                AliasExplicit: true);
+                AliasExplicit: true, Yolo: model.Yolo);
             ValidateModel(updated);
             RequireCompatibleAlias(model with { Options = updated }, View.Models);
             if (ModelServing.Of(model.Options) != ModelServing.Of(updated) && WorkInProgress(model.EndpointId))
@@ -249,6 +261,26 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
 
     public Task SetServingAsync(string id, bool enabled, CancellationToken cancellation) =>
         UpdateServingAsync(() => [Find(id)], enabled, cancellation);
+
+    public async Task SetYoloAsync(string id, ModelYoloUpdate update, CancellationToken cancellation)
+    {
+        await operation.WaitAsync(cancellation);
+        try
+        {
+            var model = Find(id);
+            if (model.Options.Revision != update.Revision)
+                throw new ProviderFailure(409, "This model's local settings changed. Refresh before changing YOLO mode.");
+            if (WorkInProgress(model.EndpointId))
+                throw new ProviderFailure(423, "Wait for provider work to settle before changing YOLO mode.");
+            await store.UpdateAsync(value => value with
+            {
+                Models = new(value.Models) { [id] = model.Options with
+                    { Yolo = update.Enabled, Revision = model.Options.Revision + 1 } }
+            }, cancellation);
+            Publish();
+        }
+        finally { ReleaseOperation(); }
+    }
 
     public Task SetProviderServingAsync(Guid id, bool enabled, CancellationToken cancellation) =>
         UpdateServingAsync(() =>
@@ -363,7 +395,7 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
             invoked = true;
             if (load)
             {
-                await adapter.LoadAsync(model.Model, model.Options.ServedContext, linked.Token);
+                await adapter.LoadAsync(model.Model, model.Yolo ? null : model.Options.ServedContext, linked.Token);
                 if (adapter.OwnedProcessId.HasValue)
                     Publish();
             }
@@ -446,6 +478,7 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
                 else if (reservation.Running)
                 {
                     uncertainModels[id] = target!.EndpointId;
+                    if (load) uncertainLoads[id] = 0;
                     Publish();
                     SignalRefresh(target.EndpointId);
                 }
@@ -494,15 +527,16 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
     {
         if (model.ServingDisabled || !model.AcceptsIdentifier(shape.Alias) || !model.Model.Installed || !model.Model.Operations.Contains(shape.Operation) ||
             !shape.Fits(model.Model.Inputs, model.Model.ClientTools, model.Model.StructuredOutput, model.Context,
-                model.Options.MediaTokensPerItem, model.Model.EmbeddingEncodings, allowUnverifiedContext) ||
+                model.MediaTokensPerItem, model.Model.EmbeddingEncodings, allowUnverifiedContext) ||
             uncertainModels.ContainsKey(model.Id))
             return null;
         var endpoint = snapshot.Endpoints.First(item => item.Id == model.EndpointId);
         if (!model.Eligible && !(endpoint.Mode == ProviderMode.Managed && endpoint.CanLoad && model.Model.SupportsLoad))
             return null;
-        var workload = shape.Demand(model.Context);
+        var workload = shape.Demand(model.Context, model.Instance is null
+            ? resources?.QualifiedUnits(model, endpoint, shape.Operation) : null);
         var budget = resources?.Estimate(model, endpoint, shape.Operation);
-        if (resources is not null && (budget is null || !ResourceProtection.Covers(budget.Workload, workload) ||
+        if (resources is not null && ((!model.Yolo && (budget is null || !ResourceProtection.Covers(budget.Workload, workload))) ||
             !resources.IsAvailable(model, endpoint, shape.Operation)))
             return null;
         return new(model, endpoint, budget, workload);
@@ -516,11 +550,16 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
     {
         var target = placement.Model;
         var operationKind = placement.Workload.Operation;
+        if (target.Yolo)
+        {
+            await ManageAsync(target.Id, true, cancellation, requested: operationKind, scheduled: true);
+            return;
+        }
         while (true)
         {
             cancellation.ThrowIfCancellationRequested();
             var current = View;
-            var idle = current.Models.Where(item => item.Id != target.Id && item.Instance is { Busy: false } &&
+            var idle = current.Models.Where(item => !item.Yolo && item.Id != target.Id && item.Instance is { Busy: false } &&
                     item.Model.SupportsUnload && !item.Busy && current.Endpoints.Any(endpoint => endpoint.Id == item.EndpointId &&
                         endpoint.Mode == ProviderMode.Managed && endpoint.CanUnload))
                 .OrderByDescending(item => item.EndpointId == target.EndpointId).ThenByDescending(item => item.Model.ArtifactBytes)
@@ -566,7 +605,8 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
             ResourceReservation? reservation = null;
             if (resources is not null)
             {
-                var admission = resources.TryAdmit(model, placement.Endpoint, placement.Workload, ResourceWork.Execute);
+                var admission = resources.TryAdmit(model, placement.Endpoint, placement.Workload, ResourceWork.Execute,
+                    payloadBytes: payload.Bytes);
                 if (admission.Reservation is null)
                     return new(admission.Status, admission.Reason);
                 reservation = admission.Reservation;
@@ -702,14 +742,15 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
             activeModels.TryRemove(model.Id, out _);
     }
 
-    internal async Task<ReleaseResult> ReleaseManagedAsync(CancellationToken cancellation)
+    internal async Task<ReleaseResult> ReleaseManagedAsync(CancellationToken cancellation, bool includeYolo = false)
     {
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
         deadline.CancelAfter(TimeSpan.FromSeconds(25));
         var released = new List<ReleasedEndpoint>();
         try
         {
-            while (!activeModels.IsEmpty || View.Endpoints.Any(item => resources?.HasRunning(item.Id) == true))
+            while (activeModels.Keys.Any(id => includeYolo || !IsYolo(id)) ||
+                View.Endpoints.Any(item => resources?.HasRunning(item.Id, includeYolo) == true))
                 await Task.Delay(100, deadline.Token);
             await operation.WaitAsync(deadline.Token);
             try
@@ -718,12 +759,22 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
                 {
                     var adapter = adapters[endpoint.Id];
                     var ownedPid = adapter.OwnedProcessId;
-                    var owned = ownedPid.HasValue;
+                    var owned = ownedPid.HasValue && (includeYolo || !View.Models.Any(model => model.EndpointId == endpoint.Id && model.Yolo));
                     if (!owned)
                         await RefreshOneAsync(endpoint.Id, deadline.Token);
+                    while (!owned && uncertainModels.Any(item => item.Value == endpoint.Id && (includeYolo || !IsYolo(item.Key)) &&
+                        uncertainLoads.ContainsKey(item.Key) &&
+                        !View.Models.Any(model => model.Id == item.Key && model.Instance is not null)))
+                    {
+                        // An absent instance cannot prove that a canceled provider load stopped.
+                        await Task.Delay(250, deadline.Token);
+                        await RefreshOneAsync(endpoint.Id, deadline.Token);
+                    }
                     var models = View.Models.Where(item => item.EndpointId == endpoint.Id && item.Instance is not null &&
-                        item.Model.Origin != ModelOrigin.LmLink).ToArray();
-                    if (models.Length == 0 && !owned && !uncertainModels.Values.Contains(endpoint.Id))
+                        item.Model.Origin != ModelOrigin.LmLink && (includeYolo || !item.Yolo)).ToArray();
+                    if (!owned && !View.Endpoints.Any(item => item.Id == endpoint.Id && item.Online))
+                        return new(released.ToArray(), "Mango could not verify that the managed provider released its models.");
+                    if (models.Length == 0 && !owned && !uncertainModels.Any(item => item.Value == endpoint.Id && (includeYolo || !IsYolo(item.Key))))
                         continue;
                     using var unload = CancellationTokenSource.CreateLinkedTokenSource(deadline.Token);
                     unload.CancelAfter(TimeSpan.FromSeconds(6));
@@ -734,24 +785,29 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
                     }
                     catch (Exception error) when (error is ProviderFailure or OperationCanceledException or System.ComponentModel.Win32Exception)
                     {
-                        if (!adapter.OwnedProcessId.HasValue)
-                            return new(released.ToArray(), "A managed provider did not confirm unload.");
+                        // An unload may complete after its short response deadline. Verify with
+                        // the remaining release deadline below; never infer release from an error.
                     }
-                    if (adapter.OwnedProcessId.HasValue)
+                    if (owned)
                         await adapter.StopAsync(deadline.Token);
                     await RefreshOneAsync(endpoint.Id, deadline.Token, settleOwnedExit: !owned);
                     var refreshed = View;
+                    if (!owned && models.Length != 0 && refreshed.Endpoints.Any(item => item.Id == endpoint.Id && item.Online) &&
+                        !refreshed.Models.Any(item => item.EndpointId == endpoint.Id && item.Instance is not null &&
+                            item.Model.Origin != ModelOrigin.LmLink && (includeYolo || !item.Yolo)))
+                        ConfirmReleased(endpoint.Id, includeYolo);
                     if ((!owned && !refreshed.Endpoints.Any(item => item.Id == endpoint.Id && item.Online)) ||
-                        refreshed.Models.Any(item => item.EndpointId == endpoint.Id && item.Instance is not null && item.Model.Origin != ModelOrigin.LmLink) ||
-                        !owned && uncertainModels.Values.Contains(endpoint.Id))
+                        refreshed.Models.Any(item => item.EndpointId == endpoint.Id && item.Instance is not null && item.Model.Origin != ModelOrigin.LmLink && (includeYolo || !item.Yolo)) ||
+                        !owned && uncertainModels.Any(item => item.Value == endpoint.Id && (includeYolo || !IsYolo(item.Key))))
                         return new(released.ToArray(), "Mango could not verify that the managed provider released its models.");
-                    released.Add(new(endpoint.Id, ownedPid));
+                    released.Add(new(endpoint.Id, owned ? ownedPid : null));
                 }
-                var remaining = uncertainModels.Values.Distinct().Except(released.Select(item => item.Id)).ToArray();
+                var remaining = uncertainModels.Where(item => includeYolo || !IsYolo(item.Key)).Select(item => item.Value)
+                    .Distinct().Except(released.Select(item => item.Id)).ToArray();
                 foreach (var endpoint in remaining)
                     await RefreshOneAsync(endpoint, deadline.Token);
-                if (uncertainModels.Values.Except(released.Select(item => item.Id)).Any())
-                    return new(released.ToArray(), "An attached provider has not confirmed that its request stopped.");
+                if (uncertainModels.Where(item => includeYolo || !IsYolo(item.Key)).Select(item => item.Value).Except(released.Select(item => item.Id)).Any())
+                    return new(released.ToArray(), "An attached provider has not confirmed that its request stopped.", AwaitingStop: true);
                 return new(released.ToArray());
             }
             finally { ReleaseOperation(); }
@@ -784,10 +840,11 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
             foreach (var key in uncertainModels.Where(pair => pair.Value == id).Select(pair => pair.Key).ToArray())
             {
                 var model = result.Models.FirstOrDefault(model => model.Id == key);
-                if (model is null || model.Instances.Length == 0 ||
-                    await ObserveIdleAsync(adapter, model, wait: false, cancellation))
+                if ((!uncertainLoads.ContainsKey(key) && (model is null || model.Instances.Length == 0)) ||
+                    model is { Instances.Length: > 0 } && await ObserveIdleAsync(adapter, model, wait: false, cancellation))
                 {
                     uncertainModels.TryRemove(key, out _);
+                    uncertainLoads.TryRemove(key, out _);
                     resources?.ConfirmSettled(key);
                 }
             }
@@ -841,6 +898,8 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
                 var configuration = ProviderIdentity.Hash(endpoint.Profile.ToString(), endpoint.Mode.ToString(), endpoint.Address,
                     FileStamp(endpoint.Executable), FileStamp(endpoint.ModelFile), options.ServedContext?.ToString(),
                     options.EmbeddingDimensions?.ToString(), options.MediaTokensPerItem?.ToString());
+                if (model.ReportedMediaTokensPerItem is { } mediaBound)
+                    configuration = ProviderIdentity.Hash(configuration, "reported-media", mediaBound.ToString());
                 var old = previous.Models.FirstOrDefault(item => item.Id == model.Id);
                 var instance = model.Instances.FirstOrDefault(item => !item.Busy) ?? model.Instances.FirstOrDefault();
                 var epoch = !online || instance is null || uncertainModels.ContainsKey(model.Id) ? null :

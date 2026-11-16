@@ -62,21 +62,19 @@ internal sealed class WindowsObservation : IDisposable
             tree[root] = process;
             if (parents is not null)
             {
-                var queue = new Queue<int>();
-                queue.Enqueue(root);
-                while (queue.TryDequeue(out var parent) && parents.TryGetValue(parent, out var children))
-                    foreach (var child in children)
+                WalkDescendants(root, parents, (parent, child) =>
+                {
+                    if (ReadProcess(child) is { } sample)
                     {
-                        if (tree.ContainsKey(child))
-                            continue;
-                        if (ReadProcess(child) is { } sample && sample.Start >= tree[parent].Start)
-                        {
-                            tree[child] = sample;
-                            queue.Enqueue(child);
-                        }
-                        else
-                            attributed = false;
+                        // Numeric parent PIDs survive the original parent's exit. A child
+                        // older than this parent identity belongs to a previous PID owner.
+                        if (!IsCurrentChild(tree[parent].Start, sample.Start)) return false;
+                        tree[child] = sample;
+                        return true;
                     }
+                    attributed = false;
+                    return false;
+                });
             }
             foreach (var (id, sample) in tree)
             {
@@ -130,6 +128,22 @@ internal sealed class WindowsObservation : IDisposable
     }
 
     private static bool IsAny(IPAddress address) => address.Equals(IPAddress.Any) || address.Equals(IPAddress.IPv6Any);
+
+    internal static bool IsCurrentChild(long parentStart, long childStart) => childStart >= parentStart;
+
+    internal static void WalkDescendants(int root, Dictionary<int, List<int>> parents,
+        Func<int, int, bool> accept)
+    {
+        var seen = new HashSet<int> { root };
+        var queue = new Queue<int>();
+        queue.Enqueue(root);
+        while (queue.TryDequeue(out var parent))
+        {
+            if (!parents.TryGetValue(parent, out var children)) continue;
+            foreach (var child in children)
+                if (seen.Add(child) && accept(parent, child)) queue.Enqueue(child);
+        }
+    }
 
     private sealed record ProcessSample(long Start, long Cpu, long Resident, long Peak);
     private static ProcessSample? ReadProcess(int id)

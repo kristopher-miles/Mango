@@ -23,7 +23,7 @@ internal readonly record struct Workload(InferenceOperation Operation, long Unit
     int? Width = null, int? Height = null);
 internal sealed record ResourceBudget(string Deployment, string Configuration, string? Runtime, Workload Workload,
     MemoryCost Load, MemoryCost Execute, bool AllowOverlap, int ParallelSlots = 1, bool AllowAttached = false, bool Estimated = false);
-internal sealed record PendingRelease(Guid Endpoint, string Deployment, int[] OwnedProcesses);
+internal sealed record PendingRelease(Guid Endpoint, string Deployment, int[] OwnedProcesses, bool Loading = false);
 internal sealed record ResourceHold(ContributionState State, string Reason, PendingRelease[]? Pending = null);
 internal sealed record ResourceEvent(DateTimeOffset At, string Reason, bool Loading, bool Running,
     long? FreeRamBytes, double? ExternalCpu, double? ExternalGpu);
@@ -49,7 +49,7 @@ internal sealed record Admission(AdmissionStatus Status, string? Reason, Resourc
 }
 
 internal sealed class ResourceReservation(ResourceProtection owner, Guid endpoint, string deployment, ResourceWork work,
-    string fingerprint, MemoryCost cost, bool overlap, long sample, WorkerMemory? baseline) : IDisposable
+    string fingerprint, MemoryCost cost, bool overlap, long sample, WorkerMemory? baseline, bool yolo = false) : IDisposable
 {
     internal readonly CancellationTokenSource Stop = new();
     internal readonly Guid Endpoint = endpoint;
@@ -60,6 +60,7 @@ internal sealed class ResourceReservation(ResourceProtection owner, Guid endpoin
     internal readonly bool Overlap = overlap;
     internal readonly long Sample = sample;
     internal readonly WorkerMemory? Baseline = baseline;
+    internal readonly bool Yolo = yolo;
     internal bool Running = true;
     internal bool Settled;
     internal bool Disposed;

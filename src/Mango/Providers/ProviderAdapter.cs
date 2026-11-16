@@ -29,6 +29,7 @@ internal abstract class ProviderAdapter(HttpClient http, ProviderEndpoint endpoi
     public virtual Task ConfirmDeploymentAsync(InferenceOperation operation, ProviderModel model, ProviderInstance instance,
         CancellationToken cancellation) => Task.CompletedTask;
     public virtual void Prepare(InferenceOperation operation, JsonObject payload) { }
+    public virtual bool TransparentInference => false;
     protected virtual string InferenceQuery => "";
 
     public Task<HttpResponseMessage> ExecuteAsync(InferenceOperation operation, HttpContent content, CancellationToken cancellation) =>
@@ -157,10 +158,12 @@ internal abstract class ProviderAdapter(HttpClient http, ProviderEndpoint endpoi
     protected ProviderModel Model(string nativeId, string displayName, string? variant, string[] inputs, string[] outputs,
         InferenceOperation[] operations, ProviderInstance[] instances, int? theoreticalContext, bool tools = false,
         bool structured = false, int? dimensions = null, string[]? encodings = null, long? artifactBytes = null,
-        string? managementId = null, bool installed = true, bool supportsLoad = true, bool supportsUnload = true, string? format = null) =>
+        string? managementId = null, bool installed = true, bool supportsLoad = true, bool supportsUnload = true,
+        string? format = null, int? mediaTokensPerItem = null) =>
         new(ProviderIdentity.Model(Endpoint.Id, nativeId), nativeId, managementId ?? nativeId, displayName,
             variant, inputs, outputs, operations, instances, theoreticalContext, tools, structured,
-            dimensions, encodings ?? [], artifactBytes, installed, supportsLoad, supportsUnload, format);
+            dimensions, encodings ?? [], artifactBytes, installed, supportsLoad, supportsUnload, format,
+            ReportedMediaTokensPerItem: mediaTokensPerItem);
 
 }
 

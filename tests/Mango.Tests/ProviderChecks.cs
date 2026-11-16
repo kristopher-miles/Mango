@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Mango.Providers;
+using Mango.Peers;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Primitives;
 
@@ -19,6 +20,16 @@ internal static class ProviderChecks
 
     public static async Task RunAsync()
     {
+        var observed = new ObservedDeployment("fixture", "fixture", null, null, ["text", "image"], ["text"],
+            [InferenceOperation.Chat], 262144, null, true, true, null, 1, null, "fixture", ClientTools: true);
+        var catalogue = JsonSerializer.SerializeToElement(PeerNetwork.DescribeModel("fixture", [observed]));
+        Check(catalogue.GetProperty("context_size").GetInt32() == 262144 &&
+            catalogue.GetProperty("capabilities").EnumerateArray().Any(value => value.GetString() == "vision"),
+            "catalogue preserves observed loaded context and vision");
+        foreach (var models in new[] { new[] { observed with { Loaded = false } },
+            new[] { observed, observed with { Context = null } } })
+            Check(!JsonSerializer.SerializeToElement(PeerNetwork.DescribeModel("fixture", models))
+                .TryGetProperty("context_size", out _), "unknown serving context is omitted from the catalogue");
         var endpoint = new ProviderEndpoint(Guid.NewGuid(), ProviderProfile.UnslothStudio, ProviderMode.Managed,
             "http://127.0.0.1:8888", ProviderSecrets.Protect(NativeSecret), null, null);
         Check(endpoint.ProtectedToken != NativeSecret && ProviderSecrets.Open(endpoint.ProtectedToken!) == NativeSecret,
@@ -73,8 +84,9 @@ internal static class ProviderChecks
             Check(!context.Response.Headers.ContainsKey("Set-Cookie"), "upstream credential headers are excluded");
         }
 
-        await Fails(400, async () => await InferenceRequest.ReadAsync(InferenceOperation.Chat,
-            Context("""{"model":"test","enable_tools":true}""").Request, default));
+        using (var opaque = await InferenceRequest.ReadAsync(InferenceOperation.Chat,
+            Context("""{"model":"test","enable_tools":true}""").Request, default))
+            Check(opaque.Alias == "test", "provider fields do not veto routing metadata extraction");
         await Fails(400, async () => await InferenceRequest.ReadAsync(InferenceOperation.Speech,
             Context("""{"model":"test","input":"Hello","provider_id":"external"}""").Request, default));
         await RejectTranscriptionFieldAsync("prompt", "This field would be ignored by the provider.");
@@ -114,7 +126,62 @@ internal static class ProviderChecks
         await CheckGenericMediaAsync(endpoint);
         await CheckLmStudioUnloadAsync(endpoint);
         await CheckResidentImageAsync(endpoint);
+        await CheckTransparentHopsAsync(endpoint);
         Console.WriteLine("Provider fixture checks passed.");
+    }
+
+    private static async Task CheckTransparentHopsAsync(ProviderEndpoint endpoint)
+    {
+        var image = "data:image/png;base64," + new string('A', 256 * 1024);
+        var content = new JsonArray(new JsonObject { ["type"] = "text", ["text"] = "Count retained images." });
+        for (var index = 0; index < 6; index++)
+            content.Add(new JsonObject { ["type"] = "image_url", ["image_url"] = new JsonObject {
+                ["url"] = image, ["provider_image_option"] = index } });
+        var chat = new JsonObject {
+            ["model"] = "test", ["messages"] = new JsonArray(new JsonObject {
+                ["role"] = "provider_role", ["content"] = content, ["provider_message_option"] = true }),
+            ["chat_template_kwargs"] = new JsonObject { ["provider_nested"] = new JsonObject { ["level"] = 7 },
+                ["enable_thinking"] = "provider-decides", ["preserve_thinking"] = true },
+            ["web_search_options"] = new JsonObject { ["provider_mode"] = "test" },
+            ["tools"] = new JsonArray(new JsonObject { ["type"] = "provider_tool", ["opaque"] = new JsonArray(1, 2) }),
+            ["provider_extension"] = new JsonObject { ["nested"] = new JsonArray(true, "retained") }
+        };
+        foreach (var body in new[] { chat, (JsonObject)chat.DeepClone(),
+            JsonNode.Parse("""{"model":"test","input":{"provider_input":"opaque"},"encoding_format":"provider-format","provider_extension":{"retain":true}}""")!.AsObject(),
+            JsonNode.Parse("""{"model":"test","state":{"provider_state":[1,2]},"questions":{"reply":{"type":"provider_decides","extra":true}},"provider_extension":{"retain":true}}""")!.AsObject() })
+        {
+            var operation = body.ContainsKey("messages") ? InferenceOperation.Chat :
+                body.ContainsKey("input") ? InferenceOperation.Embeddings : InferenceOperation.SystemOne;
+            if (body != chat && operation == InferenceOperation.Chat) body["max_tokens"] = 0;
+            var expected = (JsonObject)body.DeepClone();
+            expected["model"] = "instance-id";
+            var calls = 0;
+            using var fixture = new HttpClient(new Handler(async request => {
+                calls++;
+                var actual = JsonNode.Parse(await request.Content!.ReadAsStringAsync());
+                Check(JsonNode.DeepEquals(actual, expected), "all provider fields survive ingress and peer parsing except model resolution");
+                Check(operation != InferenceOperation.Chat || body.ContainsKey("max_tokens") ||
+                    !actual!.AsObject().ContainsKey("max_tokens"), "an omitted output limit stays omitted");
+                return Response(HttpStatusCode.OK, """{"provider_reply":"unchanged"}""");
+            }));
+            var adapter = new LmStudioAdapter(fixture, endpoint with { Profile = ProviderProfile.Generic });
+            using var ingress = await InferenceRequest.ReadAsync(operation, Context(body.ToJsonString()).Request, default);
+            using var transfer = ingress.CreateBody();
+            var servingContext = Context(await transfer.ReadAsStringAsync());
+            using var peer = await InferenceRequest.ReadAsync(operation, servingContext.Request, default);
+            if (operation == InferenceOperation.Chat)
+                Check(peer.Shape.MediaItems == 6 && peer.Shape.PromptUnits < 4096,
+                    "large retained data URLs count as six media items rather than base64 text context");
+            var deployment = DeploymentFor(endpoint.Id, operation);
+            deployment = deployment with { Model = deployment.Model with { Inputs = ["image", "text"],
+                ReportedMediaTokensPerItem = 1024, Instances = [new("instance-id", 262144, 1, "fixture")] } };
+            var timing = await peer.ForwardAsync(deployment, adapter, servingContext, default);
+            Check(calls == 1 && (operation != InferenceOperation.Chat || timing.PromptTokens < 10240),
+                "otherwise admissible opaque request reaches provider without a tokenizer preflight");
+        }
+        var oversized = Context("{}");
+        oversized.Request.ContentLength = ProviderLimits.MaxRequestBytes + 1L;
+        await Fails(413, async () => await InferenceRequest.ReadAsync(InferenceOperation.Chat, oversized.Request, default));
     }
 
     private static async Task CheckLmStudioUnloadAsync(ProviderEndpoint endpoint)
@@ -162,11 +229,36 @@ internal static class ProviderChecks
     private static async Task CheckGenericInventoryAsync(ProviderEndpoint endpoint)
     {
         var inventory = """
-            {"models":[{"key":"sample","type":"llm","loaded_instances":[{"id":"loaded","busy":true}]}]}
+            {"models":[{"key":"sample","type":"llm","input_modalities":["text","image"],"client_tools":true,"media_tokens_per_item":1024,
+            "loaded_instances":[{"id":"loaded","busy":true,"config":{"context_size":262144,"parallel":1}}]}]}
             """;
         using var fixture = new HttpClient(new Handler(_ => Task.FromResult(Response(HttpStatusCode.OK, inventory))));
         var adapter = new LmStudioAdapter(fixture, endpoint with { Profile = ProviderProfile.Generic });
         var model = (await adapter.InspectAsync(default)).Models.Single();
+        Check(model.Inputs.Contains("image") && model.ClientTools && model.Instances.Single().Context == 262144,
+            "generic explicit vision, client tools and loaded context survive normalization");
+        var boundedMedia = new Deployment(endpoint.Id, model, new(null, [], null, null, null, null, 0), true, false, null);
+        Check(boundedMedia.MediaTokensPerItem == 1024 && new InferenceShape("sample", InferenceOperation.Chat,
+            ["text", "image"], false, false, 49, 8192, 1, 1, 1, null, null)
+            .Fits(model.Inputs, model.ClientTools, model.StructuredOutput, boundedMedia.Context,
+                boundedMedia.MediaTokensPerItem, model.EmbeddingEncodings),
+            "reported enforced media token allowance enables one-image context admission without a configured override");
+        Check((boundedMedia with { Options = boundedMedia.Options with { MediaTokensPerItem = 2048 } }).MediaTokensPerItem == 2048,
+            "a larger configured conservative media allowance remains effective");
+        var fiveImages = new InferenceShape("sample", InferenceOperation.Chat, ["text", "image"],
+            false, false, 49, 8192, 5, 1, 1, null, null);
+        Check(fiveImages.Fits(model.Inputs, model.ClientTools, model.StructuredOutput, boundedMedia.Context,
+            boundedMedia.MediaTokensPerItem, model.EmbeddingEncodings) &&
+            Mango.Resources.ResourceProtection.Covers(new(InferenceOperation.Chat, 262144, 1, 1), fiveImages.Demand(262144)) &&
+            Mango.Resources.ResourceProtection.Covers(new(InferenceOperation.Chat, 262144, 1, 5), fiveImages.Demand(262144)),
+            "media evidence count does not impose a provider input cap");
+        var validInventory = inventory;
+        foreach (var invalidBound in new[] { "0", "-1", "1.5", "\"1024\"", "4194305" })
+        {
+            inventory = validInventory.Replace("\"media_tokens_per_item\":1024", "\"media_tokens_per_item\":" + invalidBound);
+            await Fails(502, () => adapter.InspectAsync(default));
+        }
+        inventory = validInventory;
         Check(model.Instances.Single().Busy && await adapter.CheckIdleAsync(model, default) == false,
             "generic inventory reports busy instances");
         inventory = inventory.Replace("true", "false");

@@ -16,7 +16,22 @@ internal static class ResourceChecks
 
     public static async Task RunAsync(string root)
     {
+        var visited = new HashSet<int>();
+        WindowsObservation.WalkDescendants(1, new() { [1] = [2, 3], [3] = [4], [4] = [5] },
+            (_, child) => { visited.Add(child); return true; });
+        Check(visited.SetEquals([2, 3, 4, 5]), "a leaf sibling cannot hide later model and vision descendants");
+        visited.Clear();
+        var starts = new Dictionary<int, long> { [1] = 100, [2] = 50, [3] = 110, [4] = 120, [5] = 70 };
+        WindowsObservation.WalkDescendants(1, new() { [1] = [2, 3], [2] = [5], [3] = [4] },
+            (parent, child) =>
+            {
+                if (!WindowsObservation.IsCurrentChild(starts[parent], starts[child])) return false;
+                visited.Add(child);
+                return true;
+            });
+        Check(visited.SetEquals([3, 4]), "fresh creation identities exclude reused-parent PID ancestry and its subtree while retaining live workers");
         await CheckLoadedLmStudioBenchmarkAsync(root);
+        await CheckTransientReleaseRecoveryAsync(root);
         var directory = Directory.CreateDirectory(Path.Combine(root, "resources")).FullName;
         var settings = new SnapshotFile<LocalSettings>(Path.Combine(directory, "local-settings.json"), LocalSettings.Validate);
         await settings.LoadAsync(new LocalSettings
@@ -90,6 +105,20 @@ internal static class ResourceChecks
         Check(resources.Readiness(model, endpoint, Chat.Operation).State == "attached", "readiness explains attached permission");
         await resources.SaveBudgetAsync(update, providers, default);
 
+        await resources.SaveBudgetAsync(update with { MediaItems = 5, ExecuteRamMiB = 100, AllowOverlap = false, ParallelSlots = 1 }, providers, default);
+        var sixMedia = new Workload(InferenceOperation.Chat, 512, 1, 6);
+        var projected = resources.TryAdmit(model, endpoint, sixMedia, ResourceWork.Execute, payloadBytes: MiB).Require();
+        Check(projected.Cost.RamBytes == 124 * MiB,
+            "six media items project five-item measured cost by6/5 and reserve actual JSON bytes separately");
+        projected.Complete();
+        free = 110 * MiB;
+        Tick(2);
+        Check(resources.TryAdmit(model, endpoint, sixMedia, ResourceWork.Execute, payloadBytes: MiB).Status == AdmissionStatus.Wait,
+            "removing a media eligibility cap still refuses real insufficient memory headroom");
+        free = 900 * MiB;
+        Tick(2);
+        await resources.SaveBudgetAsync(update, providers, default);
+
         var revision = JsonSerializer.SerializeToElement(resources.View(providers), SnapshotFile<ResourceData>.Json)
             .GetProperty("models")[0].GetProperty("budgetRevision").GetString();
         await resources.SaveBudgetAsync(update with { LoadRamMiB = 1250, ExpectedRevision = revision }, providers, default);
@@ -106,6 +135,52 @@ internal static class ResourceChecks
         free = 1450 * MiB;
         Tick(2);
         var loading = resources.TryAdmit(model, managed, Chat, ResourceWork.Load).Require();
+        foreach (var scenario in new[] { "recovered", "persistent", "pressure", "topology", "idle" })
+        {
+            var reads = 0;
+            using var startup = new ResourceProtection(Directory.CreateDirectory(Path.Combine(directory, "startup-" + scenario)).FullName, settings,
+                (_, now) =>
+                {
+                    reads++;
+                    var value = Sample(now);
+                    if (scenario == "recovered" && reads > 1) return value;
+                    return value with { WorkerAttribution = false, ExternalCpu = null, ExternalGpu = null,
+                        FreeRam = scenario == "pressure" && reads > 1 ? 0 : value.FreeRam,
+                        Hardware = scenario == "topology" ? null : value.Hardware,
+                        Limitation = "fixture attribution unavailable" };
+                }, () => ((ulong)Total, (ulong)free), clock);
+            await startup.InitializeAsync();
+            startup.ApplyObservation(Sample(clock.GetUtcNow()));
+            await startup.SaveBudgetAsync(update, providers, default);
+            var lease = scenario == "idle" ? null : startup.TryAdmit(model, managed, Chat, ResourceWork.Load).Require();
+            var observe = startup.SampleAndApplyAsync(() => providers.View, default);
+            if (scenario is "recovered" or "persistent" or "pressure")
+            {
+                Check(!observe.IsCompleted && startup.TryAdmit(model, managed, Chat, ResourceWork.Execute).Status == AdmissionStatus.Wait &&
+                    !lease!.Cancellation.IsCancellationRequested && startup.IsAvailable(model, managed, Chat.Operation),
+                    "startup retry retains route eligibility but blocks admission and does not cancel the managed load");
+            }
+            await observe;
+            if (scenario == "recovered")
+            {
+                Check(reads == 2 && startup.Observation!.WorkerAttribution && startup.Status.State == ContributionState.Contributor &&
+                    !lease!.Cancellation.IsCancellationRequested, "only a fresh complete observation recovers startup attribution");
+                lease!.Complete();
+                var execution = startup.TryAdmit(model, managed, Chat, ResourceWork.Execute).Require();
+                execution.Complete();
+            }
+            else
+            {
+                Check(startup.Status.State == ContributionState.Withdrawing && reads == (scenario == "persistent" ? 4 : scenario == "pressure" ? 2 : 1),
+                    "persistent attribution, observed pressure, other invalid telemetry and idle failures retain original withdrawal");
+                if (lease is not null)
+                {
+                    await Task.Delay(25);
+                    Check(lease.Cancellation.IsCancellationRequested, "failed startup retry cancels protected work");
+                    lease.Complete();
+                }
+            }
+        }
         Check(resources.Readiness(model, endpoint, Chat.Operation).State == "busy", "readiness reports live reservations without taking another");
         Check(resources.TryAdmit(model, endpoint, Chat, ResourceWork.Execute).Status == AdmissionStatus.Wait,
             "the load reservation excludes concurrent inference before the worker allocates");
@@ -234,7 +309,8 @@ internal static class ResourceChecks
         await FinishWithdrawalAsync(ContributionState.Fault);
         Check(!resumed.ServingAllowed, "shutdown keeps attached work unavailable while cancellation is unconfirmed");
         providerIdle = true;
-        resumed.RetryRelease();
+        clock.Advance(1);
+        resumed.ApplyObservation(Sample(clock.GetUtcNow()));
         await resumed.AdvanceWithdrawalAsync(resumedProviders, default);
         await FinishWithdrawalAsync(ContributionState.Cooldown);
         Console.WriteLine("Resource admission and benchmark checks passed.");
@@ -285,6 +361,8 @@ internal static class ResourceChecks
         var loads = 0;
         var unloads = 0;
         var loaded = true;
+        var slowUnload = false;
+        var keepLoaded = false;
         var endpointId = Guid.Empty;
         var builder = WebApplication.CreateSlimBuilder();
         builder.Logging.ClearProviders();
@@ -294,7 +372,11 @@ internal static class ResourceChecks
             key = "bounded", type = "llm", max_context_length = 32768, size_bytes = MiB,
             loaded_instances = loaded ? new[] { new { id = "bounded-live", config = new { context_length = 512, parallel = 1 } } } : []
         } } });
-        fixture.MapPost("/api/v1/models/unload", () => { unloads++; loaded = false; return Results.Ok(); });
+        fixture.MapPost("/api/v1/models/unload", async () => {
+            unloads++; loaded = keepLoaded;
+            if (slowUnload) await Task.Delay(TimeSpan.FromSeconds(7));
+            return Results.Ok();
+        });
         fixture.MapPost("/api/v1/models/load", () => { loads++; loaded = true; return Results.Ok(); });
         fixture.MapPost("/v1/chat/completions", async (HttpContext context) =>
         {
@@ -343,6 +425,127 @@ internal static class ResourceChecks
         }
         Check(!loaded && unloads == 1 && resources.Status.State == ContributionState.ManualLeech,
             "resource withdrawal still unloads the same protected LM Studio instance");
+        loaded = true;
+        slowUnload = true;
+        await providers.RefreshAsync(endpointId, default);
+        var released = await providers.ReleaseManagedAsync(default);
+        Check(released.Error is null && !loaded && unloads == 2,
+            "a timed out unload response is accepted only after fresh inventory verifies release");
+        loaded = keepLoaded = true;
+        slowUnload = false;
+        await providers.RefreshAsync(endpointId, default);
+        var refused = await providers.ReleaseManagedAsync(default);
+        Check(refused.Error is not null && loaded,
+            "a successful unload response cannot clear protection while inventory still shows residency");
+        loaded = keepLoaded = false;
+        var deployment = providers.View.Models.Single().Id;
+        providers.RestoreUnsettled(endpointId, deployment, loading: true);
+        await providers.RefreshAsync(endpointId, default);
+        Check(providers.HasUnsettledLoad(deployment), "absence cannot settle an interrupted load");
+        var late = Task.Run(async () => { await Task.Delay(400); loaded = true; });
+        var lateRelease = await providers.ReleaseManagedAsync(default);
+        await late;
+        Check(lateRelease.Error is null && !loaded && !providers.HasUnsettledLoad(deployment),
+            "release waits for late load completion, then unloads and verifies absence");
+    }
+
+    private static async Task CheckTransientReleaseRecoveryAsync(string root)
+    {
+        var directory = Directory.CreateDirectory(Path.Combine(root, "transient-release")).FullName;
+        var settings = new SnapshotFile<LocalSettings>(Path.Combine(directory, "local-settings.json"), LocalSettings.Validate);
+        await settings.LoadAsync(new LocalSettings { Role = LocalRole.Contributor, BenchmarkPolicy = BenchmarkPolicy.Never });
+        var clock = new Clock();
+        var loaded = true;
+        var keepLoaded = false;
+        var inspections = 0;
+        var offline = false;
+        var builder = WebApplication.CreateSlimBuilder();
+        builder.Logging.ClearProviders();
+        builder.WebHost.ConfigureKestrel(server => server.Listen(IPAddress.Loopback, 0));
+        await using var fixture = builder.Build();
+        fixture.MapGet("/api/v1/models", () => {
+            inspections++;
+            if (offline) return Results.StatusCode(503);
+            return Results.Json(new { models = new[] { new { key = "release", type = "llm", max_context_length = 512,
+                loaded_instances = loaded ? new[] { new { id = "release-live", config = new { context_length = 512 } } } : [] } } });
+        });
+        fixture.MapPost("/api/v1/models/unload", () => { loaded = keepLoaded; return Results.Ok(); });
+        await fixture.StartAsync();
+        ResourceObservation Sample() => new(clock.GetUtcNow(), Total, Total, 0, 0, [], "fixture", [], true, null);
+        using var resources = new ResourceProtection(directory, settings, (_, _) => Sample(), () => ((ulong)Total, (ulong)Total), clock);
+        await resources.InitializeAsync();
+        await using var providers = new ProviderCatalog(directory, resources);
+        await providers.InitializeAsync();
+        await providers.ConfigureAsync(new(null, ProviderProfile.LmStudio, ProviderMode.Managed,
+            fixture.Urls.Single(), null, false, null, null), default);
+        resources.ApplyObservation(Sample());
+        var unknown = Sample() with { WorkerAttribution = false, ExternalCpu = null, ExternalGpu = null };
+        resources.ApplyObservation(unknown);
+        await Pump(ContributionState.Fault);
+        Check(!loaded && !resources.ServingAllowed, "native unload with missing process evidence latches a verification fault");
+        var count = inspections;
+        await resources.AdvanceWithdrawalAsync(providers, default);
+        Check(inspections == count, "same fault sample cannot initiate recovery");
+        clock.Advance(1);
+        resources.ApplyObservation(unknown with { At = clock.GetUtcNow() });
+        await resources.AdvanceWithdrawalAsync(providers, default);
+        Check(resources.Status.State == ContributionState.Fault, "continuing unknown attribution stays closed");
+        resources.ApplyObservation(Sample() with { ExternalCpu = 100 });
+        await resources.AdvanceWithdrawalAsync(providers, default);
+        Check(resources.Status.State == ContributionState.Fault, "busy external activity stays closed");
+        resources.ApplyObservation(Sample() with { At = clock.GetUtcNow().AddSeconds(-1) });
+        Check(resources.Observation!.ExternalCpu == 100, "out of order quiet evidence cannot replace newer activity");
+        resources.ApplyObservation(Sample() with { At = clock.GetUtcNow().AddSeconds(1) });
+        Check(resources.Observation!.ExternalCpu == 100, "future quiet evidence cannot replace current activity");
+        resources.ApplyObservation(Sample());
+        clock.Advance(settings.Value.SampleSeconds + 6);
+        await resources.AdvanceWithdrawalAsync(providers, default);
+        Check(resources.Status.State == ContributionState.Fault, "stale quiet evidence cannot initiate recovery");
+        await settings.UpdateAsync(value => value with { Role = LocalRole.Leech });
+        resources.ApplyObservation(Sample());
+        await resources.AdvanceWithdrawalAsync(providers, default);
+        Check(resources.Status.State == ContributionState.Fault, "operator leech hold prevents automatic recovery");
+        await settings.UpdateAsync(value => value with { Role = LocalRole.Contributor });
+        await Pump(ContributionState.Cooldown);
+        Check(!resources.ServingAllowed, "fresh attributable and native empty evidence enters cooldown without opening ingress");
+        resources.ApplyObservation(Sample());
+        clock.Advance(299);
+        resources.ApplyObservation(Sample());
+        Check(!resources.ServingAllowed, "a gap in quiet samples does not bypass cooldown");
+        for (var i = 0; i < 300; i++) { clock.Advance(1); resources.ApplyObservation(Sample()); }
+        Check(resources.ServingAllowed, "normal five minute quiet cooldown restores contribution");
+        loaded = keepLoaded = true;
+        await providers.RefreshAsync(providers.View.Endpoints.Single().Id, default);
+        resources.ApplyObservation(Sample() with { WorkerAttribution = false });
+        await Pump(ContributionState.Fault);
+        loaded = false;
+        clock.Advance(1);
+        resources.ApplyObservation(Sample());
+        await resources.AdvanceWithdrawalAsync(providers, default);
+        Check(resources.Status.State == ContributionState.Fault, "hard native release failure stays latched even after quiet evidence");
+        offline = true;
+        resources.RetryRelease();
+        await Pump(ContributionState.Fault);
+        Check(!resources.ServingAllowed, "missing fresh native evidence cannot release an apparently empty provider");
+        offline = false;
+        clock.Advance(1);
+        resources.ApplyObservation(Sample());
+        await resources.AdvanceWithdrawalAsync(providers, default);
+        Check(resources.Status.State == ContributionState.Fault, "native release errors require explicit retry");
+        Console.WriteLine("Transient release recovery checks passed.");
+
+        async Task Pump(ContributionState expected)
+        {
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            do {
+                await resources.AdvanceWithdrawalAsync(providers, deadline.Token);
+                if (resources.Status.State == expected) return;
+                clock.Advance(1);
+                resources.ApplyObservation(resources.Observation! with { At = clock.GetUtcNow() });
+                await Task.Delay(10, deadline.Token);
+            } while (!deadline.IsCancellationRequested);
+            throw new InvalidOperationException($"release should reach {expected}");
+        }
     }
 
     private static async Task<int> PromptAsync(HttpContext context)

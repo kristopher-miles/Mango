@@ -22,6 +22,8 @@ internal sealed partial class ResourceProtection : IDisposable
     private ResourceStatus status = new(ContributionState.Withdrawing, "Checking local resources.", null);
     private ResourceObservation? observed;
     private long sampleNumber;
+    private int settlementSample;
+    private bool startupObservationPending;
     private TaskCompletionSource nextObservation = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private DateTimeOffset? highSince;
     private DateTimeOffset? quietSince;
@@ -32,6 +34,8 @@ internal sealed partial class ResourceProtection : IDisposable
     private Task<ReleaseResult>? release;
     private ResourceObservation? beforeRelease;
     private long? releaseSample;
+    private long? recoverableReleaseSample;
+    private DateTimeOffset? recoverableReleaseAt;
     private CancellationTokenSource? benchmarkStop;
     private Task? benchmark;
     private BenchmarkPolicy policy;
@@ -73,13 +77,15 @@ internal sealed partial class ResourceProtection : IDisposable
     {
         foreach (var pending in store.Value.Hold?.Pending ?? [])
             if (pending.OwnedProcesses.Length == 0 || pending.OwnedProcesses.Any(WindowsObservation.ProcessExists))
-                providers.RestoreUnsettled(pending.Endpoint, pending.Deployment);
+                providers.RestoreUnsettled(pending.Endpoint, pending.Deployment, pending.Loading);
     }
 
     private void SettingsChanged()
     {
         lock (sync)
         {
+            if (settings.Value.Role == LocalRole.Leech)
+                foreach (var lease in reservations.Where(item => item.Yolo)) RequestCancel(lease.Stop);
             if (settings.Value.Role == LocalRole.Leech && status.State is not (ContributionState.ManualLeech or ContributionState.Fault))
                 BeginWithdrawal("Local leech mode is enabled.");
             var next = settings.Value.BenchmarkPolicy;
@@ -123,16 +129,21 @@ internal sealed partial class ResourceProtection : IDisposable
             return reservations.Any(item => item.Endpoint == endpoint && !item.Settled);
     }
 
-    public bool HasRunning(Guid endpoint)
+    public bool HasRunning(Guid endpoint, bool includeYolo = true)
     {
         lock (sync)
-            return reservations.Any(item => item.Endpoint == endpoint && item.Running);
+            return reservations.Any(item => item.Endpoint == endpoint && item.Running && (includeYolo || !item.Yolo));
     }
 
     public bool IsAvailable(Deployment model, EndpointStatus endpoint, InferenceOperation? requested = null)
     {
         lock (sync)
         {
+            if (model.Yolo)
+                return settings.Value.Role == LocalRole.Contributor && Volatile.Read(ref stopping) == 0 &&
+                    !model.ServingDisabled && model.Online && model.Model.Installed && !model.Model.AmbiguousInstance &&
+                    (model.Eligible || endpoint.Mode == ProviderMode.Managed && endpoint.CanLoad && model.Model.SupportsLoad) &&
+                    Operations(model, endpoint).Any(operation => requested is null || operation == requested);
             if (model.ServingDisabled || !ServingAllowed || observed is null || !model.Model.Installed ||
                 !model.Eligible && !(endpoint.CanLoad && model.Model.SupportsLoad))
                 return false;
@@ -175,6 +186,11 @@ internal sealed partial class ResourceProtection : IDisposable
             if (!model.Online) return State("offline", "The provider is unreachable. Check its address, credential, and process.", "provider");
             if (!model.Model.Installed) return State("installation", "Install this model in its provider, then refresh the inventory.", "provider");
             if (settings.Value.Role != LocalRole.Contributor) return State("contribution", "Turn on contribution for this computer to serve network requests.", "contribution");
+            if (model.Yolo)
+                return State(model.Instance is null ? "readyToLoad" : "ready",
+                    "YOLO: the provider owns native defaults and capacity. Mango automatic resource protection is bypassed for this model.");
+            if (startupObservationPending)
+                return new("telemetry", "Rechecking managed provider workers after startup.", "observations", false);
             if (status.State != ContributionState.Contributor) return State("protection", status.Reason ?? "Local protection is holding contribution.", "protection");
             if (observed is not { } latest || clock.GetUtcNow() - latest.At > TimeSpan.FromSeconds(settings.Value.SampleSeconds + 5))
                 return State("telemetry", "Waiting for current Windows resource observations.", "observations");
@@ -209,14 +225,32 @@ internal sealed partial class ResourceProtection : IDisposable
         }
     }
 
-    public Admission TryAdmit(Deployment model, EndpointStatus endpoint, Workload workload, ResourceWork work, bool profiling = false)
+    public Admission TryAdmit(Deployment model, EndpointStatus endpoint, Workload workload, ResourceWork work,
+        bool profiling = false, long payloadBytes = 0)
     {
+        if (model.Yolo)
+        {
+            lock (sync)
+            {
+                if (!IsAvailable(model, endpoint, workload.Operation) || work == ResourceWork.Benchmark)
+                    return Refuse("This model is paused, unavailable, or delegates qualification to its provider.");
+                if (work == ResourceWork.Load && (endpoint.Mode != ProviderMode.Managed || !endpoint.CanLoad || !model.Model.SupportsLoad))
+                    return Refuse("The provider does not authorize loading this deployment.");
+                // A zero-cost lease tracks cancellation and uncertain completion, not capacity.
+                var native = new ResourceReservation(this, model.EndpointId, model.Id, work, "yolo:" + model.Id,
+                    MemoryCost.Empty, true, sampleNumber, null, yolo: true);
+                reservations.Add(native);
+                return new(AdmissionStatus.Admitted, null, native);
+            }
+        }
         var sampled = Observation;
         var needsFreshGpu = windows is not null && sampled is not null && sampled.Devices.Any(device => !device.Integrated) &&
             clock.GetUtcNow() - sampled.At > TimeSpan.FromSeconds(LocalSettings.MinimumSampleSeconds);
         var freshGpu = needsFreshGpu ? windows!.ReadFreshGpuMemory() : null;
         lock (sync)
         {
+            if (startupObservationPending)
+                return new(AdmissionStatus.Wait, "Rechecking managed provider workers after startup.", null);
             if (status.State != ContributionState.Contributor || settings.Value.Role != LocalRole.Contributor ||
                 Volatile.Read(ref stopping) != 0)
                 return Refuse(status.Reason ?? "This node is in leech mode.");
@@ -248,11 +282,14 @@ internal sealed partial class ResourceProtection : IDisposable
             var fingerprint = FaultKey(budget);
             if (unsafePlacements.Contains(fingerprint))
                 return Refuse("An allocation failed for this placement. Update its local limits or retry explicitly.");
-            var cost = work == ResourceWork.Load ? budget.Load : budget.Execute;
+            if (work == ResourceWork.Execute && workload.MediaItems > 0 && budget.Workload.MediaItems == 0)
+                return Refuse("A host media memory qualification is required for this workload.");
+            var cost = work == ResourceWork.Load ? budget.Load : ProjectExecutionCost(budget, workload, payloadBytes);
             if (work == ResourceWork.Load && cost.RamBytes == 0 && cost.DeviceBytes.Values.All(value => value == 0))
                 return Refuse("Set a peak memory allowance before loading this model.");
             var overlap = AllowsOverlap(budget) &&
-                !profiling && work == ResourceWork.Execute && workload.Items == 1;
+                !profiling && work == ResourceWork.Execute && workload.Items == 1 &&
+                workload.MediaItems <= budget.Workload.MediaItems;
             var peersOnEndpoint = reservations.Where(item => item.Endpoint == model.EndpointId && !item.Settled).ToArray();
             var slots = OverlapSlots(model, budget);
             if (reservations.Any(item => !item.Settled &&
@@ -316,8 +353,19 @@ internal sealed partial class ResourceProtection : IDisposable
     }
 
     internal static bool Covers(Workload limit, Workload actual) =>
-        limit.Operation == actual.Operation && limit.Units >= actual.Units && limit.Items >= actual.Items &&
-        limit.MediaItems >= actual.MediaItems;
+        limit.Operation == actual.Operation && limit.Units >= actual.Units;
+
+    internal static MemoryCost ProjectExecutionCost(ResourceBudget budget, Workload actual, long payloadBytes = 0)
+    {
+        var ratio = Math.Max(1m, (decimal)actual.MediaItems / Math.Max(1, budget.Workload.MediaItems)) *
+            Math.Max(1m, (decimal)actual.Items / Math.Max(1, budget.Workload.Items));
+        long Scale(long value, long extra = 0) => (long)Math.Min(long.MaxValue,
+            decimal.Ceiling(value * ratio + extra));
+        // Account for buffered JSON/string copies separately from provider execution.
+        var bytes = Math.Clamp(payloadBytes, 0, ProviderLimits.MaxRequestBytes) * 4;
+        return new(Scale(budget.Execute.RamBytes, bytes),
+            budget.Execute.DeviceBytes.ToDictionary(item => item.Key, item => Scale(item.Value)));
+    }
 
     private static bool AttributionAllows(EndpointStatus endpoint, LocalSettings settings, ResourceObservation observation,
         bool allowAttached) => endpoint.Mode == ProviderMode.Attached ? allowAttached :
@@ -376,6 +424,8 @@ internal sealed partial class ResourceProtection : IDisposable
                 lastClient = clock.GetUtcNow();
             item.Running = false;
             item.Settled |= settled;
+            if (item.Settled && item.Cost.DeviceBytes.Values.Any(value => value != 0))
+                Interlocked.Exchange(ref settlementSample, 1);
             if (item.Settled && item.Cost.DeviceBytes.Values.All(value => value == 0))
                 Remove(item);
         }
@@ -405,6 +455,7 @@ internal sealed partial class ResourceProtection : IDisposable
 
     public async Task AllocationFailedAsync(ResourceReservation reservation)
     {
+        if (reservation.Yolo) return;
         lock (sync)
             unsafePlacements.Add(reservation.Fingerprint);
         try
@@ -452,20 +503,16 @@ internal sealed partial class ResourceProtection : IDisposable
                 var now = clock.GetUtcNow();
                 var interval = TimeSpan.FromSeconds(settings.Value.SampleSeconds);
                 nextSample = sampled == DateTimeOffset.MinValue ? now : sampled + interval;
-                var view = providers.View;
+                // Keep the reservation until a fresh observation, without imposing the
+                // entire idle sampling interval on the next sequential client request.
+                if (Volatile.Read(ref settlementSample) != 0 && sampled != DateTimeOffset.MinValue)
+                    nextSample = nextSample < sampled.AddSeconds(1) ? nextSample : sampled.AddSeconds(1);
                 if (now >= nextSample)
                 {
-                    ResourceObservation latest;
-                    try { latest = sample(view, now); }
-                    catch (Win32Exception)
-                    {
-                        latest = new(now, 0, 0, null, null, [], null, [], false,
-                            "Windows resource observations are temporarily unavailable.");
-                    }
+                    Interlocked.Exchange(ref settlementSample, 0);
+                    await SampleAndApplyAsync(() => providers.View, cancellation);
                     sampled = now;
                     nextSample = sampled + interval;
-                    ApplyObservation(latest);
-                    CapacityChanged?.Invoke();
                 }
                 await AdvanceWithdrawalAsync(providers, cancellation);
                 AdvanceBenchmarks(providers, cancellation);
@@ -500,11 +547,65 @@ internal sealed partial class ResourceProtection : IDisposable
         }
     }
 
+    internal async Task SampleAndApplyAsync(Func<CatalogView> view, CancellationToken cancellation)
+    {
+        ResourceObservation Read()
+        {
+            var now = clock.GetUtcNow();
+            try { return sample(view(), now); }
+            catch (Win32Exception)
+            {
+                return new(now, 0, 0, null, null, [], null, [], false,
+                    "Windows resource observations are temporarily unavailable.");
+            }
+        }
+        bool MemoryKnown(ResourceObservation value) => value.TotalRam > 0 && value.Hardware is not null &&
+            value.Devices.All(device => device.Integrated || device.TotalBytes is not null && device.UsedBytes is not null);
+        bool Loading() => reservations.Any(item => !item.Yolo && item.Running && item.Work == ResourceWork.Load);
+        bool loadingBeforeSample;
+        lock (sync) loadingBeforeSample = Loading();
+        var latest = Read();
+        lock (sync)
+            startupObservationPending = status.State == ContributionState.Contributor && !withdraw &&
+                settings.Value.ActivityMonitoring && !latest.WorkerAttribution && MemoryKnown(latest) &&
+                Pressure(latest, settings.Value) is null &&
+                (loadingBeforeSample || Loading());
+        try
+        {
+            // Retain route eligibility while the existing load settles, but block every new
+            // protected admission. Never spend or credit the incomplete worker observation.
+            if (startupObservationPending)
+            {
+                CapacityChanged?.Invoke();
+                for (var retry = 0; retry < 3; retry++)
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(1), clock, cancellation);
+                    latest = Read();
+                    if (!MemoryKnown(latest) || Pressure(latest, settings.Value) is not null ||
+                        latest.WorkerAttribution && latest.ExternalCpu is not null && latest.ExternalGpu is not null)
+                        break;
+                }
+            }
+            lock (sync)
+            {
+                ApplyObservation(latest);
+                startupObservationPending = false;
+            }
+            CapacityChanged?.Invoke();
+        }
+        finally
+        {
+            lock (sync) startupObservationPending = false;
+        }
+    }
+
     internal void ApplyObservation(ResourceObservation latest)
     {
         lock (sync)
         {
             var current = settings.Value;
+            if (latest.At > clock.GetUtcNow() || observed is { } newer && latest.At < newer.At)
+                return;
             if (observed is { } previous && latest.At - previous.At > TimeSpan.FromSeconds(current.SampleSeconds + 3))
                 highSince = quietSince = null;
             observed = latest;
@@ -595,7 +696,7 @@ internal sealed partial class ResourceProtection : IDisposable
                 observed?.FreeRam, observed?.ExternalCpu, observed?.ExternalGpu);
             SetStatus(new(ContributionState.Withdrawing, reason, null));
             RequestCancel(benchmarkStop);
-            foreach (var lease in reservations)
+            foreach (var lease in reservations.Where(item => !item.Yolo || settings.Value.Role == LocalRole.Leech))
                 RequestCancel(lease.Stop);
         }
         Signal();
@@ -603,6 +704,8 @@ internal sealed partial class ResourceProtection : IDisposable
 
     private void SetStatus(ResourceStatus next)
     {
+        if (next.State == ContributionState.Fault)
+            recoverableReleaseSample = null;
         if (status == next)
             return;
         status = next;
@@ -611,6 +714,22 @@ internal sealed partial class ResourceProtection : IDisposable
 
     internal async Task AdvanceWithdrawalAsync(ProviderCatalog providers, CancellationToken cancellation)
     {
+        lock (sync)
+        {
+            // Retry only transient verification holds, using a newer, current, quiet sample.
+            // Native stop/unload evidence is still obtained by the normal release path below.
+            if (status.State == ContributionState.Fault && recoverableReleaseSample is { } failedSample &&
+                sampleNumber > failedSample && settings.Value.Role == LocalRole.Contributor &&
+                observed is { } latest && latest.At > recoverableReleaseAt && ReliableReleaseObservation(latest) &&
+                Pressure(latest, settings.Value) is null &&
+                latest.ExternalCpu < settings.Value.CpuCutoffPercent && latest.ExternalGpu < settings.Value.GpuCutoffPercent &&
+                !reservations.Any(item => item.Running) && !providers.HasActiveRequests &&
+                !providers.View.Models.Any(item => item.Instance?.Busy == true))
+            {
+                recoverableReleaseSample = null;
+                BeginWithdrawal("Checking that managed inference resources have been released.");
+            }
+        }
         if (withdraw && release is null)
         {
             if (observed is null)
@@ -620,7 +739,7 @@ internal sealed partial class ResourceProtection : IDisposable
                 if (pending.OwnedProcesses.Length != 0 && pending.OwnedProcesses.All(pid => !WindowsObservation.ProcessExists(pid)))
                     ConfirmReleased(providers, pending.Endpoint);
             await SaveHoldAsync(new(ContributionState.Withdrawing, withdrawalReason!, Pending(providers)));
-            release = providers.ReleaseManagedAsync(cancellation);
+            release = providers.ReleaseManagedAsync(cancellation, includeYolo: settings.Value.Role == LocalRole.Leech);
             _ = release.ContinueWith(_ => Signal(), TaskScheduler.Default);
             releaseSample = null;
             return;
@@ -637,7 +756,9 @@ internal sealed partial class ResourceProtection : IDisposable
             string? error = result.Error;
             lock (sync)
             {
-                error ??= VerifyRelease(result, beforeRelease!, observed!);
+                error ??= !ReliableReleaseObservation(observed!)
+                    ? "Waiting for reliable resource observations to verify release."
+                    : VerifyRelease(result, beforeRelease!, observed!);
                 if (result.Error is null && error is not null && sampleNumber < releaseSample + 3)
                     return;
                 if (error is null)
@@ -651,6 +772,9 @@ internal sealed partial class ResourceProtection : IDisposable
                     SetStatus(new(ContributionState.ManualLeech, withdrawalReason, null));
                 else
                     SetStatus(new(ContributionState.Cooldown, withdrawalReason, null));
+                recoverableReleaseSample = error is not null && (result.Error is null || result.AwaitingStop)
+                    ? sampleNumber : null;
+                recoverableReleaseAt = clock.GetUtcNow();
             }
         }
         var current = Status;
@@ -658,7 +782,8 @@ internal sealed partial class ResourceProtection : IDisposable
         var hold = current.State is ContributionState.Cooldown or ContributionState.Fault
             ? new ResourceHold(current.State, current.Reason!, current.State == ContributionState.Fault ? Pending(providers) : null) : null;
         if (!withdraw && (prior?.State != hold?.State || prior?.Reason != hold?.Reason ||
-            !(prior?.Pending ?? []).Select(item => item.Deployment).SequenceEqual((hold?.Pending ?? []).Select(item => item.Deployment))))
+                !(prior?.Pending ?? []).Select(item => (item.Deployment, item.Loading))
+                    .SequenceEqual((hold?.Pending ?? []).Select(item => (item.Deployment, item.Loading)))))
             await SaveHoldAsync(hold);
     }
 
@@ -666,8 +791,9 @@ internal sealed partial class ResourceProtection : IDisposable
     {
         lock (sync)
         {
-            providers.ConfirmReleased(endpoint);
-            foreach (var lease in reservations.Where(item => item.Endpoint == endpoint && !item.Running).ToArray())
+            providers.ConfirmReleased(endpoint, includeYolo: settings.Value.Role == LocalRole.Leech);
+            foreach (var lease in reservations.Where(item => item.Endpoint == endpoint && !item.Running &&
+                (!item.Yolo || settings.Value.Role == LocalRole.Leech)).ToArray())
                 Settle(lease, true);
         }
     }
@@ -686,7 +812,9 @@ internal sealed partial class ResourceProtection : IDisposable
                 var tree = root is { } pid
                     ? (observed?.Workers.GetValueOrDefault(item.Endpoint)?.Processes ?? []).Append(pid).Distinct().Take(256).ToArray()
                     : prior?.OwnedProcesses ?? [];
-                return new PendingRelease(item.Endpoint, item.Deployment, tree);
+                return new PendingRelease(item.Endpoint, item.Deployment, tree,
+                    providers.HasUnsettledLoad(item.Deployment) || reservations.Any(reservation =>
+                        reservation.Deployment == item.Deployment && reservation.Work == ResourceWork.Load && !reservation.Settled));
             }).ToArray();
         }
     }
@@ -697,9 +825,18 @@ internal sealed partial class ResourceProtection : IDisposable
         catch (Exception error) when (error is IOException or UnauthorizedAccessException)
         {
             lock (sync)
+            {
+                recoverableReleaseSample = null;
                 SetStatus(new(ContributionState.Fault, "Mango could not save the local resource safety state.", null));
+            }
         }
     }
+
+    private bool ReliableReleaseObservation(ResourceObservation value) =>
+        value.At <= clock.GetUtcNow() && clock.GetUtcNow() - value.At <= TimeSpan.FromSeconds(settings.Value.SampleSeconds + 5) &&
+        value.TotalRam > 0 && value.Hardware is not null && value.WorkerAttribution &&
+        value.ExternalCpu is not null && value.ExternalGpu is not null &&
+        value.Devices.All(device => device.Integrated || device.TotalBytes is not null && device.UsedBytes is not null);
 
     private static string? VerifyRelease(ReleaseResult result, ResourceObservation before, ResourceObservation after)
     {

@@ -1,0 +1,11 @@
+# Per-model YOLO mode
+
+YOLO is off by default. On the owning computer, open the model card and choose **Enable YOLO**. The option is local to that host's stable provider/deployment identity; aliases and remote registry edits do not enable it. All supported providers can use it.
+
+The provider owns capacity and input validation for an enabled model. Mango uses the adapter's existing native load action with no Mango context override; an unmanaged or non-loadable registration still requires loading in its provider. Mango preserves the complete inference payload apart from model routing and provider credentials, and returns native inference statuses and bodies, including capacity errors.
+
+Mango does not reserve estimated model memory, benchmark, evict, automatically unload, or cancel an enabled model because of automatic host pressure. It can remain serving while the host resource dashboard reports a pressure hold. Its real memory remains visible in telemetry and continues to constrain ordinary, unmarked models. This opt-in can allow native allocations to consume the host's protected RAM/VRAM headroom; the provider and operator accept that risk. It does not raise any global cutoff or change another model's protection. If marked and unmarked models share a worker, Mango will not stop that worker automatically; it still verifies unmarked model release and retains a hold when verification fails.
+
+Authentication, inference scopes, routing capability selection, body/transport bounds, cancellation tracking, verified lifecycle settlement, provider identity checks, explicit serving disable, contributor pause, provider unload and stop remain in effect. An uncertain request/load still must settle before it can be reused. Disabling YOLO restores ordinary resource checks without changing native settings or saved qualification budgets.
+
+The existing authenticated local control surface also accepts `PUT /api/local/providers/models/{deployment}/yolo` with `{"enabled":true,"revision":<current model options revision>}`. A stale revision or busy provider is rejected. The option and its state are exposed in the local model card and peer model observation. Peers that predate YOLO may hide the model while its host has a resource hold; they need the compatible general build to route in that condition.

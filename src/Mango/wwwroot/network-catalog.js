@@ -330,13 +330,20 @@ function renderModelCard(item) {
     [intentLabel(item.desired, item.observed?.intent), appliedAlias && `Applied alias ${appliedAlias}`].filter(Boolean).join(" · ") : "Settings on this computer";
   const actions = card.querySelector(".actions"), endpoint = selectedProvider();
   const disabled = item.local?.servingDisabled === true;
-  const actionKey = `${local}:${item.local?.instance?.id}:${item.local?.eligible}:${disabled}:${catalogView.selected}:${servingModel}:${endpoint?.canLoad}:${endpoint?.canUnload}`;
+  const actionKey = `${local}:${item.local?.instance?.id}:${item.local?.eligible}:${disabled}:${item.local?.options?.revision}:${item.local?.yolo}:${catalogView.selected}:${servingModel}:${endpoint?.canLoad}:${endpoint?.canUnload}`;
   if (actions.dataset.key !== actionKey) {
     actions.dataset.key = actionKey; actions.replaceChildren();
     actions.append(action(servingModel === item.id ? "Limits selected" : "View limits", () => {
       servingModel = item.id; renderServingModels(); renderQualification();
     }));
     if (local) {
+      const yolo = item.local.yolo === true;
+      const capacity = action(yolo ? "Disable YOLO" : "Enable YOLO", event => providerAction(event.currentTarget,
+        "Updating provider capacity policy…",
+        () => api(`providers/models/${item.id}/yolo`, { enabled: !yolo, revision: item.local.options.revision }),
+        yolo ? "Mango resource protection restored." : "YOLO enabled: native provider owns capacity."));
+      capacity.title = "YOLO bypasses Mango memory estimates, reservations, benchmarks and automatic pressure unload for this model. Native provider defaults and errors apply. Explicit pause and stop remain available.";
+      actions.append(capacity);
       actions.append(action(disabled ? "Enable serving" : "Disable serving", event => providerAction(event.currentTarget,
         disabled ? "Enabling serving…" : "Disabling serving…",
         () => api(`providers/models/${item.id}/serving`, { enabled: disabled }),

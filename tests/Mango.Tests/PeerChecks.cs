@@ -333,6 +333,13 @@ internal static partial class PeerChecks
         finally { socket.Stop(); }
     }
 
+    private static System.Text.Json.Nodes.JsonObject OpaquePeerPayload(string model)
+    {
+        var payload = System.Text.Json.Nodes.JsonNode.Parse("""{"model":"placeholder","messages":[{"role":"user","content":"opaque passthrough","provider_message_flag":true}],"provider_extension":{"nested":[1,{"keep":true}]},"chat_template_kwargs":{"future_control":{"keep":"exact"},"preserve_thinking":true},"web_search_options":{"provider_mode":"fixture"}}""")!.AsObject();
+        payload["model"] = model;
+        return payload;
+    }
+
     private static async Task<WebApplication> StartProviderAsync(TaskCompletionSource stoppedStream, string? providerToken = null)
     {
         var builder = WebApplication.CreateSlimBuilder();
@@ -351,6 +358,10 @@ internal static partial class PeerChecks
             Check(body.RootElement.GetProperty("model").GetString() == FixtureModel,
                 "the provider receives its exact model identifier");
             var prompt = body.RootElement.GetProperty("messages")[0].GetProperty("content").GetString();
+            if (prompt == "opaque passthrough")
+                Check(System.Text.Json.Nodes.JsonNode.DeepEquals(
+                    System.Text.Json.Nodes.JsonNode.Parse(body.RootElement.GetRawText()), OpaquePeerPayload(FixtureModel)),
+                    "authenticated ingress and peer preserve unknown/nested provider fields and omitted output limit");
             if (prompt == "fail before first output")
             {
                 context.Response.StatusCode = 503;
@@ -404,6 +415,9 @@ internal static partial class PeerChecks
         await Request(http, HttpMethod.Post, ingress.LocalAddress + "/v1/chat/completions", key,
             new { model = FixtureModel, messages = new[] { new { role = "user", content = "native ID from another node" } } });
         var before = await Local(http, ingress, "network/scheduling");
+        await Request(http, HttpMethod.Post, ingress.LocalAddress + "/v1/chat/completions", key,
+            OpaquePeerPayload("shared-fixture"));
+        before = await Local(http, ingress, "network/scheduling");
         foreach (var session in new[] { "before", "after", "ambiguous" })
         {
             using var request = Chat(session == "before" ? new string('x', 3000) : "seed a related route", session);

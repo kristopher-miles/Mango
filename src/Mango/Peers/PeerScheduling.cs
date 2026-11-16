@@ -138,11 +138,28 @@ internal sealed partial class PeerNetwork
         var names = inventory.Where(item => item.Model.LocallyAvailable == true &&
                 item.Model.Operations.Any(operation => access?.Allows(operation) != false))
             .SelectMany(item => RoutingNames(item.Model, native)).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal);
-        return new { @object = "list", data = names.Select(alias => new { id = alias, @object = "model", owned_by = "mango",
-            capabilities = inventory.Where(item => item.Model.LocallyAvailable == true && RoutingNames(item.Model, native).Contains(alias))
-                .SelectMany(item => item.Model.Operations).Where(operation => access?.Allows(operation) != false)
-                .Select(operation => operation.ToString().ToLowerInvariant()).Distinct().Order().ToArray()
-        }).ToArray() };
+        return new { @object = "list", data = names.Select(alias => DescribeModel(alias,
+            inventory.Where(item => item.Model.LocallyAvailable == true &&
+                item.Model.Operations.Any(operation => access?.Allows(operation) != false) &&
+                RoutingNames(item.Model, native).Contains(alias)).Select(item => item.Model).ToArray(), access)).ToArray() };
+    }
+
+    internal static object DescribeModel(string alias, ObservedDeployment[] models, InferenceAccess? access = null)
+    {
+        var row = new Dictionary<string, object?>
+        {
+        ["id"] = alias, ["object"] = "model", ["owned_by"] = "mango",
+        ["input_modalities"] = models.SelectMany(model => model.Inputs).Distinct().Order().ToArray(),
+        ["output_modalities"] = models.SelectMany(model => model.Outputs).Distinct().Order().ToArray(),
+        ["capabilities"] = models.SelectMany(model => model.Operations).Where(operation => access?.Allows(operation) != false)
+            .Select(operation => operation.ToString().ToLowerInvariant())
+            .Concat(models.Any(model => model.Inputs.Contains("image")) ? new[] { "vision" } : [])
+            .Concat(models.Any(model => model.ClientTools) ? new[] { "tools" } : []).Distinct().Order().ToArray()
+        };
+        var context = models.Any(model => model.Loaded && model.Context is null) ? null :
+            models.Where(model => model.Loaded).Select(model => model.Context).DefaultIfEmpty().Min();
+        if (context is not null) row["context_size"] = context;
+        return row;
     }
 
     public async Task RouteAsync(InferenceOperation operation, HttpContext context, CancellationToken cancellation)
@@ -423,9 +440,10 @@ internal sealed partial class PeerNetwork
             yield break;
         var sharedModels = current.Records.Models.Where(model => !model.Removed).ToDictionary(model => (model.Owner, model.Deployment));
         foreach (var catalog in current.Records.Catalogs.Where(item => item.Node != here && !Incompatible(item.Node) && item.SchedulingEpoch is not null && item.Role == LocalRole.Contributor &&
-            (item.ResourceState is null or ContributionState.Contributor) && current.Nodes.TryGetValue(item.Node, out var node) && !node.Removed))
+            current.Nodes.TryGetValue(item.Node, out var node) && !node.Removed))
             foreach (var model in catalog.Models)
-                if (sharedModels.TryGetValue((catalog.Node, model.Id), out var shared))
+                if ((catalog.ResourceState is null or ContributionState.Contributor || model.Yolo) &&
+                    sharedModels.TryGetValue((catalog.Node, model.Id), out var shared))
                     yield return (catalog.Node, model.ProviderIdentifiers is not null ? model :
                         model with { EffectiveAlias = model.EffectiveAlias ?? shared.Alias }, catalog.SchedulingEpoch!);
     }
@@ -461,6 +479,9 @@ internal sealed partial class PeerNetwork
         var protection = providers.Resources;
         var workloads = model.Model.Operations.Select(operation =>
         {
+            if (model.Yolo && protection?.IsAvailable(model, endpoint, operation) == true)
+                return new ObservedWorkload(new(operation, model.Context ?? ProviderLimits.MaxContext), null, null,
+                    Math.Clamp(model.Instance?.Slots ?? 1, 1, 256));
             var budget = protection?.Estimate(model, endpoint, operation);
             if (budget is null || protection?.IsAvailable(model, endpoint, operation) != true)
                 return null;
@@ -468,16 +489,18 @@ internal sealed partial class PeerNetwork
             if (slots == 0)
                 return null;
             var timing = protection.RouteTiming(model, operation);
-            return new ObservedWorkload(budget.Workload, timing.PromptMilliseconds, timing.CacheSavingsMilliseconds, slots);
+            var qualified = protection.QualifiedUnits(model, endpoint, operation);
+            return new ObservedWorkload(budget.Workload with { Units = qualified ?? budget.Workload.Units },
+                timing.PromptMilliseconds, timing.CacheSavingsMilliseconds, slots, Qualified: qualified is not null);
         }).OfType<ObservedWorkload>().ToArray();
         return new(model.Id, DisplayName(model.Model.DisplayName), model.Model.Variant, model.Version, model.Model.Inputs,
             model.Model.Outputs, model.Model.Operations, model.Context, model.ContextSource, model.Online, model.Instance is not null,
             model.Instance?.Fingerprint, model.Instance?.Slots, model.EmbeddingDimensions, model.EmbeddingSpace,
             model.Model.Installed && (protection is null ? model.Eligible : workloads.Length != 0), model.Model.ClientTools,
-            model.Model.StructuredOutput, model.Options.MediaTokensPerItem, model.Model.EmbeddingEncodings, model.PlacementEpoch,
+            model.Model.StructuredOutput, model.MediaTokensPerItem, model.Model.EmbeddingEncodings, model.PlacementEpoch,
             protection is null ? null : workloads, EffectiveAlias: model.Alias, Readiness: protection?.Readiness(model, endpoint),
             Origin: model.Model.Origin, SourceDevice: SafeDetail(model.Model.SourceDevice, 100),
-            ProviderIdentifiers: model.ProviderIdentifiers);
+            ProviderIdentifiers: model.ProviderIdentifiers, Yolo: model.Yolo);
     }
 
     private PlacementChoice[] Candidates(InferenceShape shape)
@@ -493,7 +516,8 @@ internal sealed partial class PeerNetwork
             allowUnverifiedContext);
         var choices = models.Where(item => Fits(item.Model, allowUnverifiedContext: true) &&
                 (item.Model.Workloads is null || item.Model.Workloads.Any(work =>
-                    ResourceProtection.Covers(work.Limit, shape.Demand(item.Model.Context)))))
+                    ResourceProtection.Covers(work.Limit, shape.Demand(item.Model.Context,
+                        !item.Model.Loaded && work.Qualified ? work.Limit.Units : null)))))
             .ToArray();
         var native = catalog.SelectMany(item => item.Model.ProviderIdentifiers ?? []).ToHashSet(StringComparer.Ordinal);
         var uniqueAliases = catalog.Where(item => item.Model.LocallyAvailable == true)
