@@ -254,6 +254,7 @@ internal static class SchedulingChecks
 
         public bool Conflicts(ServingPlacement a, ServingPlacement b) => a.Endpoint.Id == b.Endpoint.Id;
         public bool HasUnsettled(string deployment) => false;
+        public void RequestSettlementRefresh(string deployment) { }
 
         public StartExecution TryStart(InferenceRequest request, string id)
         {

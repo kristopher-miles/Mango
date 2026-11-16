@@ -105,6 +105,7 @@ internal static class ProviderLimits
     public static readonly TimeSpan ControlTimeout = TimeSpan.FromSeconds(10);
     public static readonly TimeSpan LifecycleTimeout = TimeSpan.FromMinutes(5);
     public static readonly TimeSpan InventoryInterval = TimeSpan.FromHours(1);
+    public static readonly TimeSpan RefreshCoalesceInterval = TimeSpan.FromSeconds(2);
 }
 
 internal sealed class ProviderFailure(int status, string message, bool allocationFailure = false, bool capacityWait = false,

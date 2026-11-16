@@ -116,7 +116,7 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
                     await RefreshAsync(null, stopping);
                     continue;
                 }
-                await Task.Delay(TimeSpan.FromSeconds(2), stopping);
+                await Task.Delay(ProviderLimits.RefreshCoalesceInterval, stopping);
                 foreach (var id in pendingRefreshes.Keys)
                 {
                     if (!pendingRefreshes.TryRemove(id, out _))
@@ -124,8 +124,14 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
                     await operation.WaitAsync(stopping);
                     try
                     {
-                        if (adapters.ContainsKey(id))
-                            await RefreshOneAsync(id, stopping);
+                        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(stopping);
+                        timeout.CancelAfter(ProviderLimits.ControlTimeout);
+                        try
+                        {
+                            if (adapters.ContainsKey(id))
+                                await RefreshOneAsync(id, timeout.Token);
+                        }
+                        catch (OperationCanceledException) when (!stopping.IsCancellationRequested) { }
                     }
                     finally { ReleaseOperation(); }
                 }
@@ -527,8 +533,7 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
     {
         if (model.ServingDisabled || !model.AcceptsIdentifier(shape.Alias) || !model.Model.Installed || !model.Model.Operations.Contains(shape.Operation) ||
             !shape.Fits(model.Model.Inputs, model.Model.ClientTools, model.Model.StructuredOutput, model.Context,
-                model.MediaTokensPerItem, model.Model.EmbeddingEncodings, allowUnverifiedContext) ||
-            uncertainModels.ContainsKey(model.Id))
+                model.MediaTokensPerItem, model.Model.EmbeddingEncodings, allowUnverifiedContext))
             return null;
         var endpoint = snapshot.Endpoints.First(item => item.Id == model.EndpointId);
         if (!model.Eligible && !(endpoint.Mode == ProviderMode.Managed && endpoint.CanLoad && model.Model.SupportsLoad))
@@ -599,7 +604,7 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
             if (placement is null)
                 return new(AdmissionStatus.Unavailable, "The local deployment cannot serve this request.");
             var model = placement.Model;
-            if (!model.Eligible || model.Instance is { Busy: true } || resources is null && !activeModels.IsEmpty)
+            if (HasUnsettled(id) || !model.Eligible || model.Instance is { Busy: true } || resources is null && !activeModels.IsEmpty)
                 return new(AdmissionStatus.Wait, "The deployment is loading or busy.");
             ResourceReservation? reservation = null;
             if (resources is not null)
@@ -815,6 +820,12 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
         {
             return new(released.ToArray(), "Mango could not settle and release every managed provider before the cancellation deadline.");
         }
+    }
+
+    public void RequestSettlementRefresh(string deployment)
+    {
+        if (uncertainModels.TryGetValue(deployment, out var endpoint))
+            SignalRefresh(endpoint);
     }
 
     private void SignalRefresh(Guid id)

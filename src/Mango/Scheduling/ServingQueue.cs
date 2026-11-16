@@ -13,6 +13,7 @@ internal interface IServingBackend
     ServingPlacement? Placement(InferenceShape shape, string id, bool allowUnverifiedContext = true);
     bool Conflicts(ServingPlacement a, ServingPlacement b);
     bool HasUnsettled(string deployment);
+    void RequestSettlementRefresh(string deployment);
     StartExecution TryStart(InferenceRequest request, string id);
     Task PreparePlacementAsync(ServingPlacement placement, Func<string, Task> displaced, CancellationToken cancellation);
 }
@@ -323,6 +324,8 @@ internal sealed class ServingQueue : IAsyncDisposable
         foreach (var entry in pending)
         {
             var work = entry.Work!;
+            if (!Expired(entry) && providers.HasUnsettled(work.Ticket.Deployment))
+                providers.RequestSettlementRefresh(work.Ticket.Deployment);
             if (draining)
                 Finish(entry, Maintenance());
             else if (Expired(entry))

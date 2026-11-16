@@ -53,6 +53,8 @@ try
         await PeerChecks.QualifyReleaseAsync(directory, Path.GetFullPath(executable));
         return;
     }
+    if (args is ["--settlement-checks"]) { await SettlementChecks.RunAsync(directory); return; }
+    await SettlementChecks.RunAsync(directory);
     TestDefaults();
     await WebUiChecks.RunAsync(directory);
     await TestHostAsync(directory);
