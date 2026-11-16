@@ -135,51 +135,44 @@ internal static class ResourceChecks
         free = 1450 * MiB;
         Tick(2);
         var loading = resources.TryAdmit(model, managed, Chat, ResourceWork.Load).Require();
-        foreach (var scenario in new[] { "recovered", "persistent", "pressure", "topology", "idle" })
+        foreach (var scenario in new[] { "attribution", "cpu", "gpu", "memory", "topology", "exception" })
         {
-            var reads = 0;
             using var startup = new ResourceProtection(Directory.CreateDirectory(Path.Combine(directory, "startup-" + scenario)).FullName, settings,
-                (_, now) =>
-                {
-                    reads++;
-                    var value = Sample(now);
-                    if (scenario == "recovered" && reads > 1) return value;
-                    return value with { WorkerAttribution = false, ExternalCpu = null, ExternalGpu = null,
-                        FreeRam = scenario == "pressure" && reads > 1 ? 0 : value.FreeRam,
-                        Hardware = scenario == "topology" ? null : value.Hardware,
-                        Limitation = "fixture attribution unavailable" };
-                }, () => ((ulong)Total, (ulong)free), clock);
+                (_, now) => scenario == "exception" ? throw new System.ComponentModel.Win32Exception() : Sample(now) with {
+                    WorkerAttribution = scenario != "attribution", ExternalCpu = scenario == "cpu" ? null : 0,
+                    ExternalGpu = scenario == "gpu" ? null : 0, TotalRam = scenario == "memory" ? 0 : Total,
+                    Hardware = scenario == "topology" ? null : "test-device" },
+                () => scenario == "memory" ? throw new System.ComponentModel.Win32Exception() : ((ulong)Total, (ulong)free), clock);
             await startup.InitializeAsync();
             startup.ApplyObservation(Sample(clock.GetUtcNow()));
             await startup.SaveBudgetAsync(update, providers, default);
-            var lease = scenario == "idle" ? null : startup.TryAdmit(model, managed, Chat, ResourceWork.Load).Require();
-            var observe = startup.SampleAndApplyAsync(() => providers.View, default);
-            if (scenario is "recovered" or "persistent" or "pressure")
-            {
-                Check(!observe.IsCompleted && startup.TryAdmit(model, managed, Chat, ResourceWork.Execute).Status == AdmissionStatus.Wait &&
-                    !lease!.Cancellation.IsCancellationRequested && startup.IsAvailable(model, managed, Chat.Operation),
-                    "startup retry retains route eligibility but blocks admission and does not cancel the managed load");
-            }
-            await observe;
-            if (scenario == "recovered")
-            {
-                Check(reads == 2 && startup.Observation!.WorkerAttribution && startup.Status.State == ContributionState.Contributor &&
-                    !lease!.Cancellation.IsCancellationRequested, "only a fresh complete observation recovers startup attribution");
-                lease!.Complete();
-                var execution = startup.TryAdmit(model, managed, Chat, ResourceWork.Execute).Require();
-                execution.Complete();
-            }
-            else
-            {
-                Check(startup.Status.State == ContributionState.Withdrawing && reads == (scenario == "persistent" ? 4 : scenario == "pressure" ? 2 : 1),
-                    "persistent attribution, observed pressure, other invalid telemetry and idle failures retain original withdrawal");
-                if (lease is not null)
-                {
-                    await Task.Delay(25);
-                    Check(lease.Cancellation.IsCancellationRequested, "failed startup retry cancels protected work");
-                    lease.Complete();
-                }
-            }
+            var lease = startup.TryAdmit(model, managed, Chat, ResourceWork.Load).Require();
+            for (var i = 0; i < 4; i++) await startup.SampleAndApplyAsync(() => providers.View, default);
+            Check(startup.Status.State == ContributionState.Contributor && !lease.Cancellation.IsCancellationRequested &&
+                startup.IsAvailable(model, managed, Chat.Operation), "repeated missing telemetry keeps own load and placement alive");
+            lease.Complete();
+            var execution = startup.TryAdmit(model, managed, Chat, ResourceWork.Execute).Require();
+            execution.Complete();
+            startup.ApplyObservation(Sample(clock.GetUtcNow()));
+            Check(startup.ServingAllowed, "usable telemetry resumes observation without a cooldown");
+        }
+        foreach (var scenario in new[] { "insufficient", "sufficient", "absent", "stale" })
+        {
+            using var headroom = new ResourceProtection(
+                Directory.CreateDirectory(Path.Combine(directory, "headroom-reread-" + scenario)).FullName, settings,
+                (_, now) => Sample(now), () => throw new System.ComponentModel.Win32Exception(), clock);
+            await headroom.InitializeAsync();
+            headroom.ApplyObservation(Sample(clock.GetUtcNow()) with { FreeRam = scenario == "sufficient" ? 1450 * MiB : 900 * MiB });
+            await headroom.SaveBudgetAsync(update, providers, default);
+            if (scenario == "absent")
+                headroom.ApplyObservation(Sample(clock.GetUtcNow()) with { TotalRam = 0, FreeRam = 0 });
+            if (scenario == "stale") clock.Advance(settings.Value.SampleSeconds + 6);
+            var attempt = headroom.TryAdmit(model, managed, Chat, ResourceWork.Load);
+            attempt.Reservation?.Complete();
+            Check(scenario == "insufficient"
+                    ? attempt.Status == AdmissionStatus.Wait && attempt.MemoryWait
+                    : attempt.Status == AdmissionStatus.Admitted,
+                $"RAM reread failure uses only current measured headroom ({scenario}); got {attempt.Status}, memoryWait={attempt.MemoryWait}");
         }
         Check(resources.Readiness(model, endpoint, Chat.Operation).State == "busy", "readiness reports live reservations without taking another");
         Check(resources.TryAdmit(model, endpoint, Chat, ResourceWork.Execute).Status == AdmissionStatus.Wait,
@@ -312,7 +305,7 @@ internal static class ResourceChecks
         clock.Advance(1);
         resumed.ApplyObservation(Sample(clock.GetUtcNow()));
         await resumed.AdvanceWithdrawalAsync(resumedProviders, default);
-        await FinishWithdrawalAsync(ContributionState.Cooldown);
+        await FinishWithdrawalAsync(ContributionState.Contributor);
         Console.WriteLine("Resource admission and benchmark checks passed.");
 
         ResourceObservation Sample(DateTimeOffset now) =>
@@ -480,43 +473,24 @@ internal static class ResourceChecks
             fixture.Urls.Single(), null, false, null, null), default);
         resources.ApplyObservation(Sample());
         var unknown = Sample() with { WorkerAttribution = false, ExternalCpu = null, ExternalGpu = null };
-        resources.ApplyObservation(unknown);
-        await Pump(ContributionState.Fault);
-        Check(!loaded && !resources.ServingAllowed, "native unload with missing process evidence latches a verification fault");
-        var count = inspections;
+        for (var i = 0; i < 4; i++) { clock.Advance(1); resources.ApplyObservation(unknown with { At = clock.GetUtcNow() }); }
         await resources.AdvanceWithdrawalAsync(providers, default);
-        Check(inspections == count, "same fault sample cannot initiate recovery");
-        clock.Advance(1);
+        Check(loaded && resources.ServingAllowed, "missing workers never withdraw, unload or latch a fault");
+        var warning = resources.LastEvent;
         resources.ApplyObservation(unknown with { At = clock.GetUtcNow() });
-        await resources.AdvanceWithdrawalAsync(providers, default);
-        Check(resources.Status.State == ContributionState.Fault, "continuing unknown attribution stays closed");
+        Check(resources.LastEvent == warning, "repeated missing reports deduplicate warning events");
+        resources.ApplyObservation(Sample());
         resources.ApplyObservation(Sample() with { ExternalCpu = 100 });
-        await resources.AdvanceWithdrawalAsync(providers, default);
-        Check(resources.Status.State == ContributionState.Fault, "busy external activity stays closed");
-        resources.ApplyObservation(Sample() with { At = clock.GetUtcNow().AddSeconds(-1) });
-        Check(resources.Observation!.ExternalCpu == 100, "out of order quiet evidence cannot replace newer activity");
-        resources.ApplyObservation(Sample() with { At = clock.GetUtcNow().AddSeconds(1) });
-        Check(resources.Observation!.ExternalCpu == 100, "future quiet evidence cannot replace current activity");
-        resources.ApplyObservation(Sample());
-        clock.Advance(settings.Value.SampleSeconds + 6);
-        await resources.AdvanceWithdrawalAsync(providers, default);
-        Check(resources.Status.State == ContributionState.Fault, "stale quiet evidence cannot initiate recovery");
-        await settings.UpdateAsync(value => value with { Role = LocalRole.Leech });
-        resources.ApplyObservation(Sample());
-        await resources.AdvanceWithdrawalAsync(providers, default);
-        Check(resources.Status.State == ContributionState.Fault, "operator leech hold prevents automatic recovery");
-        await settings.UpdateAsync(value => value with { Role = LocalRole.Contributor });
+        clock.Advance(10);
+        resources.ApplyObservation(Sample() with { ExternalCpu = 100 });
         await Pump(ContributionState.Cooldown);
-        Check(!resources.ServingAllowed, "fresh attributable and native empty evidence enters cooldown without opening ingress");
-        resources.ApplyObservation(Sample());
-        clock.Advance(299);
-        resources.ApplyObservation(Sample());
-        Check(!resources.ServingAllowed, "a gap in quiet samples does not bypass cooldown");
-        for (var i = 0; i < 300; i++) { clock.Advance(1); resources.ApplyObservation(Sample()); }
-        Check(resources.ServingAllowed, "normal five minute quiet cooldown restores contribution");
+        Check(!loaded && !resources.ServingAllowed, "only sustained measured external use withdraws into cooldown");
+        resources.ApplyObservation(unknown with { At = clock.GetUtcNow() });
+        for (var i = 0; i < 300; i++) { clock.Advance(1); resources.ApplyObservation(unknown with { At = clock.GetUtcNow() }); }
+        Check(resources.ServingAllowed, "missing reports do not extend a real external cooldown");
         loaded = keepLoaded = true;
         await providers.RefreshAsync(providers.View.Endpoints.Single().Id, default);
-        resources.ApplyObservation(Sample() with { WorkerAttribution = false });
+        resources.ApplyObservation(Sample() with { FreeRam = 0 });
         await Pump(ContributionState.Fault);
         loaded = false;
         clock.Advance(1);
@@ -532,7 +506,11 @@ internal static class ResourceChecks
         resources.ApplyObservation(Sample());
         await resources.AdvanceWithdrawalAsync(providers, default);
         Check(resources.Status.State == ContributionState.Fault, "native release errors require explicit retry");
-        Console.WriteLine("Transient release recovery checks passed.");
+                Check(WindowsObservation.StableWorkers([(1, 10L)], [(1, 10L)]) &&
+            !WindowsObservation.StableWorkers([(1, 10L)], [(1, 11L)]) &&
+            !WindowsObservation.StableWorkers([(1, 10L)], [(1, 10L), (2, 20L)]) &&
+            !WindowsObservation.StableWorkers([(1, 10L)], []), "new, exited and reused workers cannot prove external CPU usage");
+        Console.WriteLine("Telemetry fail-open and external cooldown checks passed.");
 
         async Task Pump(ContributionState expected)
         {

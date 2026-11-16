@@ -228,7 +228,7 @@ internal sealed partial class ResourceProtection
         ProviderIdentity.Hash(budget.Deployment, budget.Configuration, budget.Workload.Operation.ToString());
 
     private string Configuration(Deployment model) => ProviderIdentity.Hash(model.Configuration, model.Id,
-        observed?.Hardware, observed?.TotalRam.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        hardwareObservation?.Hardware, hardwareObservation?.TotalRam.ToString(System.Globalization.CultureInfo.InvariantCulture));
 
     private ResourceBudget? FindBudget(Deployment model, EndpointStatus endpoint, InferenceOperation operation)
     {
@@ -257,7 +257,7 @@ internal sealed partial class ResourceProtection
 
     private ResourceBudget? EstimateBudget(Deployment model, InferenceOperation operation, string configuration, string? runtime)
     {
-        if (observed is not { Hardware: not null } hardware) return null;
+        var hardware = hardwareObservation;
 
         var text = operation is InferenceOperation.Chat or InferenceOperation.Embeddings or InferenceOperation.SystemOne;
         var context = Math.Clamp(model.Context ?? model.Model.TheoreticalContext ?? 4096, 1, ProviderLimits.MaxContext);
@@ -282,7 +282,7 @@ internal sealed partial class ResourceProtection
                 AllowOverlap: false, Estimated: true);
         var executeBytes = Math.Min(limit, 256 * MiB + Math.Max(inputBytes, weightBytes / 8));
         var loadBytes = weightBytes > 0 && weightBytes <= limit - executeBytes ? weightBytes + executeBytes : 0;
-        MemoryCost Cost(long bytes) => new(bytes, hardware.Devices.Where(device => !device.Integrated && device.TotalBytes is not null)
+        MemoryCost Cost(long bytes) => new(bytes, (hardware?.Devices ?? []).Where(device => !device.Integrated && device.TotalBytes is not null)
             .ToDictionary(device => device.Id, _ => bytes));
         return new(model.Id, configuration, runtime, workload, Cost(loadBytes), Cost(executeBytes),
             AllowOverlap: false, Estimated: true);
@@ -560,7 +560,7 @@ internal sealed partial class ResourceProtection
                 item.Measurements.Any(pass => pass is null || pass.ObservedIncrement is not null && !ValidCost(pass.ObservedIncrement))) ||
             data.Unsafe is not { Length: <= 1024 } || data.Unsafe.Any(item => !Hash(item)) ||
             data.Hold is { } hold && (hold.State is not (ContributionState.Fault or ContributionState.Cooldown or ContributionState.Withdrawing) ||
-                string.IsNullOrWhiteSpace(hold.Reason) || hold.Reason.Length > 512 ||
+                !Enum.IsDefined(hold.Cause) || string.IsNullOrWhiteSpace(hold.Reason) || hold.Reason.Length > 512 ||
                 hold.Pending is { } pending && (pending.Length > ProviderLimits.MaxModels ||
                     pending.Any(item => item is null || item.Endpoint == Guid.Empty || !Hash(item.Deployment) ||
                         item.OwnedProcesses is not { Length: <= 256 } || item.OwnedProcesses.Any(pid => pid <= 0)))))

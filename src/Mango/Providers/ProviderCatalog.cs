@@ -585,8 +585,7 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
             }
             await ManageAsync(victim.Id, false, cancellation, scheduled: true);
             await displaced(victim.Id);
-            if (resources is not null && !await resources.WaitForObservationAsync(cancellation))
-                throw new ProviderFailure(503, "Waiting to verify memory after model unload.", capacityWait: true);
+            if (resources is not null) await resources.WaitForObservationAsync(cancellation);
         }
     }
 

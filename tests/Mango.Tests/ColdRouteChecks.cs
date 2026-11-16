@@ -98,8 +98,8 @@ internal static class ColdRouteChecks
         var request = Request();
         await network.RouteAsync(InferenceOperation.Chat, request, deadline.Token);
         await startupObservation!;
-        Check(failedSamples == -1 && resources.Observation!.WorkerAttribution && resources.LastEvent is null,
-            "real serving queue waits through incomplete startup attribution and dispatches only after fresh telemetry");
+        Check(failedSamples == 0 && !resources.Observation!.WorkerAttribution && resources.ServingAllowed,
+            "real serving queue dispatches once despite incomplete startup attribution");
         Check(request.Response.StatusCode == 200 && loads == 1 && calls == 1 &&
             providers.View.Models.Single().Context == 262144, "saved 262144 qualification routes through ingress and serving cold admission");
         loaded = false;

@@ -3,6 +3,7 @@ using Mango.Providers;
 namespace Mango.Resources;
 
 internal enum ContributionState { Contributor, Withdrawing, Cooldown, ManualLeech, Fault }
+internal enum WithdrawalCause { Safety, ExternalActivity }
 internal enum AdmissionStatus { Admitted, Wait, Unavailable }
 internal enum ResourceWork { Load, Execute, Benchmark }
 
@@ -24,7 +25,8 @@ internal readonly record struct Workload(InferenceOperation Operation, long Unit
 internal sealed record ResourceBudget(string Deployment, string Configuration, string? Runtime, Workload Workload,
     MemoryCost Load, MemoryCost Execute, bool AllowOverlap, int ParallelSlots = 1, bool AllowAttached = false, bool Estimated = false);
 internal sealed record PendingRelease(Guid Endpoint, string Deployment, int[] OwnedProcesses, bool Loading = false);
-internal sealed record ResourceHold(ContributionState State, string Reason, PendingRelease[]? Pending = null);
+internal sealed record ResourceHold(ContributionState State, string Reason, PendingRelease[]? Pending = null,
+    WithdrawalCause Cause = WithdrawalCause.Safety);
 internal sealed record ResourceEvent(DateTimeOffset At, string Reason, bool Loading, bool Running,
     long? FreeRamBytes, double? ExternalCpu, double? ExternalGpu);
 

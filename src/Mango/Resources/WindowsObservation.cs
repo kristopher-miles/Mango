@@ -88,6 +88,11 @@ internal sealed class WindowsObservation : IDisposable
                 gpuSample.SharedBytes?.Where(item => tree.ContainsKey(item.Process)).Sum(item => item.Bytes));
         }
 
+        // Mango itself is managed work; churn intervals cannot establish external CPU use.
+        allIds.Add(Environment.ProcessId);
+        if (ReadProcess(Environment.ProcessId) is { } mango)
+            currentWorkers[(Environment.ProcessId, mango.Start)] = mango.Cpu;
+        var stableWorkers = StableWorkers(previousWorkers.Keys, currentWorkers.Keys);
         double? externalCpu = null;
         double? managedCpu = null;
         double? totalCpu = null;
@@ -98,7 +103,7 @@ internal sealed class WindowsObservation : IDisposable
             if (previousCpu is { } previous && total > previous.Total && busy >= previous.Busy)
             {
                 totalCpu = Math.Clamp((double)(busy - previous.Busy) * 100 / (total - previous.Total), 0, 100);
-                if (attributed)
+                if (attributed && stableWorkers)
                 {
                     var own = currentWorkers.Sum(item => previousWorkers.TryGetValue(item.Key, out var before)
                         ? Math.Max(0, item.Value - before) : 0);
@@ -112,13 +117,14 @@ internal sealed class WindowsObservation : IDisposable
         foreach (var sample in currentWorkers)
             previousWorkers.Add(sample.Key, sample.Value);
 
-        var externalGpu = attributed && gpuSample.Engines is { } engines
+        var externalGpu = attributed && stableWorkers && gpuSample.Engines is { } engines
             ? engines.Where(item => !allIds.Contains(item.Process)).GroupBy(item => item.Engine)
                 .Select(group => Math.Clamp(group.Sum(item => item.Percent), 0, 100)).DefaultIfEmpty().Max() : (double?)null;
         var totalGpu = gpuSample.Devices.Length > 0 && gpuSample.Engines is { } allEngines
             ? allEngines.GroupBy(item => item.Engine)
                 .Select(group => Math.Clamp(group.Sum(item => item.Percent), 0, 100)).DefaultIfEmpty().Max() : (double?)null;
         var limitation = !attributed ? "Windows could not attribute every managed provider worker."
+            : !stableWorkers ? "Windows managed worker activity counters are settling."
             : !singleProcessorGroup ? "CPU attribution is unavailable across multiple Windows processor groups."
             : gpuSample.Hardware is null || externalGpu is null ? "Windows GPU activity or device topology is unavailable."
             : gpuSample.Devices.Any(item => !item.Integrated && item.UsedBytes is null)
@@ -126,6 +132,9 @@ internal sealed class WindowsObservation : IDisposable
         return new(now, checked((long)memory.Total), checked((long)memory.Available), externalCpu, externalGpu,
             gpuSample.Devices, gpuSample.Hardware, workers, attributed, limitation, managedCpu, totalCpu, totalGpu);
     }
+
+    internal static bool StableWorkers(IEnumerable<(int Id, long Start)> before, IEnumerable<(int Id, long Start)> after) =>
+        before.ToHashSet().SetEquals(after);
 
     private static bool IsAny(IPAddress address) => address.Equals(IPAddress.Any) || address.Equals(IPAddress.IPv6Any);
 

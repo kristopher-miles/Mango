@@ -16,6 +16,16 @@ if (args is ["--generic-provider-fixture"])
 var directory = Directory.CreateTempSubdirectory("mango-check-").FullName;
 try
 {
+    if (args is ["--native-stop-crosscheck"])
+    {
+        await TelemetryPolicyChecks.CheckNativeStopCrosscheckAsync();
+        return;
+    }
+    if (args is ["--telemetry-policy-checks"])
+    {
+        await TelemetryPolicyChecks.RunAsync(directory);
+        return;
+    }
     if (args is ["--yolo-checks"])
     {
         await YoloChecks.RunAsync(directory);
@@ -32,6 +42,8 @@ try
     {
         await ProviderChecks.RunAsync();
         await ResourceChecks.RunAsync(directory);
+        await TelemetryPolicyChecks.RunAsync(directory);
+        await TelemetryPolicyChecks.CheckNativeStopCrosscheckAsync();
         await YoloChecks.RunAsync(directory);
         await ColdRouteChecks.RunAsync(directory);
         return;
@@ -48,6 +60,8 @@ try
     await GenericProviderChecks.RunAsync(directory);
     await PeerChecks.RunAsync(directory);
     await ResourceChecks.RunAsync(directory);
+    await TelemetryPolicyChecks.RunAsync(directory);
+    await TelemetryPolicyChecks.CheckNativeStopCrosscheckAsync();
     await YoloChecks.RunAsync(directory);
     await ColdRouteChecks.RunAsync(directory);
     await SchedulingChecks.RunAsync();
