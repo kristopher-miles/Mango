@@ -24,6 +24,7 @@ internal static class SettlementChecks
         var loaded = true;
         var busy = false;
         var inconclusive = false;
+        object? loadsSettled = null;
         var calls = 0;
         var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var observations = System.Threading.Channels.Channel.CreateUnbounded<bool>();
@@ -38,7 +39,7 @@ internal static class SettlementChecks
             var instance = new Dictionary<string, object> { ["id"] = "fixture-instance",
                 ["config"] = new { context_length = 4096, parallel = 1 } };
             if (!inconclusive) instance["busy"] = busy;
-            return Results.Json(new { models = new[] { new {
+            return Results.Json(new { loads_settled = loadsSettled, models = new[] { new {
                 key = "settlement-fixture", type = "llm", max_context_length = 4096,
                 loaded_instances = loaded ? new[] { instance } : []
             } } });
@@ -138,6 +139,23 @@ internal static class SettlementChecks
             await providers.SetServingAsync(model.Id, false, default);
             Check((await queue.SubmitAsync(await Work(), default)).Status == 503 && calls == 3,
                 "permanent operator ineligibility rejects");
+            if (unload)
+            {
+                loaded = false;
+                providers.RestoreUnsettled(model.EndpointId, model.Id, loading: true);
+                await providers.RefreshAsync(model.EndpointId, lifetime.Token);
+                Check(providers.HasUnsettledLoad(model.Id), "empty generic inventory alone cannot settle a restored load");
+                loadsSettled = "true";
+                await providers.RefreshAsync(model.EndpointId, lifetime.Token);
+                Check(providers.HasUnsettledLoad(model.Id), "malformed load proof cannot settle a restored load");
+                loaded = busy = true;
+                loadsSettled = true;
+                await providers.RefreshAsync(model.EndpointId, lifetime.Token);
+                Check(providers.HasUnsettledLoad(model.Id), "load proof cannot settle a busy resident model");
+                loaded = busy = false;
+                await providers.RefreshAsync(model.EndpointId, lifetime.Token);
+                Check(!providers.HasUnsettledLoad(model.Id), "explicit load proof and empty inventory settle a restored load");
+            }
         }
         finally
         {

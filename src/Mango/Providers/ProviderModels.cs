@@ -61,7 +61,7 @@ internal sealed record ProviderModel(string Id, string NativeId, string Manageme
     int? ReportedMediaTokensPerItem = null, int? PreparedContext = null, string? PreparedConfiguration = null);
 
 internal sealed record ProviderInventory(string? Version, ProviderModel[] Models, bool CanLoad, bool CanUnload,
-    bool CanStop, int? OwnedProcessId = null, int? MaxLoadedModels = null);
+    bool CanStop, int? OwnedProcessId = null, int? MaxLoadedModels = null, bool LoadsSettled = false);
 
 internal sealed record Deployment(Guid EndpointId, ProviderModel Model, ModelOptions Options, bool Online, bool Busy,
     string? Version, string? Configuration = null, string? PlacementEpoch = null)

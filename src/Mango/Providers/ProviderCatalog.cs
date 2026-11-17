@@ -78,7 +78,8 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
         }
     }
 
-    private readonly ConcurrentDictionary<string, byte> uncertainLoads = new();
+    // A live canceled load can still be in transport, even when the provider is currently idle.
+    private readonly ConcurrentDictionary<string, bool> uncertainLoads = new();
     internal bool HasUnsettledLoad(string deployment) => uncertainLoads.ContainsKey(deployment);
 
     internal void RestoreUnsettled(Guid endpoint, string deployment, bool loading = false)
@@ -86,7 +87,7 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
         if (adapters.ContainsKey(endpoint))
         {
             uncertainModels[deployment] = endpoint;
-            if (loading) uncertainLoads[deployment] = 0;
+            if (loading) uncertainLoads[deployment] = true;
         }
     }
 
@@ -559,7 +560,7 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
                     else
                     {
                         uncertainModels[id] = target.EndpointId;
-                        if (load) uncertainLoads[id] = 0;
+                        if (load) uncertainLoads[id] = false;
                         Publish();
                         SignalRefresh(target.EndpointId);
                     }
@@ -1086,7 +1087,8 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
             foreach (var key in uncertainModels.Where(pair => pair.Value == id).Select(pair => pair.Key).ToArray())
             {
                 var model = result.Models.FirstOrDefault(model => model.Id == key);
-                if ((!uncertainLoads.ContainsKey(key) && (model is null || model.Instances.Length == 0)) ||
+                var loading = uncertainLoads.TryGetValue(key, out var restored);
+                if ((!loading || restored && result.LoadsSettled) && (model is null || model.Instances.Length == 0) ||
                     model is { Instances.Length: > 0 } && await ObserveIdleAsync(adapter, model, wait: false, cancellation))
                 {
                     uncertainModels.TryRemove(key, out _);

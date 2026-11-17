@@ -77,7 +77,8 @@ internal sealed class LmStudioAdapter(HttpClient http, ProviderEndpoint endpoint
         var inventory = Generic ? models.ToArray() : models.GroupBy(model => model.NativeId, StringComparer.Ordinal)
             .SelectMany(group => ResolveDevices(group.ToArray(), devices)).Take(ProviderLimits.MaxModels).ToArray();
         return new(version, inventory, Managed, Managed, false,
-            MaxLoadedModels: Generic ? result.Number("max_loaded_models") : null);
+            MaxLoadedModels: Generic ? result.Number("max_loaded_models") : null,
+            LoadsSettled: Generic && result.IsTrue("loads_settled"));
     }
 
     private ProviderModel[] ResolveDevices(ProviderModel[] rows, LmStudioDevices? devices)
