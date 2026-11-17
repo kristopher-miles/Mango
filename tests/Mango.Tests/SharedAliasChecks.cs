@@ -26,8 +26,8 @@ internal static partial class PeerChecks
         using var http = new HttpClient(new HttpClientHandler { UseProxy = false }) { Timeout = TimeSpan.FromSeconds(18) };
         var calls = new ConcurrentDictionary<string, TaskCompletionSource<string>>(StringComparer.Ordinal);
         var holds = new ConcurrentDictionary<string, TaskCompletionSource>(StringComparer.Ordinal);
-        await using var smallProvider = await StartAliasProviderAsync(smallId, 2048, false, imageId, calls, holds);
-        await using var largeProvider = await StartAliasProviderAsync(largeId, 8192, true, imageId, calls, holds);
+        await using var smallProvider = await StartAliasProviderAsync(smallId, 200_000, false, imageId, calls, holds);
+        await using var largeProvider = await StartAliasProviderAsync(largeId, 262_144, true, imageId, calls, holds);
         await using var small = await Host.StartAsync(Path.Combine(root, "alias-small"), status, Port(address));
         await using var large = await Host.StartAsync(Path.Combine(root, "alias-large"), status, Port(address));
         var created = await Local(http, small, "network/create", new { name = "Alias small", password = Password, benchmarkPolicy = BenchmarkPolicy.Never });
@@ -50,7 +50,7 @@ internal static partial class PeerChecks
 
         var catalogue = await Request(http, HttpMethod.Get, small.LocalAddress + "/v1/models", small.Session);
         var listed = catalogue.GetProperty("data").EnumerateArray().Single(item => item.GetProperty("id").GetString() == alias);
-        Check(listed.GetProperty("context_size").GetInt32() == 8192, "a shared alias advertises the largest observed context");
+        Check(listed.GetProperty("context_size").GetInt32() == 262_144, "a shared alias advertises the largest observed context");
         Check(Served(await Chat("ordinary text")) == smallId, "text can use the smaller text-only deployment under the mixed alias");
         var picture = await Request(http, HttpMethod.Post, small.LocalAddress + "/v1/chat/completions", small.Session, new
         {
@@ -59,14 +59,16 @@ internal static partial class PeerChecks
             max_tokens = 16
         });
         Check(Served(picture) == largeId, "image input goes only to the capable deployment");
-        var longInput = new string('x', 4096);
+        var longInput = new string('x', 220_000);
         Check(Served(await Chat(longInput)) == largeId && await Started(longInput) == largeId,
             "the larger context handles long text without trying the smaller deployment");
         Check(Served(await Chat("provider measured overflow")) == largeId && await Started("provider measured overflow") == smallId,
             "an authoritative context refusal before output safely retries the other deployment");
+        Check(Served(await Chat("compressible " + new string('c', 300_000))) == largeId,
+            "an uncertain byte estimate above both limits still allows native tokenization");
         await Request(http, HttpMethod.Post, small.LocalAddress + "/v1/chat/completions", small.Session, new
         {
-            model = alias, messages = new[] { new { role = "user", content = new string('x', 9000) } }, max_tokens = 16
+            model = alias, messages = new[] { new { role = "user", content = new string('x', 270_000) } }, max_tokens = 16
         }, expected: 422);
 
         Hold("first short");
@@ -148,7 +150,8 @@ internal static partial class PeerChecks
             var text = content.ValueKind == JsonValueKind.String ? content.GetString()! : "vision";
             Check(vision || content.ValueKind == JsonValueKind.String, "text-only fixture never receives an image");
             await Record(text, native, web.RequestAborted);
-            if (text.Length > context || !vision && text == "provider measured overflow")
+            var tokens = text.StartsWith("compressible ", StringComparison.Ordinal) ? text.Length / 4 : text.Length;
+            if (tokens > context || !vision && text == "provider measured overflow")
                 return Results.BadRequest(new { error = new { code = "context_length_exceeded" } });
             return Results.Json(new { id = native });
         });
