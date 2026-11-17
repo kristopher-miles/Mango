@@ -156,8 +156,11 @@ internal sealed partial class PeerNetwork
             .Concat(models.Any(model => model.Inputs.Contains("image")) ? new[] { "vision" } : [])
             .Concat(models.Any(model => model.ClientTools) ? new[] { "tools" } : []).Distinct().Order().ToArray()
         };
-        var context = models.Any(model => model.Loaded && model.Context is null) ? null :
-            models.Where(model => model.Loaded).Select(model => model.Context).DefaultIfEmpty().Min();
+        var pooled = models.Count(model => string.Equals(model.EffectiveAlias, alias, StringComparison.OrdinalIgnoreCase)) > 1;
+        var context = pooled ? models.Where(model => model.Loaded || model.Workloads?.Any(work => work.Qualified) == true)
+            .Select(model => model.Context).DefaultIfEmpty().Max() :
+            models.Any(model => model.Loaded && model.Context is null) ? null :
+                models.Where(model => model.Loaded).Select(model => model.Context).DefaultIfEmpty().Min();
         if (context is not null) row["context_size"] = context;
         return row;
     }
@@ -226,6 +229,7 @@ internal sealed partial class PeerNetwork
                 searched = true;
                 choices = Candidates(payload.Shape);
             }
+            choices = await ObserveRouteChoicesAsync(choices, payload.Shape, access.KeyId, cancellation);
             AttemptReply? last = null;
             Guid? suggested = null;
             while (attemptCount < MaxDestinations && limit > clock.GetElapsedTime(age))
@@ -239,7 +243,7 @@ internal sealed partial class PeerNetwork
                         break;
                     searched = true;
                     await DiscoverMissingAsync(cancellation);
-                    choices = Candidates(payload.Shape);
+                    choices = await ObserveRouteChoicesAsync(Candidates(payload.Shape), payload.Shape, access.KeyId, cancellation);
                     foreach (var candidate in choices)
                         if (unreachable.TryGetValue(candidate.Node, out var failed) &&
                             (failed.Address != Snapshot.Nodes.GetValueOrDefault(candidate.Node)?.Address || failed.Epoch != candidate.ServingEpoch))
@@ -253,8 +257,10 @@ internal sealed partial class PeerNetwork
                 var remaining = limit - elapsed;
                 var here = Snapshot.Self?.Id ?? Guid.Empty;
                 var address = Snapshot.Nodes.GetValueOrDefault(choice.Node)?.Address;
+                var tryOtherHost = choice is { VerifiedFit: true, Busy: false, Displaces: false } &&
+                    choices.Any(other => !tried.Contains(other.Node) && other is { VerifiedFit: true, Busy: false, Displaces: false });
                 var ticket = new AttemptTicket(item.Id, attempt, access.KeyId, choice.Deployment,
-                    clock.GetUtcNow() - elapsed, clock.GetUtcNow() + remaining, session, choice.ServingEpoch, source, logGeneration);
+                    clock.GetUtcNow() - elapsed, clock.GetUtcNow() + remaining, session, choice.ServingEpoch, source, logGeneration, tryOtherHost);
                 var started = clock.GetTimestamp();
                 var result = new AttemptReply(AttemptState.Uncertain, 503, "The attempt ended without a confirmed result.");
                 try
@@ -363,15 +369,15 @@ internal sealed partial class PeerNetwork
             {
                 var use = hostUse.GetValueOrDefault((item.Node, item.Deployment));
                 var inFlight = hostUse.Where(entry => entry.Key.Item1 == item.Node).Sum(entry => entry.Value.Active);
-                var concurrent = Math.Max(0, inFlight - item.Slots + 1);
+                var concurrent = Math.Max(item.Busy ? 1 : 0, inFlight - item.Slots + 1);
                 var wait = concurrent * (use?.RuntimeMs ?? 1000);
                 if (use?.AvoidUntil > now)
                     wait += (use.AvoidUntil - now).TotalMilliseconds;
-                if (!item.Loaded)
-                    wait += 1000;
-                return (Placement: item, Wait: wait, Cost: wait + (item.PromptMilliseconds ?? 0),
+                return (Placement: item, Wait: wait, Cost: wait + (item.Loaded ? 0 : 1000) + (item.PromptMilliseconds ?? 0),
                     WaitKnown: concurrent == 0 || use?.RuntimeMs is not null);
-            }).OrderByDescending(item => item.Placement.VerifiedFit).ThenBy(item => item.Wait > 0)
+            }).OrderByDescending(item => item.Placement.VerifiedFit)
+                .ThenByDescending(item => item.Placement.VerifiedFit ? null : item.Placement.Context)
+                .ThenBy(item => item.Placement.Displaces).ThenBy(item => item.Wait > 0)
                 .ThenBy(item => item.Placement.Scarcity).ThenBy(item => item.Cost)
                 .ThenByDescending(item => item.Placement.Deployment == selected).ThenByDescending(item => item.Placement.Node == here)
                 .ThenBy(item => HashCode.Combine(here, item.Placement.Node))
@@ -380,11 +386,11 @@ internal sealed partial class PeerNetwork
                 return null;
             var best = available[0];
             if ((suggested ?? hint?.Advice) is { } advised && available.FirstOrDefault(item => item.Placement.Node == advised) is { Placement: not null } recommended &&
-                recommended.Placement.VerifiedFit == best.Placement.VerifiedFit && recommended.Wait <= best.Wait)
+                ComparableRoute(recommended.Placement, best.Placement) && recommended.Wait <= best.Wait)
                 best = recommended;
             else if (hint?.Placement.Epoch is { } epoch && available.FirstOrDefault(item => item.Placement.Node == hint.Placement.Node &&
                 item.Placement.Deployment == hint.Placement.Deployment && item.Placement.Epoch == epoch) is { Placement: not null } cached &&
-                cached.Placement.VerifiedFit == best.Placement.VerifiedFit && cached.WaitKnown && cached.Wait < remaining.TotalMilliseconds &&
+                ComparableRoute(cached.Placement, best.Placement) && cached.WaitKnown && cached.Wait < remaining.TotalMilliseconds &&
                 (cached.Wait == 0 && best.Wait == 0 ||
                     cached.Placement.CacheSavingsMilliseconds is { } savings && cached.Cost - savings < best.Cost))
                 best = cached;
@@ -400,6 +406,34 @@ internal sealed partial class PeerNetwork
             request.Attempts.Add(new(attempt, choice.Node, choice.Deployment, now, AttemptState.Waiting, 0));
             return choice;
         }
+    }
+
+    private static bool ComparableRoute(PlacementChoice candidate, PlacementChoice best) =>
+        candidate.VerifiedFit == best.VerifiedFit && candidate.Displaces == best.Displaces &&
+        (candidate.VerifiedFit || candidate.Context == best.Context);
+
+    private async Task<PlacementChoice[]> ObserveRouteChoicesAsync(PlacementChoice[] choices, InferenceShape shape, Guid? key,
+        CancellationToken cancellation)
+    {
+        if (choices.Select(choice => choice.Node).Distinct().Take(2).Count() < 2)
+            return choices;
+        var current = Snapshot;
+        var here = current.Self?.Id ?? Guid.Empty;
+        var probes = choices.OrderByDescending(choice => choice.VerifiedFit).GroupBy(choice => choice.Node)
+            .Select(group => group.First()).Take(4);
+        var states = await Task.WhenAll(probes.Select(async choice =>
+        {
+            if (choice.Node == here)
+                return (choice.Node, choice.Deployment, State: LocalPlacementState(shape, choice.Deployment, routing: true));
+            Interlocked.Increment(ref placementChecks);
+            var reply = current.Nodes.TryGetValue(choice.Node, out var peer) && !peer.Removed
+                ? await SendAsync<PlacementCheckReply>(current, peer, "inference/eligible", new PlacementCheck(key, choice.Deployment, shape, Routing: true),
+                    cancellation, refresh: true, timeout: TimeSpan.FromMilliseconds(750)) : null;
+            return (choice.Node, choice.Deployment, State: reply?.Body);
+        }));
+        var live = states.ToDictionary(state => (state.Node, state.Deployment), state => state.State);
+        return choices.Select(choice => live.GetValueOrDefault((choice.Node, choice.Deployment)) is { Eligible: true } state
+            ? choice with { Busy = state.Busy ?? choice.Busy, Displaces = state.Displaces ?? choice.Displaces } : choice).ToArray();
     }
 
     private async Task<AttemptReply> SubmitLocalAsync(Guid origin, AttemptTicket ticket, InferenceRequest payload,
@@ -501,7 +535,7 @@ internal sealed partial class PeerNetwork
             protection is null ? null : workloads, EffectiveAlias: model.Alias, Readiness: protection?.Readiness(model, endpoint,
                 exclusiveBlocker: ProviderCatalog.ExclusiveBlocker(view, endpoint)),
             Origin: model.Model.Origin, SourceDevice: SafeDetail(model.Model.SourceDevice, 100),
-            ProviderIdentifiers: model.ProviderIdentifiers, Yolo: model.Yolo);
+            ProviderIdentifiers: model.ProviderIdentifiers, Yolo: model.Yolo, Busy: model.Busy || model.Instance?.Busy == true);
     }
 
     private PlacementChoice[] Candidates(InferenceShape shape)
@@ -527,18 +561,22 @@ internal sealed partial class PeerNetwork
             .Select(group => (Alias: group.Key, Owners: group.Select(item => item.Node).Distinct().Take(2).ToArray()))
             .Where(group => group.Owners.Length == 1 && !string.Equals(group.Alias, shape.Alias, StringComparison.OrdinalIgnoreCase))
             .GroupBy(group => group.Owners[0]).ToDictionary(group => group.Key, group => group.Count());
-        return choices.Where(item => item.Model.Inputs.ToHashSet().SetEquals(canonical.Inputs) &&
-                item.Model.Outputs.ToHashSet().SetEquals(canonical.Outputs) && (shape.Operation != InferenceOperation.Embeddings ||
-                    item.Model.EmbeddingDimensions == canonical.EmbeddingDimensions && item.Model.EmbeddingSpace == canonical.EmbeddingSpace))
+        return choices.Where(item => shape.Operation != InferenceOperation.Embeddings ||
+                item.Model.EmbeddingDimensions == canonical.EmbeddingDimensions && item.Model.EmbeddingSpace == canonical.EmbeddingSpace)
             .Select(item =>
             {
                 var timing = item.Model.Workloads?.FirstOrDefault(work => work.Limit.Operation == shape.Operation);
+                var contextBound = (long?)item.Model.Context ?? (!item.Model.Loaded && timing is { Qualified: true } ? timing.Limit.Units : (long?)null);
                 var scarce = uniqueAliases.GetValueOrDefault(item.Node);
                 if (item.Model.Context is { } context && choices.Any(other => other.Node != item.Node && other.Model.Context < context / 2))
                     scarce++;
+                var busy = item.Model.Busy || item.Model.Readiness?.State == "busy";
+                var residentBusy = busy && !item.Model.Loaded && item.Model.Endpoint is { } endpoint &&
+                    catalog.Any(other => other.Node == item.Node && other.Model.Endpoint == endpoint && other.Model.Loaded);
                 return new PlacementChoice(item.Node, item.Model.Id, item.Model.PlacementEpoch, item.Model.Loaded,
                     shape.Items == 1 ? timing?.Slots ?? 1 : 1, timing?.PromptMilliseconds, timing?.CacheSavingsMilliseconds,
-                    scarce, item.ServingEpoch, Fits(item.Model, allowUnverifiedContext: false));
+                    scarce, item.ServingEpoch,
+                    shape.FitsEstimatedContext(contextBound, item.Model.MediaTokensPerItem), contextBound, busy, residentBusy);
             }).ToArray();
     }
 

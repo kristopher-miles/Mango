@@ -17,10 +17,11 @@ internal sealed record AlternateProbe(Guid? Key, InferenceShape Shape);
 
 internal sealed record AttemptTicket(Guid Request, Guid Attempt, Guid? Key, string Deployment,
     DateTimeOffset Arrived, DateTimeOffset QueueUntil, string? Session, string ServingEpoch, InferenceSource? Source = null,
-    Revision? LogGeneration = null);
+    Revision? LogGeneration = null, bool TryOtherHost = false);
 
 internal sealed record PlacementChoice(Guid Node, string Deployment, string? Epoch, bool Loaded, int Slots,
-    double? PromptMilliseconds, double? CacheSavingsMilliseconds, int Scarcity, string ServingEpoch, bool VerifiedFit);
+    double? PromptMilliseconds, double? CacheSavingsMilliseconds, int Scarcity, string ServingEpoch, bool VerifiedFit,
+    long? Context = null, bool Busy = false, bool Displaces = false);
 
 internal sealed record AttemptTrace(Guid Attempt, Guid Node, string Deployment, DateTimeOffset Started,
     AttemptState State, int Status, ProviderExecution? Timing = null, string? Reason = null,

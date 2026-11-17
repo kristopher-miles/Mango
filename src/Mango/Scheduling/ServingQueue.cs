@@ -112,6 +112,15 @@ internal sealed class ServingQueue : IAsyncDisposable
     private volatile bool draining;
     public bool Draining => draining;
 
+    internal bool HasConflictingWork(ServingPlacement placement)
+    {
+        lock (sync)
+            return entries.Values.Any(entry => entry.Work is not null &&
+                (entry.Placement is { } pending
+                    ? providers.Conflicts(placement, pending)
+                    : entry.Work.Ticket.Deployment == placement.Model.Id));
+    }
+
     public async Task<bool> DrainAsync(TimeSpan timeout, CancellationToken cancellation)
     {
         Task<AttemptReply>[] attempts;
@@ -161,6 +170,9 @@ internal sealed class ServingQueue : IAsyncDisposable
                 return Task.FromResult(Deadline());
             if (stop.IsCancellationRequested || cancellation.IsCancellationRequested)
                 return Task.FromResult(Cancelled(work));
+            if (work.Ticket.TryOtherHost && providers.Placement(work.Payload.Shape, work.Ticket.Deployment) is { } target &&
+                (target.Model.Busy || target.Model.Instance?.Busy == true || HasConflictingWork(target)))
+                return Task.FromResult(new AttemptReply(AttemptState.Rejected, 409, "The host gained conflicting work before admission."));
             if (entries.Count >= MaxAttempts || waiting >= MaxWaiting || waitingBytes + work.Payload.Bytes > MaxWaitingBytes)
                 return Task.FromResult(Rejected("The serving queue reached its local capacity."));
             var entry = new Entry(work.Ticket.QueueUntil.AddMinutes(5))

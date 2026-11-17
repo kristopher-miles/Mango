@@ -40,6 +40,14 @@ internal sealed record InferenceShape(string Alias, InferenceOperation Operation
         return allowUnverifiedContext || context is > 0 && (MediaItems == 0 || mediaTokens is > 0);
     }
 
+    public bool FitsEstimatedContext(long? context, int? mediaTokens)
+    {
+        if (Operation is not (InferenceOperation.Chat or InferenceOperation.Embeddings or InferenceOperation.SystemOne))
+            return true;
+        return context is > 0 && (MediaItems == 0 || mediaTokens is > 0) &&
+            PromptUnits + (long)MediaItems * mediaTokens.GetValueOrDefault() + OutputUnits <= context;
+    }
+
     public bool Valid => ProviderIdentity.ValidIdentifier(Alias) && Enum.IsDefined(Operation) &&
         Inputs is { Length: <= 3 } && Inputs.All(input => input is "text" or "image" or "audio") &&
         PromptUnits is >= 0 and <= 128L * ProviderLimits.MaxRequestBytes && OutputUnits >= 0 &&
@@ -295,7 +303,7 @@ internal sealed class InferenceRequest(InferenceOperation operation, string alia
         if (!response.IsSuccessStatusCode)
             Settled = true;
         if (!deployment.Yolo)
-            await ProviderAdapter.RequireInferenceSuccessAsync(response, cancellation);
+            await ProviderAdapter.RequireInferenceSuccessAsync(response, cancellation, operation == InferenceOperation.Chat);
         var eventStream = string.Equals(response.Content.Headers.ContentType?.MediaType, "text/event-stream",
             StringComparison.OrdinalIgnoreCase);
         if (!deployment.Yolo && operation == InferenceOperation.Chat && json?["stream"] is JsonValue streamFlag &&
@@ -542,6 +550,8 @@ internal sealed class InferenceRequest(InferenceOperation operation, string alia
         adapter.Prepare(InferenceOperation.Chat, payload);
         var reported = Shape.MediaItems == 0 ? await adapter.CountChatAsync(payload, cancellation) : null;
         var estimate = Shape.PromptUnits + MediaBudget(Shape.MediaItems, deployment);
+        if (reported is null && adapter.ValidatesChatContext)
+            return ((int)Math.Min(int.MaxValue, estimate), "routing estimate");
         return CheckFit(reported, estimate, reserved, limit);
     }
 

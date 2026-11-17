@@ -52,6 +52,8 @@ Open **Serving**, choose **Add provider**, select the profile for an existing LM
 
 Load the model in its provider or use the authorized **Load** action. Use **Refresh catalog** to observe external changes. Each model card shows its provider ID, optional alias, capability ratings, and relevant fallback limits. **Use locally** gives that deployment preference when otherwise comparable placements are available. To clear the preference, choose **Automatic placement** under **Local model preference** in Serving. `GET /v1/models` lists eligible provider IDs and any user-set aliases within the caller's scope. Deployments under one embedding alias need a common vector space. Use a deployment-specific alias or configure an owner-declared compatible family.
 
+Give compatible deployments the same alias to serve requests on either host. Chat deployments under one alias can have different context and input capabilities. Mango uses each request's inputs and estimated context when selecting a host, checks for current work, and prefers a placement that can run without displacing another resident model. A request that needs the larger context or image input can wait on the host that supports it. The shared alias lists the largest observed context available to the caller.
+
 Use the loopback host URL and current session bearer for the local API. The command `--url` returns the bearer as the `session` fragment. Keep it private. This PowerShell request invokes a chat alias.
 
 ```powershell

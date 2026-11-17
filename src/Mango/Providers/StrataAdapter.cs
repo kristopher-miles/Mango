@@ -33,6 +33,12 @@ internal sealed class StrataAdapter(HttpClient http, ProviderEndpoint endpoint, 
     private sealed record Prepared(string Id, string NativeId, string Path, string Digest, int? Context, string? Backend, bool Present);
 
     protected override string? Bearer => bearer;
+    public override bool ValidatesChatContext => true;
+    public override void Prepare(InferenceOperation operation, JsonObject payload)
+    {
+        if (operation == InferenceOperation.Chat && !payload.ContainsKey("fit_max_tokens"))
+            payload["fit_max_tokens"] = false;
+    }
     internal bool Reserved => pending || job is not null;
     internal bool IsIdleExpired => instance is null || ObservedProcessIds() is { Length: 0 } ||
         Stopwatch.GetElapsedTime(lastUse) >= TimeSpan.FromMinutes(5);

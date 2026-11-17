@@ -7,8 +7,8 @@ using Mango.Scheduling;
 
 namespace Mango.Peers;
 
-internal sealed record PlacementCheck(Guid? Key, string Deployment, InferenceShape Shape);
-internal sealed record PlacementCheckReply(bool Eligible);
+internal sealed record PlacementCheck(Guid? Key, string Deployment, InferenceShape Shape, bool Routing = false);
+internal sealed record PlacementCheckReply(bool Eligible, bool? Busy = null, bool? Displaces = null);
 internal sealed record AttemptControl(Guid Attempt, int? FenceMilliseconds, string ServingEpoch);
 internal sealed record RouteAdvice(Guid Request, Guid Suggested);
 
@@ -58,7 +58,7 @@ internal sealed partial class PeerNetwork
 
     private sealed record ForwardTicket(Guid Request, Guid Attempt, Guid? Key, string Deployment,
         int AgeMilliseconds, int RemainingMilliseconds, string? Session, string ServingEpoch, InferenceSource? Source = null,
-        Revision? LogGeneration = null)
+        Revision? LogGeneration = null, bool TryOtherHost = false)
     {
         public bool Valid => Request != Guid.Empty && Attempt != Guid.Empty && Key != Guid.Empty &&
             Deployment is { Length: > 0 and <= 128 } && AgeMilliseconds >= 0 && RemainingMilliseconds > 0 &&
@@ -96,8 +96,16 @@ internal sealed partial class PeerNetwork
         if (!Ready || check.Shape is not { Valid: true } || check.Key == Guid.Empty || check.Deployment is not { Length: > 0 and <= 128 })
             return new(false);
         using var lease = AcquireLease(check.Key ?? Guid.Empty, null, check.Shape.Operation, out _, forwarded: true);
-        return new(lease is not null && AllowsMedia(lease.Access, check.Shape) &&
-            providers.Placement(check.Shape, check.Deployment, allowUnverifiedContext: false) is not null);
+        return lease is null || !AllowsMedia(lease.Access, check.Shape) ? new(false) :
+            LocalPlacementState(check.Shape, check.Deployment, check.Routing);
+    }
+
+    private PlacementCheckReply LocalPlacementState(InferenceShape shape, string deployment, bool routing)
+    {
+        if (serving.Draining || providers.Placement(shape, deployment, allowUnverifiedContext: routing) is not { } placement)
+            return new(false);
+        return new(true, placement.Model.Busy || placement.Model.Instance?.Busy == true || serving.HasConflictingWork(placement),
+            providers.WouldDisplace(placement));
     }
 
     private static bool AllowsMedia(InferenceAccess access, InferenceShape shape) =>
@@ -137,7 +145,7 @@ internal sealed partial class PeerNetwork
         var allowed = Math.Clamp(QueueWaitSeconds * 1000 - forward.AgeMilliseconds, 0, forward.RemainingMilliseconds);
         var ticket = new AttemptTicket(forward.Request, forward.Attempt, forward.Key, forward.Deployment,
             received.AddMilliseconds(-forward.AgeMilliseconds), received.AddMilliseconds(allowed), forward.Session, schedulingEpoch,
-            forward.Source, forward.LogGeneration);
+            forward.Source, forward.LogGeneration, forward.TryOtherHost);
         context.Response.OnStarting(() =>
         {
             if (context.Items[typeof(ServingQueue)] is string epoch)
@@ -195,7 +203,8 @@ internal sealed partial class PeerNetwork
         if (origin is null || remaining.TotalMilliseconds < 1)
             return new(AttemptState.Rejected, 503, "The selected peer cannot be reached within the queue deadline.", Unreachable: origin is null);
         var metadata = new ForwardTicket(ticket.Request, ticket.Attempt, ticket.Key, ticket.Deployment,
-            (int)elapsed.TotalMilliseconds, (int)remaining.TotalMilliseconds, ticket.Session, ticket.ServingEpoch, ticket.Source, ticket.LogGeneration);
+            (int)elapsed.TotalMilliseconds, (int)remaining.TotalMilliseconds, ticket.Session, ticket.ServingEpoch, ticket.Source,
+            ticket.LogGeneration, ticket.TryOtherHost);
         var body = new TrackedSubmission(payload.CreateBody());
         try
         {

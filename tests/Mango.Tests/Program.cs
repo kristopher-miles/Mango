@@ -55,6 +55,7 @@ try
     }
     if (args is ["--settlement-checks"]) { await SettlementChecks.RunAsync(directory); return; }
     if (args is ["--strata-checks"]) { await StrataChecks.RunAsync(directory); return; }
+    if (args is ["--shared-alias-checks"]) { await PeerChecks.RunSharedAliasAsync(directory); return; }
     await SettlementChecks.RunAsync(directory);
     TestDefaults();
     await WebUiChecks.RunAsync(directory);

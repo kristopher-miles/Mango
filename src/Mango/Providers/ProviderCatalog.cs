@@ -741,6 +741,19 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
     public bool NeedsPreparation(ServingPlacement placement) => placement.Model.Instance is null ||
         View.Endpoints.Any(endpoint => endpoint.Id != placement.Endpoint.Id && endpoint.HostReserved);
 
+    internal bool WouldDisplace(ServingPlacement placement)
+    {
+        var current = View;
+        var endpoint = placement.Endpoint;
+        if (current.Endpoints.Any(other => other.Id != endpoint.Id && other.HostReserved))
+            return true;
+        if (placement.Model.Instance is not null)
+            return false;
+        var residents = current.Models.Where(model => model.Instance is not null && model.Model.Origin != ModelOrigin.LmLink).ToArray();
+        return endpoint.ExclusiveHost && residents.Length != 0 ||
+            endpoint.MaxLoadedModels is { } capacity && residents.Count(model => model.EndpointId == endpoint.Id) >= capacity;
+    }
+
     public async Task PreparePlacementAsync(ServingPlacement placement, Func<string, Task> displaced,
         CancellationToken cancellation)
     {
@@ -1319,10 +1332,8 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
             return;
         foreach (var other in others.Where(item => !item.ServingDisabled && item.Id != model.Id && SameAlias(item.Alias, model.Alias)))
         {
-            if (!model.Model.Inputs.ToHashSet().SetEquals(other.Model.Inputs) ||
-                !model.Model.Outputs.ToHashSet().SetEquals(other.Model.Outputs))
-                throw new ProviderFailure(409, "Deployments sharing an alias must have identical input and output modalities.");
             if (model.Model.Operations.Contains(InferenceOperation.Embeddings) &&
+                other.Model.Operations.Contains(InferenceOperation.Embeddings) &&
                 (model.EmbeddingDimensions is { } dimensions && other.EmbeddingDimensions is { } otherDimensions && dimensions != otherDimensions ||
                  !model.Model.EmbeddingEncodings.Intersect(other.Model.EmbeddingEncodings).Any()))
                 throw new ProviderFailure(409, "Embeddings under one alias must have compatible dimensions and encodings.");

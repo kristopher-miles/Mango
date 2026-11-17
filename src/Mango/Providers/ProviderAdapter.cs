@@ -31,6 +31,7 @@ internal abstract class ProviderAdapter(HttpClient http, ProviderEndpoint endpoi
         CancellationToken cancellation) => Task.CompletedTask;
     public virtual void Prepare(InferenceOperation operation, JsonObject payload) { }
     public virtual bool TransparentInference => false;
+    public virtual bool ValidatesChatContext => false;
     protected virtual string InferenceQuery => "";
 
     public Task<HttpResponseMessage> ExecuteAsync(InferenceOperation operation, HttpContent content, CancellationToken cancellation) =>
@@ -118,7 +119,8 @@ internal abstract class ProviderAdapter(HttpClient http, ProviderEndpoint endpoi
         });
     }
 
-    internal static async Task RequireInferenceSuccessAsync(HttpResponseMessage response, CancellationToken cancellation)
+    internal static async Task RequireInferenceSuccessAsync(HttpResponseMessage response, CancellationToken cancellation,
+        bool chat = false)
     {
         if (response.IsSuccessStatusCode)
             return;
@@ -145,8 +147,24 @@ internal abstract class ProviderAdapter(HttpClient http, ProviderEndpoint endpoi
             var message = System.Text.Encoding.UTF8.GetString(buffer, 0, read);
             if (IsAllocationFailure(message))
                 throw new ProviderFailure(503, "The provider could not allocate model memory.", allocationFailure: true);
+            if (chat && (int)response.StatusCode is 400 or 422 && IsContextFailure(message))
+                throw new ProviderFailure(422, "The input plus reserved output does not fit the deployment's served context.");
         }
         RequireSuccess(response);
+    }
+
+    private static bool IsContextFailure(string body)
+    {
+        try
+        {
+            using var json = JsonDocument.Parse(body);
+            var error = json.RootElement.Get("error");
+            var message = error.Text("message");
+            return error.Text("code") == "context_length_exceeded" ||
+                message?.StartsWith("prompt is too long:", StringComparison.OrdinalIgnoreCase) == true ||
+                message?.StartsWith("input length and `max_tokens` exceed context limit:", StringComparison.OrdinalIgnoreCase) == true;
+        }
+        catch (JsonException) { return false; }
     }
 
     internal static bool IsAllocationFailure(string message) =>

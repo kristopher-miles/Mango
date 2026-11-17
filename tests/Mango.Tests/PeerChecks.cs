@@ -36,12 +36,14 @@ internal static partial class PeerChecks
         try
         {
             await TestTailnetAsync(root, status, address);
+            await TestSharedAliasAsync(root, status, address);
             await TestPhaseSixAsync(root, status, address);
             await TestPhaseSevenAsync(root, status, address);
             await TestPhaseEightAsync(root, status, address);
         }
         finally { Console.SetOut(output); }
         Console.WriteLine("Peer checks passed on the live Windows Tailscale interface with two Mango instances.");
+        Console.WriteLine("Shared alias checks passed for mixed context, vision, and concurrent host use.");
         Console.WriteLine("Shared host intent, local dashboard and TLS public ingress checks passed.");
         Console.WriteLine("Log capture, partial collection, retention and offline deletion checks passed.");
         Console.WriteLine("Release window and host-local maintenance checks passed.");

@@ -36,11 +36,12 @@ internal static class ProviderChecks
             "provider token protected for the Windows user");
         var chat = DeploymentFor(endpoint.Id, InferenceOperation.Chat);
         var vision = chat with { Model = chat.Model with { Id = "vision", Inputs = ["image", "text"] } };
-        await Fails(409, () =>
-        {
-            ProviderCatalog.RequireCompatibleAlias(chat, [vision]);
-            return Task.CompletedTask;
-        });
+        ProviderCatalog.RequireCompatibleAlias(chat, [vision]);
+        using (var overflow = Response(HttpStatusCode.BadRequest,
+            """{"error":{"type":"invalid_request_error","message":"prompt is too long: 42 tokens > 36 maximum"}}"""))
+            await Fails(422, () => ProviderAdapter.RequireInferenceSuccessAsync(overflow, default, chat: true));
+        using (var invalid = Response(HttpStatusCode.BadRequest, """{"error":{"message":"unknown sampling parameter"}}"""))
+            await Fails(400, () => ProviderAdapter.RequireInferenceSuccessAsync(invalid, default, chat: true));
         var embedding = DeploymentFor(endpoint.Id, InferenceOperation.Embeddings);
         var incompatible = embedding with { Model = embedding.Model with { Id = "other", EmbeddingDimensions = 4 } };
         await Fails(409, () =>
