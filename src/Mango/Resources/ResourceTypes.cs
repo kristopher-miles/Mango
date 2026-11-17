@@ -12,7 +12,8 @@ internal sealed record WorkerMemory(int[] Processes, long ResidentBytes, Diction
     long? PeakResidentBytes, long? SharedGpuBytes = null);
 internal sealed record ResourceObservation(DateTimeOffset At, long TotalRam, long FreeRam, double? ExternalCpu,
     double? ExternalGpu, DeviceMemory[] Devices, string? Hardware, Dictionary<Guid, WorkerMemory> Workers,
-    bool WorkerAttribution, string? Limitation, double? ManagedCpu = null, double? TotalCpu = null, double? TotalGpu = null);
+    bool WorkerAttribution, string? Limitation, double? ManagedCpu = null, double? TotalCpu = null, double? TotalGpu = null,
+    long? FreeCommit = null, Guid? ExclusiveEndpoint = null);
 
 internal sealed record MemoryCost(long RamBytes, Dictionary<string, long> DeviceBytes)
 {

@@ -4,18 +4,19 @@ using System.Text.Json.Serialization;
 
 namespace Mango.Providers;
 
-internal enum ProviderProfile { LmStudio, UnslothStudio, UnslothRun, LlamaSingle, LlamaRouter, LlamaEmbedding, Generic }
+internal enum ProviderProfile { LmStudio, UnslothStudio, UnslothRun, LlamaSingle, LlamaRouter, LlamaEmbedding, Generic, Strata }
 internal enum ProviderMode { Attached, Managed }
 internal enum InferenceOperation { Chat, Embeddings, Images, Transcription, Speech, SystemOne }
 internal enum LimitSource { Reported, Configured }
 internal enum ModelOrigin { Local, LmLink }
 
 internal sealed record ProviderEndpoint(Guid Id, ProviderProfile Profile, ProviderMode Mode, string Address,
-    string? ProtectedToken, string? Executable, string? ModelFile);
+    string? ProtectedToken, string? Executable, string? ModelFile, string? StrataControl = null, string? StrataModels = null);
 
 internal sealed record EndpointUpdate(Guid? Id, [property: JsonRequired] ProviderProfile Profile,
     [property: JsonRequired] ProviderMode Mode, string? Address,
-    string? Token, bool ClearToken, string? Executable, string? ModelFile, string? ExpectedConfiguration = null);
+    string? Token, bool ClearToken, string? Executable, string? ModelFile, string? ExpectedConfiguration = null,
+    string? StrataControl = null, string? StrataModels = null);
 
 internal sealed record ModelOptions(string? Alias, Dictionary<string, int?> Ratings, int? ServedContext,
     int? EmbeddingDimensions, string? EmbeddingFamily, int? MediaTokensPerItem, long Revision, bool ServingDisabled = false,
@@ -57,7 +58,7 @@ internal sealed record ProviderModel(string Id, string NativeId, string Manageme
     string[] EmbeddingEncodings, long? ArtifactBytes = null, bool Installed = true,
     bool SupportsLoad = true, bool SupportsUnload = true, string? Format = null,
     ModelOrigin? Origin = null, string? SourceDevice = null, bool AmbiguousInstance = false,
-    int? ReportedMediaTokensPerItem = null);
+    int? ReportedMediaTokensPerItem = null, int? PreparedContext = null, string? PreparedConfiguration = null);
 
 internal sealed record ProviderInventory(string? Version, ProviderModel[] Models, bool CanLoad, bool CanUnload,
     bool CanStop, int? OwnedProcessId = null, int? MaxLoadedModels = null);
@@ -75,8 +76,9 @@ internal sealed record Deployment(Guid EndpointId, ProviderModel Model, ModelOpt
         .OfType<string>().Where(ProviderIdentity.ValidIdentifier).Distinct(StringComparer.Ordinal).ToArray();
     public bool AcceptsIdentifier(string identifier) => ProviderIdentifiers.Contains(identifier, StringComparer.Ordinal) ||
         string.Equals(Alias, identifier, StringComparison.OrdinalIgnoreCase);
-    public int? Context => Instance?.Context ?? Options.ServedContext;
-    public LimitSource? ContextSource => Instance?.Context is not null ? LimitSource.Reported
+    public int? Context => Instance?.Context ?? (Model.PreparedContext is { } prepared && Options.ServedContext is { } configured
+        ? Math.Min(prepared, configured) : Model.PreparedContext ?? Options.ServedContext);
+    public LimitSource? ContextSource => Instance?.Context is not null || Model.PreparedContext is not null && Options.ServedContext is null ? LimitSource.Reported
         : Options.ServedContext is not null ? LimitSource.Configured : null;
     public int? EmbeddingDimensions => Model.EmbeddingDimensions ?? Options.EmbeddingDimensions;
     public int? MediaTokensPerItem => Model.ReportedMediaTokensPerItem is { } reported

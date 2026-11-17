@@ -5,7 +5,7 @@ let servingNode = null, servingProvider = null, servingModel = null, modelPage =
 let modelCategory = "all";
 let currentProviderWriter, selectionWriter;
 const modelCards = new Map();
-const providerFields = ["profile", "mode", "address", "executable", "modelFile"];
+const providerFields = ["profile", "mode", "address", "executable", "modelFile", "strataControl", "strataModels"];
 const modelFields = ["alias", ...servingFields];
 const modelPageSize = 5;
 const modelCategories = document.querySelector("#model-categories");
@@ -36,29 +36,39 @@ function localProviders() {
 }
 function providerRecord(endpoint, local) {
   return local ? { profile: endpoint.profile, mode: endpoint.mode, address: endpoint.address, executable: endpoint.executable || "", modelFile: endpoint.modelFile || "",
+    strataControl: endpoint.strataControl || "", strataModels: endpoint.strataModels || "",
     token: "", clearToken: false, configurationRevision: endpoint.configurationRevision }
     : { profile: endpoint.profile, address: endpoint.address, enabled: endpoint.enabled, revision: endpoint.revision };
 }
+function wireProfile(profile) { return profile === "strata" ? "generic" : profile; }
 function providerNeedsAdministration(owner, id, writer) {
   if (!networkView?.identity) return false;
   if (!localOwner(owner)) return true;
   if (!writer?.dirty.has("profile") && !writer?.dirty.has("address")) return false;
   const desired = networkView.providerIntents.find(item => item.owner === networkView.localNode?.id && item.id === id);
-  return !(desired?.enabled && writer.value.profile === desired.profile && writer.value.address === desired.address);
+  return !(desired?.enabled && wireProfile(writer.value.profile) === desired.profile && writer.value.address === desired.address);
 }
 async function providerAction(button, message, work, success = "Updated.") {
   return perform(button, providerStatus, async () => { await work(); await loadProviders(true); await Promise.allSettled([loadNetwork(), loadResources()]); return success; }, message);
 }
 function showProviderAddress(fields) {
   fields.address.required = fields.profile.value === "generic";
-  fields.address.placeholder = fields.profile.value === "generic" ? "Enter provider origin" : fields.profile.value === "lmStudio" ? "http://127.0.0.1:1234" : fields.profile.value.startsWith("unsloth") ? "http://127.0.0.1:8888" : "http://127.0.0.1:8080";
+  fields.address.placeholder = fields.profile.value === "generic" ? "Enter provider origin" : fields.profile.value === "strata" ? "http://127.0.0.1:18765" : fields.profile.value === "lmStudio" ? "http://127.0.0.1:1234" : fields.profile.value.startsWith("unsloth") ? "http://127.0.0.1:8888" : "http://127.0.0.1:8080";
 }
 function showProviderFields() {
   const local = localOwner(servingNode), fields = providerForm.elements;
-  for (const key of ["mode", "token", "clearToken"]) fields[key].closest("label").hidden = !local;
-  fields.clearToken.closest("label").hidden = !local || addingProvider || !selectedProvider()?.credentialReference;
+  const strata = fields.profile.value === "strata";
+  fields.profile.querySelector('option[value="strata"]').hidden = !local;
+  for (const key of ["mode", "token", "clearToken"]) fields[key].closest("label").hidden = !local || strata;
+  fields.clearToken.closest("label").hidden = !local || strata || addingProvider || !selectedProvider()?.credentialReference;
   fields.enabled.closest("label").hidden = local;
   document.querySelector("#provider-process").hidden = !local || fields.mode.value !== "managed" || !["llamaSingle", "llamaEmbedding"].includes(fields.profile.value);
+  document.querySelector("#provider-strata").hidden = !local || !strata;
+  document.querySelector("#provider-help").textContent = strata
+    ? "Mango manages a private Strata runtime and reserves this computer while it loads or serves. Loading may briefly slow Windows. Choose a prepared model below."
+    : !addingProvider && selectedProvider()?.pendingRegistration
+      ? "Review the requested address and choose this computer's permissions before connecting. Credentials stay on this computer."
+      : "Enter an address for a generic endpoint. Other profiles have local defaults. Mango saves provider tokens for the current Windows user.";
   showProviderAddress(fields);
 }
 const enabledLabel = element("label", null, "checkbox"), enabledInput = element("input");
@@ -69,6 +79,17 @@ providerForm.querySelector(".actions").prepend(createProviderButton);
 providerForm.querySelector(".actions").append(document.querySelector("#provider-extra-actions"), document.querySelector("#provider-clear-token"));
 document.querySelector("#provider-extra-actions").classList.remove("actions");
 providerForm.addEventListener("change", showProviderFields);
+for (const button of providerForm.querySelectorAll("[data-strata-folder]")) {
+  button.addEventListener("click", () => perform(button, providerStatus, async () => {
+    const record = providerForm.dataset.record;
+    const { folder } = await api("providers/strata/folder", {}, "POST");
+    if (!folder || record !== providerForm.dataset.record) return;
+    const input = providerForm.elements[button.dataset.strataFolder];
+    input.value = folder;
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+    return "Strata folder selected.";
+  }, "Choose a folder in Windows…"));
+}
 providerForm.addEventListener("submit", event => {
   event.preventDefault();
   if (!providerForm.dataset.record.startsWith("new:")) { currentProviderWriter?.flush(); return; }
@@ -76,10 +97,13 @@ providerForm.addEventListener("submit", event => {
   const endpoint = selectedProvider();
   const update = Object.fromEntries(providerFields.map(key => [key, fields[key].value]));
   const process = !document.querySelector("#provider-process").hidden;
+  const strata = update.profile === "strata";
   providerAction(createProviderButton, "Connecting provider…", async () => {
     if (local) {
-      const result = await api("providers", { ...update, id: endpoint?.pendingRegistration ? endpoint.id : null, token: fields.token.value || null, clearToken: false,
-        executable: process ? update.executable : null, modelFile: process ? update.modelFile : null });
+      const result = await api("providers", { ...update, id: endpoint?.pendingRegistration ? endpoint.id : null,
+        mode: strata ? "managed" : update.mode, token: strata ? null : fields.token.value || null, clearToken: false,
+        executable: process ? update.executable : null, modelFile: process ? update.modelFile : null,
+        strataControl: strata ? update.strataControl : null, strataModels: strata ? update.strataModels : null });
       servingProvider = result.id;
     } else {
       const before = new Set(networkView.providerIntents.map(item => item.id));
@@ -96,9 +120,6 @@ function renderProvider() {
   const observed = networkView?.catalogs.find(item => item.node === servingNode)?.providers.find(item => item.id === servingProvider);
   const newRegistration = addingProvider || !endpoint || endpoint.pendingRegistration;
   const approval = !addingProvider && endpoint?.pendingRegistration;
-  document.querySelector("#provider-help").textContent = approval
-    ? "Review the requested address and choose this computer's permissions before approving the connection. Credentials stay on this computer."
-    : "Enter an address for a generic endpoint. Other profiles have local defaults. Mango saves provider tokens for the current Windows user.";
   const key = newRegistration ? `new:${servingNode}:${approval ? endpoint.id : ""}` : `provider:${local ? "local" : servingNode}:${endpoint.id}`;
   if (providerForm.dataset.record !== key) {
     providerForm.dataset.record = key;
@@ -112,10 +133,13 @@ function renderProvider() {
   document.querySelector("#provider-heading").textContent = approval ? "Approve this connection" : newRegistration ? "Connect a provider" : profileNames[endpoint.profile];
   document.querySelector("#provider-form-title").textContent = newRegistration ? "New provider" : "Provider settings";
   const connection = document.querySelector("#provider-connection");
-  connection.textContent = approval ? "Local approval required" : newRegistration ? "New connection" : local ? endpoint.online ? "Connected" : "Unreachable" : observed?.reachable ? "Reached at last observation" : "Unconfirmed";
+  connection.textContent = approval ? "Local approval required" : newRegistration ? "New connection" : local
+    ? endpoint.loadingSince ? `Preparing Strata · ${Math.max(0, Math.floor((Date.now() - Date.parse(endpoint.loadingSince)) / 1000))}s`
+      : endpoint.hostReserved ? "Computer reserved for Strata" : endpoint.online ? "Connected" : "Unreachable"
+    : observed?.reachable ? "Reached at last observation" : "Unconfirmed";
   connection.className = `badge ${!newRegistration && (local ? endpoint.online : observed?.reachable) ? "good" : "warn"}`;
   document.querySelector("#provider-applied").textContent = newRegistration ? local ? "Credentials and process permissions stay on this computer." : "This requests a connection on the selected computer. Credentials and lifecycle permission are configured there."
-    : local ? [endpoint.error, endpoint.credentialReference ? "Credential stored for this Windows user" : "No stored credential", desired ? `${intentLabel(desired, observed?.intent)} · Requested ${profileNames[desired.profile]} at ${desired.address}${desired.enabled ? "" : " · Disabled"}` : ""].filter(Boolean).join(" · ")
+    : local ? [endpoint.error, endpoint.exclusiveHost ? "Private loopback credential" : endpoint.credentialReference ? "Credential stored for this Windows user" : "No stored credential", desired ? `${intentLabel(desired, observed?.intent)} · Requested ${profileNames[desired.profile]} at ${desired.address}${desired.enabled ? "" : " · Disabled"}` : ""].filter(Boolean).join(" · ")
       : `${intentLabel(endpoint, observed?.intent)} · Applied address ${observed?.address || "unobserved"} · Observed ${timeLabel(observed?.observedAt)}`;
   createProviderButton.hidden = !newRegistration;
   createProviderButton.textContent = approval ? "Approve requested connection" : "Connect provider";
@@ -135,9 +159,11 @@ function renderProvider() {
         const next = { ...baseline, ...changes };
         if (local) {
           const process = next.mode === "managed" && ["llamaSingle", "llamaEmbedding"].includes(next.profile);
+          const strata = next.profile === "strata";
           const accepted = await api("providers", { id, ...Object.fromEntries(providerFields.map(name => [name, next[name]])),
-            token: next.token || null, clearToken: next.clearToken, expectedConfiguration: baseline.configurationRevision,
-            executable: process ? next.executable || null : null, modelFile: process ? next.modelFile || null : null });
+            mode: strata ? "managed" : next.mode, token: strata ? null : next.token || null, clearToken: !strata && next.clearToken, expectedConfiguration: baseline.configurationRevision,
+            executable: process ? next.executable || null : null, modelFile: process ? next.modelFile || null : null,
+            strataControl: strata ? next.strataControl || null : null, strataModels: strata ? next.strataModels || null : null });
           if (providerForm.dataset.record === key) fields.token.value = "";
           return providerRecord(accepted, true);
         }
@@ -173,13 +199,13 @@ function renderProvider() {
   if (actions.dataset.key !== actionKey) {
     actions.dataset.key = actionKey; actions.replaceChildren();
     if (endpoint && !newRegistration && local) {
-      if (desired?.enabled && (desired.address !== endpoint.address || desired.profile !== endpoint.profile)) actions.append(action("Approve requested connection", event => providerAction(event.currentTarget, "Approving connection…", async () => {
+      if (desired?.enabled && (desired.address !== endpoint.address || desired.profile !== wireProfile(endpoint.profile))) actions.append(action("Approve requested connection", event => providerAction(event.currentTarget, "Approving connection…", async () => {
         const writer = currentProviderWriter;
         writer.change("profile", desired.profile); writer.change("address", desired.address);
         await writer.resume();
         if (writer.pending) throw new Error(writer.state.message);
       }, "Requested connection approved on this computer.")));
-      if (endpoint.canStop) actions.append(action("Stop owned process", event => providerAction(event.currentTarget, "Stopping provider…", () => api(`providers/${endpoint.id}/stop`, {}), "Process stopped.")));
+      if (endpoint.canStop) actions.append(action(endpoint.exclusiveHost ? "Stop and release computer" : "Stop owned process", event => providerAction(event.currentTarget, "Stopping provider…", () => api(`providers/${endpoint.id}/stop`, {}), "Process stopped.")));
       const remove = action(desired?.enabled === false ? "Confirm disable on this computer" : "Remove provider", event => {
         if (confirm("Remove this provider registration? Model files remain on disk.")) providerAction(event.currentTarget, "Removing provider…", async () => {
           await api(`providers/${endpoint.id}`, null, "DELETE"); servingProvider = null;
@@ -343,7 +369,7 @@ function renderModelCard(item) {
         () => api(`providers/models/${item.id}/yolo`, { enabled: !yolo, revision: item.local.options.revision }),
         yolo ? "Mango resource protection restored." : "YOLO enabled: native provider owns capacity."));
       capacity.title = "YOLO bypasses Mango memory estimates, reservations, benchmarks and automatic pressure unload for this model. Native provider defaults and errors apply. Explicit pause and stop remain available.";
-      actions.append(capacity);
+      if (!endpoint.exclusiveHost) actions.append(capacity);
       actions.append(action(disabled ? "Enable serving" : "Disable serving", event => providerAction(event.currentTarget,
         disabled ? "Enabling serving…" : "Disabling serving…",
         () => api(`providers/models/${item.id}/serving`, { enabled: disabled }),

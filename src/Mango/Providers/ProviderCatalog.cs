@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Text.Json.Serialization;
 using Mango.Host;
 using Mango.Resources;
 using Mango.Scheduling;
@@ -9,7 +10,16 @@ namespace Mango.Providers;
 internal sealed record EndpointStatus(Guid Id, ProviderProfile Profile, ProviderMode Mode, string Address,
     Guid? CredentialReference, string? Executable, string? ModelFile, bool Online, string? Version,
     string? Error, DateTimeOffset? ObservedAt, bool CanLoad, bool CanUnload, bool CanStop, int? OwnedProcessId,
-    int? MaxLoadedModels = null, bool CredentialNeeded = false, string? ConfigurationRevision = null);
+    int? MaxLoadedModels = null, bool CredentialNeeded = false, string? ConfigurationRevision = null,
+    string? StrataControl = null, string? StrataModels = null, bool HostReserved = false, DateTimeOffset? LoadingSince = null)
+{
+    public bool ExclusiveHost => Profile == ProviderProfile.Strata;
+    [JsonIgnore] public ProviderProfile NetworkProfile => WireProfile(Profile);
+    [JsonIgnore] public int[]? ExactProcessIds { get; init; }
+
+    internal static ProviderProfile WireProfile(ProviderProfile profile) =>
+        profile == ProviderProfile.Strata ? ProviderProfile.Generic : profile;
+}
 
 internal sealed record CatalogView(EndpointStatus[] Endpoints, Deployment[] Models, string? Selected, string? RecoveryWarning);
 internal sealed record ProviderLifecycle(string DeploymentId, bool Loading, TimeSpan Elapsed);
@@ -39,7 +49,7 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
     private readonly SemaphoreSlim input = new(16);
     private readonly SemaphoreSlim wake = new(0, 1);
     private readonly ConcurrentDictionary<Guid, byte> pendingRefreshes = new();
-    private readonly Dictionary<Guid, ProviderAdapter> adapters = [];
+    private readonly ConcurrentDictionary<Guid, ProviderAdapter> adapters = [];
     private readonly Dictionary<Guid, Observation> observations = [];
     private readonly Dictionary<Guid, (CancellationTokenSource Stop, Task Work)> watchers = [];
     private readonly ConcurrentDictionary<string, Guid> uncertainModels = new();
@@ -47,6 +57,8 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
     private readonly ConcurrentDictionary<string, (Guid Endpoint, int Count)> activeModels = new();
     private ProviderExecution? lastExecution;
     private ProviderLifecycle? lastLifecycle;
+    private sealed record ExclusiveLoad(Guid Endpoint, CancellationTokenSource Stop, DateTimeOffset Started);
+    private volatile ExclusiveLoad? exclusiveLoad;
     public event Action? Changed;
     public event Action? AdmissionChanged;
     public ResourceProtection? Resources => resources;
@@ -55,6 +67,16 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
 
     public bool HasUnsettled(string deployment) => uncertainModels.ContainsKey(deployment);
     internal bool HasActiveRequests => !activeModels.IsEmpty;
+    internal CatalogView ResourceView
+    {
+        get
+        {
+            var snapshot = View;
+            return snapshot with { Endpoints = snapshot.Endpoints.Select(endpoint => endpoint.ExclusiveHost
+                ? endpoint with { ExactProcessIds = (adapters.GetValueOrDefault(endpoint.Id) as StrataAdapter)?.ObservedProcessIds() }
+                : endpoint).ToArray() };
+        }
+    }
 
     private readonly ConcurrentDictionary<string, byte> uncertainLoads = new();
     internal bool HasUnsettledLoad(string deployment) => uncertainLoads.ContainsKey(deployment);
@@ -111,9 +133,13 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
             await RefreshAsync(null, stopping);
             while (!stopping.IsCancellationRequested)
             {
-                if (!await wake.WaitAsync(ProviderLimits.InventoryInterval, stopping))
+                var wait = View.Endpoints.Any(endpoint => endpoint.HostReserved) ? TimeSpan.FromSeconds(10) : ProviderLimits.InventoryInterval;
+                if (!await wake.WaitAsync(wait, stopping))
                 {
-                    await RefreshAsync(null, stopping);
+                    if (wait == ProviderLimits.InventoryInterval)
+                        await RefreshAsync(null, stopping);
+                    else
+                        await ReleaseIdleStrataAsync(stopping);
                     continue;
                 }
                 await Task.Delay(ProviderLimits.RefreshCoalesceInterval, stopping);
@@ -168,9 +194,9 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
             var endpoint = new ProviderEndpoint(previous?.Id ?? registration ?? Guid.NewGuid(), input.Profile, input.Mode, address,
                 input.ClearToken ? null : !string.IsNullOrEmpty(input.Token) ? ProviderSecrets.Protect(input.Token)
                     : previous?.Address == address && previous.Profile == input.Profile ? previous.ProtectedToken : null,
-                BlankToNull(input.Executable), BlankToNull(input.ModelFile));
+                BlankToNull(input.Executable), BlankToNull(input.ModelFile), BlankToNull(input.StrataControl), BlankToNull(input.StrataModels));
             ValidateEndpoint(endpoint);
-            if (previous is not null && previous != endpoint && adapters[endpoint.Id].OwnedProcessId.HasValue)
+            if (previous is not null && previous != endpoint && OwnsRuntime(adapters[endpoint.Id]))
                 throw new ProviderFailure(409, "Stop the process Mango started before changing this registration.");
             if (previous != endpoint && WorkInProgress(endpoint.Id))
                 throw new ProviderFailure(automatic ? 423 : 409, "Wait for work on this provider to settle before changing its registration.");
@@ -208,7 +234,7 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
             if (automatic && store.Value.Endpoints.Single(item => item.Id == id) is
                 { Mode: ProviderMode.Managed } or { ProtectedToken: not null })
                 throw new ProviderFailure(412, "Confirm disabling this provider on the owning host.");
-            if (adapter.OwnedProcessId.HasValue)
+            if (OwnsRuntime(adapter))
                 throw new ProviderFailure(409, "Stop the process Mango started before removing this registration.");
             if (WorkInProgress(id))
                 throw new ProviderFailure(automatic ? 423 : 409, "Wait for work on this provider to settle before removing it.");
@@ -221,7 +247,7 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
                 Models = value.Models.Where(pair => !modelIds.Contains(pair.Key)).ToDictionary(),
                 Selected = value.Selected is { } selected && modelIds.Contains(selected) ? null : value.Selected
             }, cancellation);
-            adapters.Remove(id);
+            adapters.TryRemove(id, out _);
             observations.Remove(id);
             await StopWatchAsync(id);
             Publish();
@@ -276,6 +302,8 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
             var model = Find(id);
             if (model.Options.Revision != update.Revision)
                 throw new ProviderFailure(409, "This model's local settings changed. Refresh before changing YOLO mode.");
+            if (update.Enabled && adapters[model.EndpointId] is StrataAdapter)
+                throw new ProviderFailure(409, "Strata requires Mango's resource protection.");
             if (WorkInProgress(model.EndpointId))
                 throw new ProviderFailure(423, "Wait for provider work to settle before changing YOLO mode.");
             await store.UpdateAsync(value => value with
@@ -362,13 +390,23 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
     }
 
     public async Task ManageAsync(string id, bool load, CancellationToken cancellation, InferenceOperation? benchmark = null,
-        InferenceOperation? requested = null, bool scheduled = false)
+        InferenceOperation? requested = null, bool scheduled = false, Func<string, Task>? displaced = null)
     {
         if (!await operation.WaitAsync(0, cancellation))
             throw new ProviderFailure(409, "A provider operation is in progress.");
+        await ManageUnderGateAsync(id, load, cancellation, benchmark, requested, scheduled, displaced);
+    }
+
+    private async Task ManageUnderGateAsync(string id, bool load, CancellationToken cancellation,
+        InferenceOperation? benchmark = null, InferenceOperation? requested = null, bool scheduled = false,
+        Func<string, Task>? displaced = null, bool switching = false)
+    {
         ResourceReservation? reservation = null;
         Deployment? target = null;
+        ExclusiveLoad? loading = null;
+        CancellationTokenSource? stop = null;
         var invoked = false;
+        var confirmed = false;
         try
         {
             var model = Find(id);
@@ -376,12 +414,8 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
             if (load && (scheduled || benchmark.HasValue) && model.ServingDisabled)
                 throw new ProviderFailure(409, "Serving is disabled for this model.");
             var adapter = adapters[model.EndpointId];
-            if (WorkInProgress(model.EndpointId, includeUncertain: load))
-                throw new ProviderFailure(409, "Work on this provider must settle before changing model state.");
             if (load && !model.Model.SupportsLoad || !load && !model.Model.SupportsUnload)
                 throw new ProviderFailure(409, "The provider does not expose this lifecycle operation for the deployment.");
-            if (load && uncertainModels.Count > 0)
-                throw new ProviderFailure(409, "Mango has not confirmed that the prior request stopped.");
             if (load && !model.Model.Installed)
                 throw new ProviderFailure(409, "This model is not confirmed installed.");
             if (load && model.Instance is not null)
@@ -389,10 +423,32 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
             if (!load && model.Instance is null && !adapter.OwnedProcessId.HasValue)
                 throw new ProviderFailure(409, "The model is already unloaded or its state is unknown.");
             var endpoint = View.Endpoints.First(item => item.Id == model.EndpointId);
+            var operationKind = benchmark ?? requested ?? resources?.LoadOperation(model, endpoint);
+            if (load && adapter is StrataAdapter)
+            {
+                if (resources is not null)
+                {
+                    if (resources.Status is { State: not ContributionState.Contributor } status)
+                        throw new ProviderFailure(503, status.Reason ?? "Turn on contribution before loading Strata.");
+                    var budget = resources.Estimate(model, endpoint, operationKind!.Value);
+                    if (budget is null || budget.Load.RamBytes == 0 && budget.Load.DeviceBytes.Values.All(bytes => bytes == 0))
+                        throw new ProviderFailure(503, "Set the prepared Strata model's local memory limits before loading.");
+                }
+                if (!activeModels.IsEmpty)
+                    throw new ProviderFailure(503, "Waiting for active work before reserving this computer for Strata.", capacityWait: true);
+                stop = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
+                exclusiveLoad = loading = new(model.EndpointId, stop, DateTimeOffset.UtcNow);
+                cancellation = stop.Token;
+            }
+            if (load)
+                await PrepareExclusiveAsync(model, displaced, cancellation, loading);
+            if (WorkInProgress(model.EndpointId, includeUncertain: load))
+                throw new ProviderFailure(409, "Work on this provider must settle before changing model state.");
+            if (load && uncertainModels.Count > 0)
+                throw new ProviderFailure(409, "Mango has not confirmed that the prior request stopped.");
             if (load && resources is not null)
             {
-                var operationKind = benchmark ?? requested ?? resources.LoadOperation(model, endpoint);
-                reservation = resources.TryAdmit(model, endpoint, new(operationKind, 1), ResourceWork.Load,
+                reservation = resources.TryAdmit(model, endpoint, new(operationKind!.Value, 1), ResourceWork.Load,
                     profiling: benchmark.HasValue).Require();
             }
             using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellation,
@@ -425,6 +481,9 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
                     {
                         Volatile.Write(ref lastLifecycle, new(id, load, Stopwatch.GetElapsedTime(started)));
                         reservation?.Complete();
+                        if (!load && adapter is StrataAdapter)
+                            SettleReleased(model.EndpointId);
+                        confirmed = true;
                         return;
                     }
                     await Task.Delay(500, timeout.Token);
@@ -477,29 +536,152 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
         }
         finally
         {
+            if (load && !confirmed && invoked && target is not null && adapters[target.EndpointId] is StrataAdapter { Reserved: true } failed)
+            {
+                using var cleanup = new CancellationTokenSource(StrataAdapter.ReleaseTimeout);
+                try { await ReleaseStrataAsync(target.EndpointId, failed, cleanup.Token); }
+                catch (Exception error) when (error is ProviderFailure or OperationCanceledException) { }
+            }
             if (reservation is not null)
             {
                 if (!invoked)
                     reservation.Complete();
-                else if (reservation.Running)
+                else if (reservation.Running && target is not null)
                 {
-                    uncertainModels[id] = target!.EndpointId;
-                    if (load) uncertainLoads[id] = 0;
-                    Publish();
-                    SignalRefresh(target.EndpointId);
+                    if (adapters[target.EndpointId] is StrataAdapter { Reserved: false })
+                        reservation.Complete();
+                    else
+                    {
+                        uncertainModels[id] = target.EndpointId;
+                        if (load) uncertainLoads[id] = 0;
+                        Publish();
+                        SignalRefresh(target.EndpointId);
+                    }
                 }
                 reservation.Dispose();
             }
-            if (scheduled && !invoked)
-                operation.Release();
-            else
-                ReleaseOperation();
+            if (loading is not null)
+            {
+                exclusiveLoad = null;
+                stop!.Dispose();
+                if (View.Endpoints.Any(endpoint => endpoint.Id == loading.Endpoint && endpoint.LoadingSince.HasValue))
+                    Publish();
+            }
+            if (!switching)
+            {
+                if (scheduled && !invoked)
+                    operation.Release();
+                else
+                    ReleaseOperation();
+            }
         }
+    }
+
+    private static bool OwnsRuntime(ProviderAdapter adapter) =>
+        adapter is StrataAdapter strata ? strata.Reserved : adapter.OwnedProcessId.HasValue;
+
+    internal static string? ExclusiveBlocker(CatalogView snapshot, EndpointStatus endpoint)
+    {
+        if (snapshot.Endpoints.Any(other => other.Id != endpoint.Id && other.HostReserved))
+            return "Waiting for Strata to release this computer.";
+        if (endpoint.ExclusiveHost && snapshot.Models.Any(model =>
+            model.Instance is not null && model.Model.Origin != ModelOrigin.LmLink &&
+            snapshot.Endpoints.Any(other => other.Id == model.EndpointId && other.Mode == ProviderMode.Attached)))
+            return AttachedStrataBlocker;
+        return null;
+    }
+
+    private const string AttachedStrataBlocker = "Unload the attached provider's model or let Mango manage that provider before starting Strata.";
+
+    private async Task PrepareExclusiveAsync(Deployment target, Func<string, Task>? displaced,
+        CancellationToken cancellation, ExclusiveLoad? loading = null)
+    {
+        var exclusive = adapters[target.EndpointId] is StrataAdapter;
+        var held = View.Endpoints.Where(endpoint => endpoint.HostReserved &&
+            (endpoint.Id != target.EndpointId || exclusive && target.Instance is null)).ToArray();
+        if (!exclusive && held.Length == 0)
+            return;
+        if (!activeModels.IsEmpty)
+            throw new ProviderFailure(503, "Waiting for active work before switching providers on this computer.", capacityWait: true);
+        if (loading is not null)
+            Publish();
+        foreach (var endpoint in held)
+        {
+            var residents = View.Models.Where(model => model.EndpointId == endpoint.Id && model.Instance is not null).ToArray();
+            await ReleaseStrataAsync(endpoint.Id, (StrataAdapter)adapters[endpoint.Id], cancellation);
+            foreach (var resident in residents)
+                if (displaced is not null) await displaced(resident.Id);
+        }
+        if (!exclusive)
+            return;
+
+        var others = View.Endpoints.Where(endpoint => !endpoint.ExclusiveHost).ToArray();
+        foreach (var endpoint in others)
+            await RefreshOneAsync(endpoint.Id, cancellation);
+        var snapshot = View;
+        var residentsToDrain = snapshot.Models.Where(model => model.EndpointId != target.EndpointId &&
+            model.Instance is not null && model.Model.Origin != ModelOrigin.LmLink).ToArray();
+        foreach (var resident in residentsToDrain)
+        {
+            var owner = snapshot.Endpoints.First(endpoint => endpoint.Id == resident.EndpointId);
+            if (owner.Mode == ProviderMode.Attached)
+                throw new ProviderFailure(503, AttachedStrataBlocker, code: "strata_attached_resident");
+            if (resident.Busy || resident.Instance!.Busy || uncertainModels.Count != 0 || !owner.CanUnload || !resident.Model.SupportsUnload)
+                throw new ProviderFailure(503, "Waiting for the managed provider to become idle and release its model.", capacityWait: true);
+        }
+        foreach (var resident in residentsToDrain)
+        {
+            if (View.Models.Any(model => model.Id == resident.Id && model.Instance is not null))
+                await ManageUnderGateAsync(resident.Id, false, cancellation, scheduled: true, switching: true);
+            if (displaced is not null) await displaced(resident.Id);
+        }
+        if (others.Any(endpoint => adapters[endpoint.Id].OwnedProcessId.HasValue) ||
+            View.Models.Any(model => model.EndpointId != target.EndpointId && model.Instance is not null && model.Model.Origin != ModelOrigin.LmLink))
+            throw new ProviderFailure(503, "Mango could not verify that all other providers released this computer.", capacityWait: true);
+        if (residentsToDrain.Length != 0 && resources is not null)
+            await resources.WaitForObservationAsync(cancellation);
+    }
+
+    private async Task ReleaseStrataAsync(Guid id, StrataAdapter strata, CancellationToken cancellation)
+    {
+        await strata.StopAsync(cancellation);
+        SettleReleased(id);
+        await RefreshOneAsync(id, cancellation);
+        if (resources is not null)
+            await resources.WaitForObservationAsync(cancellation);
+    }
+
+    private void SettleReleased(Guid endpoint)
+    {
+        foreach (var item in uncertainModels.Where(item => item.Value == endpoint))
+            resources?.ConfirmSettled(item.Key);
+        ConfirmReleased(endpoint);
+    }
+
+    private async Task ReleaseIdleStrataAsync(CancellationToken cancellation)
+    {
+        if (!await operation.WaitAsync(0, cancellation))
+            return;
+        try
+        {
+            foreach (var endpoint in View.Endpoints.Where(item => item.HostReserved))
+                if (adapters[endpoint.Id] is StrataAdapter strata && strata.IsIdleExpired &&
+                    !WorkInProgress(endpoint.Id, includeUncertain: false))
+                    try { await ReleaseStrataAsync(endpoint.Id, strata, cancellation); }
+                    catch (ProviderFailure) { }
+        }
+        finally { ReleaseOperation(); }
     }
 
     public async Task StopAsync(Guid id, CancellationToken cancellation)
     {
-        if (!await operation.WaitAsync(0, cancellation))
+        if (exclusiveLoad is { } loading && loading.Endpoint == id)
+        {
+            try { await loading.Stop.CancelAsync(); }
+            catch (ObjectDisposedException) { }
+            await operation.WaitAsync(cancellation);
+        }
+        else if (!await operation.WaitAsync(0, cancellation))
             throw new ProviderFailure(409, "A provider operation is in progress.");
         try
         {
@@ -507,8 +689,13 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
                 throw new ProviderFailure(404, "Provider endpoint does not exist.");
             if (WorkInProgress(id, includeUncertain: false))
                 throw new ProviderFailure(409, "Wait for active work before stopping this provider.");
-            await adapter.StopAsync(cancellation);
-            await RefreshOneAsync(id, cancellation);
+            if (adapter is StrataAdapter strata)
+                await ReleaseStrataAsync(id, strata, cancellation);
+            else
+            {
+                await adapter.StopAsync(cancellation);
+                await RefreshOneAsync(id, cancellation);
+            }
         }
         finally { ReleaseOperation(); }
     }
@@ -548,16 +735,28 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
     }
 
     public bool Conflicts(ServingPlacement a, ServingPlacement b) => a.Endpoint.Id == b.Endpoint.Id ||
+        a.Endpoint.ExclusiveHost || b.Endpoint.ExclusiveHost ||
         resources is null || !resources.CanBackfill(a, b);
+
+    public bool NeedsPreparation(ServingPlacement placement) => placement.Model.Instance is null ||
+        View.Endpoints.Any(endpoint => endpoint.Id != placement.Endpoint.Id && endpoint.HostReserved);
 
     public async Task PreparePlacementAsync(ServingPlacement placement, Func<string, Task> displaced,
         CancellationToken cancellation)
     {
         var target = placement.Model;
         var operationKind = placement.Workload.Operation;
-        if (target.Yolo)
+        if (target.Instance is not null)
         {
-            await ManageAsync(target.Id, true, cancellation, requested: operationKind, scheduled: true);
+            if (!await operation.WaitAsync(0, cancellation))
+                throw new ProviderFailure(409, "A provider operation is in progress.");
+            try { await PrepareExclusiveAsync(target, displaced, cancellation); }
+            finally { ReleaseOperation(); }
+            return;
+        }
+        if (placement.Endpoint.ExclusiveHost || target.Yolo)
+        {
+            await ManageAsync(target.Id, true, cancellation, requested: operationKind, scheduled: true, displaced: displaced);
             return;
         }
         while (true)
@@ -578,7 +777,7 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
             {
                 try
                 {
-                    await ManageAsync(target.Id, true, cancellation, requested: operationKind, scheduled: true);
+                    await ManageAsync(target.Id, true, cancellation, requested: operationKind, scheduled: true, displaced: displaced);
                     return;
                 }
                 catch (ProviderFailure error) when (error.MemoryWait)
@@ -604,6 +803,8 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
             if (placement is null)
                 return new(AdmissionStatus.Unavailable, "The local deployment cannot serve this request.");
             var model = placement.Model;
+            if (ExclusiveBlocker(View, placement.Endpoint) is { } blocker)
+                return new(AdmissionStatus.Wait, blocker);
             if (HasUnsettled(id) || !model.Eligible || model.Instance is { Busy: true } || resources is null && !activeModels.IsEmpty)
                 return new(AdmissionStatus.Wait, "The deployment is loading or busy.");
             ResourceReservation? reservation = null;
@@ -668,10 +869,13 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
         try
         {
             model = Find(id);
+            var endpoint = View.Endpoints.First(item => item.Id == model.EndpointId);
+            if (ExclusiveBlocker(View, endpoint) is { } blocker)
+                throw new ProviderFailure(409, blocker);
             if (!model.Eligible || model.Busy || model.Instance?.Busy == true || uncertainModels.ContainsKey(id))
                 throw new ProviderFailure(409, "The benchmark deployment is not settled and ready.");
             adapter = adapters[model.EndpointId];
-            reservation = resources!.TryAdmit(model, View.Endpoints.First(item => item.Id == model.EndpointId),
+            reservation = resources!.TryAdmit(model, endpoint,
                 workload, ResourceWork.Benchmark, profiling: true).Require();
             MarkActive(model, true);
         }
@@ -707,6 +911,8 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
         try
         {
             MarkActive(model, false);
+            if (adapter is StrataAdapter strata)
+                strata.Touch();
             reservation?.Complete(settled);
             if (!settled)
             {
@@ -749,7 +955,7 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
     internal async Task<ReleaseResult> ReleaseManagedAsync(CancellationToken cancellation, bool includeYolo = false)
     {
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
-        deadline.CancelAfter(TimeSpan.FromSeconds(25));
+        deadline.CancelAfter(View.Endpoints.Any(endpoint => endpoint.HostReserved) ? StrataAdapter.ReleaseTimeout : TimeSpan.FromSeconds(25));
         var released = new List<ReleasedEndpoint>();
         try
         {
@@ -762,6 +968,15 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
                 foreach (var endpoint in View.Endpoints.Where(item => item.Mode == ProviderMode.Managed).ToArray())
                 {
                     var adapter = adapters[endpoint.Id];
+                    if (adapter is StrataAdapter strata)
+                    {
+                        if (strata.Reserved)
+                        {
+                            await ReleaseStrataAsync(endpoint.Id, strata, deadline.Token);
+                            released.Add(new(endpoint.Id, null));
+                        }
+                        continue;
+                    }
                     var ownedPid = adapter.OwnedProcessId;
                     var owned = ownedPid.HasValue && (includeYolo || !View.Models.Any(model => model.EndpointId == endpoint.Id && model.Yolo));
                     if (!owned)
@@ -842,6 +1057,8 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
             var adapter = adapters[id];
             var result = await adapter.InspectAsync(cancellation);
             observations[id] = new(result, null, DateTimeOffset.UtcNow);
+            if (adapter is StrataAdapter { Reserved: false })
+                SettleReleased(id);
             if (adapter is LlamaAdapter { HasInventoryEvents: true } llama && !watchers.ContainsKey(id))
             {
                 var stop = new CancellationTokenSource();
@@ -871,7 +1088,7 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
                 : previous ?? new ProviderInventory(null, [], false, false, false);
             observations[id] = new(fallback, error.Message, DateTimeOffset.UtcNow, error.AllocationFailure,
                 error.Status is 401 or 403);
-            if (settleOwnedExit && fallback.CanLoad && !adapter.OwnedProcessId.HasValue && previous?.CanStop == true &&
+            if (adapter is not StrataAdapter && settleOwnedExit && fallback.CanLoad && !adapter.OwnedProcessId.HasValue && previous?.CanStop == true &&
                 (resources?.Observation?.Workers.GetValueOrDefault(id)?.Processes.All(pid => !WindowsObservation.ProcessExists(pid)) ?? true))
                 foreach (var key in uncertainModels.Where(pair => pair.Value == id).Select(pair => pair.Key).ToArray())
                 {
@@ -893,13 +1110,18 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
             var observation = observations.GetValueOrDefault(endpoint.Id);
             var inventory = observation?.Inventory;
             var online = observation is { Error: null };
+            var adapter = adapters.GetValueOrDefault(endpoint.Id);
+            var strata = adapter as StrataAdapter;
+            var loading = exclusiveLoad is { } load && load.Endpoint == endpoint.Id ? load.Started : (DateTimeOffset?)null;
             endpoints.Add(new(endpoint.Id, endpoint.Profile, endpoint.Mode, endpoint.Address,
                 endpoint.ProtectedToken is not null ? endpoint.Id : null, endpoint.Executable, endpoint.ModelFile,
                 online, inventory?.Version, observation?.Error, observation?.ObservedAt,
                 inventory?.CanLoad == true && (online || endpoint.Executable is not null),
                 inventory?.CanUnload == true && (online || inventory.CanStop),
-                inventory?.CanStop == true, adapters.GetValueOrDefault(endpoint.Id)?.OwnedProcessId ?? inventory?.OwnedProcessId,
-                inventory?.MaxLoadedModels, observation?.CredentialNeeded == true, ConfigurationRevision(endpoint)));
+                strata is not null ? strata.Reserved || loading.HasValue : inventory?.CanStop == true,
+                adapter?.OwnedProcessId ?? inventory?.OwnedProcessId,
+                inventory?.MaxLoadedModels, observation?.CredentialNeeded == true, ConfigurationRevision(endpoint),
+                endpoint.StrataControl, endpoint.StrataModels, strata?.Reserved == true, loading));
             foreach (var model in inventory?.Models ?? [])
             {
                 var options = value.Models.GetValueOrDefault(model.Id) ?? new ModelOptions(null, [], null, null, null, null, 0);
@@ -910,6 +1132,8 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
                     options.EmbeddingDimensions?.ToString(), options.MediaTokensPerItem?.ToString());
                 if (model.ReportedMediaTokensPerItem is { } mediaBound)
                     configuration = ProviderIdentity.Hash(configuration, "reported-media", mediaBound.ToString());
+                if (model.PreparedConfiguration is { } prepared)
+                    configuration = ProviderIdentity.Hash(configuration, prepared);
                 var old = previous.Models.FirstOrDefault(item => item.Id == model.Id);
                 var instance = model.Instances.FirstOrDefault(item => !item.Busy) ?? model.Instances.FirstOrDefault();
                 var epoch = !online || instance is null || uncertainModels.ContainsKey(model.Id) ? null :
@@ -930,8 +1154,9 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
     {
         foreach (var id in watchers.Keys.ToArray())
             await StopWatchAsync(id);
-        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-        foreach (var adapter in adapters.Values.Where(adapter => adapter.OwnedProcessId.HasValue))
+        using var timeout = new CancellationTokenSource(View.Endpoints.Any(endpoint => endpoint.HostReserved)
+            ? StrataAdapter.ReleaseTimeout : TimeSpan.FromSeconds(10));
+        foreach (var adapter in adapters.Values.Where(OwnsRuntime))
         {
             try { await adapter.StopAsync(timeout.Token); }
             catch (Exception error) when (error is OperationCanceledException or System.ComponentModel.Win32Exception or ProviderFailure)
@@ -980,6 +1205,7 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
     {
         ProviderProfile.LmStudio or ProviderProfile.Generic => new LmStudioAdapter(http, endpoint),
         ProviderProfile.UnslothStudio or ProviderProfile.UnslothRun => new UnslothAdapter(http, endpoint),
+        ProviderProfile.Strata => new StrataAdapter(http, endpoint, directory, () => { Publish(); SignalRefresh(endpoint.Id); }),
         _ => new LlamaAdapter(http, endpoint)
     };
 
@@ -1001,6 +1227,7 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
         ProviderProfile.Generic => throw new ProviderFailure(400, "Enter the generic provider's origin."),
         ProviderProfile.LmStudio => "http://127.0.0.1:1234",
         ProviderProfile.UnslothStudio or ProviderProfile.UnslothRun => "http://127.0.0.1:8888",
+        ProviderProfile.Strata => "http://127.0.0.1:18765",
         _ => "http://127.0.0.1:8080"
     };
 
@@ -1019,6 +1246,18 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
         _ = NormalizeAddress(endpoint.Address);
         if (endpoint.Id == Guid.Empty || !Enum.IsDefined(endpoint.Profile) || !Enum.IsDefined(endpoint.Mode))
             throw new ProviderFailure(400, "The provider registration is invalid.");
+        if (endpoint.Profile == ProviderProfile.Strata)
+        {
+            var local = new Uri(endpoint.Address);
+            if (endpoint.Mode != ProviderMode.Managed || local.Scheme != "http" || local.Host != "127.0.0.1" ||
+                endpoint.ProtectedToken is not null || endpoint.Executable is not null || endpoint.ModelFile is not null ||
+                endpoint.StrataControl is { } control && !LocalPath(control) ||
+                endpoint.StrataModels is { } models && !LocalPath(models))
+                throw new ProviderFailure(400, "Managed Strata needs an IPv4 loopback HTTP address and any folder overrides must be absolute local paths.");
+            return;
+        }
+        if (endpoint.StrataControl is not null || endpoint.StrataModels is not null)
+            throw new ProviderFailure(400, "Strata folders apply only to a Strata registration.");
         if (endpoint.Executable is null && endpoint.ModelFile is null)
             return;
         var uri = new Uri(endpoint.Address);
@@ -1096,5 +1335,5 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
     private static string? BlankToNull(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
     private static string ConfigurationRevision(ProviderEndpoint endpoint) => ProviderIdentity.Hash(
         endpoint.Id.ToString(), endpoint.Profile.ToString(), endpoint.Mode.ToString(), endpoint.Address,
-        endpoint.ProtectedToken, endpoint.Executable, endpoint.ModelFile);
+        endpoint.ProtectedToken, endpoint.Executable, endpoint.ModelFile, endpoint.StrataControl, endpoint.StrataModels);
 }

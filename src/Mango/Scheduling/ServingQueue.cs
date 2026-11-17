@@ -12,6 +12,7 @@ internal interface IServingBackend
     ResourceProtection? Resources { get; }
     ServingPlacement? Placement(InferenceShape shape, string id, bool allowUnverifiedContext = true);
     bool Conflicts(ServingPlacement a, ServingPlacement b);
+    bool NeedsPreparation(ServingPlacement placement) => placement.Model.Instance is null;
     bool HasUnsettled(string deployment);
     void RequestSettlementRefresh(string deployment);
     StartExecution TryStart(InferenceRequest request, string id);
@@ -409,7 +410,7 @@ internal sealed class ServingQueue : IAsyncDisposable
             blocked.Add(entry);
             WaitingReason(entry, work.Protection is null ? reason : "Reserved for the next safe start on this host.");
             var revision = Volatile.Read(ref capacityRevision);
-            if (ahead.Length == 0 && placement.Model.Instance is null && loading is null && entry.LastLoadRevision != revision &&
+            if (ahead.Length == 0 && providers.NeedsPreparation(placement) && loading is null && entry.LastLoadRevision != revision &&
                 !active.Any(other => other.Work is not null && providers.Conflicts(placement, other.Placement!)))
             {
                 lock (sync)
@@ -505,6 +506,7 @@ internal sealed class ServingQueue : IAsyncDisposable
         }
         catch (OperationCanceledException) { }
         catch (ProviderFailure error) when (error.Status == 409 || error.CapacityWait) { return null; }
+        catch (ProviderFailure error) when (error.Code == "strata_attached_resident") { return Rejected(error.Message); }
         catch (Exception error) when (error is ProviderFailure or IOException or HttpRequestException or UnauthorizedAccessException
             or System.ComponentModel.Win32Exception)
         {

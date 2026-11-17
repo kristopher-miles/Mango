@@ -47,6 +47,7 @@
                   <option value="llamaSingle">llama.cpp single-model chat or decisions</option>
                   <option value="llamaEmbedding">llama.cpp single-model embeddings</option>
                   <option value="llamaRouter">llama.cpp router</option>
+                  <option value="strata">Strata</option>
                   <option value="generic">Generic endpoint</option>
                 </select>
               </label>
@@ -63,6 +64,12 @@
             <div class="inputs" id="provider-process" hidden>
               <label>Authorized llama-server.exe path<input name="executable" type="text" maxlength="1024"></label>
               <label>Local GGUF file path<input name="modelFile" type="text" maxlength="1024"></label>
+            </div>
+            <div class="inputs" id="provider-strata" hidden>
+              <label>Strata installation folder<input name="strataControl" type="text" maxlength="1024" placeholder="Detect automatically"></label>
+              <button type="button" class="secondary" data-strata-folder="strataControl">Browse for Strata</button>
+              <label>Strata model configuration folder<input name="strataModels" type="text" maxlength="1024" placeholder="Use Strata’s configured locations"></label>
+              <button type="button" class="secondary" data-strata-folder="strataModels">Browse for configurations</button>
             </div>
             <p id="provider-help" class="muted">Enter an address for a generic endpoint. Other profiles have local defaults. Mango saves provider tokens for the current Windows user.</p>
           </fieldset>

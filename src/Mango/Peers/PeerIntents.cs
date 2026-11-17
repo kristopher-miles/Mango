@@ -126,7 +126,7 @@ internal sealed partial class PeerNetwork
 
     public async Task<PushResult> SetProviderIntentAsync(HttpRequest request, SharedProviderUpdate input, CancellationToken cancellation)
     {
-        if (input.Owner == Guid.Empty || input.Id == Guid.Empty || !Enum.IsDefined(input.Profile) ||
+        if (input.Owner == Guid.Empty || input.Id == Guid.Empty || !Enum.IsDefined(input.Profile) || input.Profile == ProviderProfile.Strata ||
             input.Id is null && !input.Enabled)
             throw new PeerFailure(400, "Select an enrolled host and a valid provider profile.");
         var address = EndpointAddress(input.Profile, input.Address);
@@ -161,7 +161,7 @@ internal sealed partial class PeerNetwork
                 return await providers.ConfigureAsync(update, cancellation);
             var self = RequireMember(current);
             var desired = ProviderIntent(current, self.Id, update.Id);
-            var approve = desired is { Enabled: true } && desired.Profile == update.Profile && desired.Address == address;
+            var approve = desired is { Enabled: true } && desired.Profile == EndpointStatus.WireProfile(update.Profile) && desired.Address == address;
             if (!approve)
             {
                 RequireAdmin(current, AdminHeader(request));
@@ -177,7 +177,7 @@ internal sealed partial class PeerNetwork
                 {
                     var owner = RequireMember(state);
                     RequireAdmin(state, AdminHeader(request));
-                    return WithProviderIntent(state, owner.Id, owner.Id, applied.Id, applied.Profile, applied.Address, true);
+                    return WithProviderIntent(state, owner.Id, owner.Id, applied.Id, applied.NetworkProfile, applied.Address, true);
                 }, cancellation);
                 await PushChangesAsync(before, after, stopping.Token);
             }
@@ -210,7 +210,7 @@ internal sealed partial class PeerNetwork
                 {
                     var owner = RequireMember(state);
                     RequireAdmin(state, AdminHeader(request));
-                    return WithProviderIntent(state, owner.Id, owner.Id, id, applied.Profile, applied.Address, false);
+                    return WithProviderIntent(state, owner.Id, owner.Id, id, applied.NetworkProfile, applied.Address, false);
                 }, cancellation);
                 await PushChangesAsync(before, after, stopping.Token);
             }
@@ -291,7 +291,7 @@ internal sealed partial class PeerNetwork
                 {
                     if (!desired.Enabled && effective is not null)
                         await providers.RemoveAsync(effective.Id, cancellation, automatic: true);
-                    if (desired.Enabled && (effective is null || effective.Profile != desired.Profile || effective.Address != desired.Address))
+                    if (desired.Enabled && (effective is null || effective.NetworkProfile != desired.Profile || effective.Address != desired.Address))
                         effective = await providers.ConfigureAsync(new(effective?.Id, desired.Profile, ProviderMode.Attached, desired.Address,
                             null, false, null, null), cancellation, desired.Id, automatic: true);
                     endpoints[desired.Id] = effective?.CredentialNeeded == true && desired.Enabled

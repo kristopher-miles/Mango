@@ -110,7 +110,7 @@ internal sealed partial class ResourceProtection
                 BudgetRevision = BudgetRevision(store.Value.Budgets.FirstOrDefault(item => item.Deployment == target.Model.Id &&
                     item.Workload.Operation == target.Operation), target.Configuration, target.Model.Instance?.ResourceFingerprint),
                 Profile = target.Profile,
-                Readiness = Readiness(target.Model, target.Endpoint, target.Operation),
+                Readiness = Readiness(target.Model, target.Endpoint, target.Operation, ProviderCatalog.ExclusiveBlocker(catalog, target.Endpoint)),
                 Unsafe = target.Budget is { } budget && unsafePlacements.Contains(FaultKey(budget)),
                 target.Model.Context,
                 Attached = target.Endpoint.Mode == ProviderMode.Attached,
@@ -479,7 +479,11 @@ internal sealed partial class ResourceProtection
     {
         Task observation;
         lock (sync)
+        {
             observation = nextObservation.Task;
+            Volatile.Write(ref settlementSample, 1);
+        }
+        Signal();
         try
         {
             await observation.WaitAsync(TimeSpan.FromSeconds(Math.Min(6, settings.Value.SampleSeconds + 1)), cancellation);

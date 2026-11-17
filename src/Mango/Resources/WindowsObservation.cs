@@ -19,16 +19,22 @@ internal sealed class WindowsObservation : IDisposable
 
     public ResourceObservation Sample(CatalogView view, DateTimeOffset now)
     {
-        var memory = WindowsMemory.Read();
+        var memory = WindowsMemory.ReadWithCommit();
         var endpoints = view.Endpoints.Where(endpoint => endpoint.Mode == ProviderMode.Managed &&
-            (endpoint.Online || endpoint.OwnedProcessId.HasValue)).ToArray();
-        var roots = new Dictionary<Guid, int>();
-        var listeners = endpoints.Any(endpoint => !endpoint.OwnedProcessId.HasValue) ? ReadListeners() : [];
+            (endpoint.ExclusiveHost ? endpoint.HostReserved : endpoint.Online || endpoint.OwnedProcessId.HasValue)).ToArray();
+        var roots = new Dictionary<Guid, (int[] Processes, bool Exact)>();
+        var listeners = endpoints.Any(endpoint => !endpoint.ExclusiveHost && !endpoint.OwnedProcessId.HasValue) ? ReadListeners() : [];
         foreach (var endpoint in endpoints)
         {
+            if (endpoint.ExclusiveHost)
+            {
+                if (endpoint.ExactProcessIds is { } assigned)
+                    roots[endpoint.Id] = (assigned, true);
+                continue;
+            }
             if (endpoint.OwnedProcessId is { } owned)
             {
-                roots[endpoint.Id] = owned;
+                roots[endpoint.Id] = ([owned], false);
                 continue;
             }
             var address = new Uri(endpoint.Address);
@@ -41,11 +47,11 @@ internal sealed class WindowsObservation : IDisposable
                         (listener.Address.Equals(host) || IsAny(listener.Address))))
                 .Select(listener => listener.Process).Distinct().ToArray();
             if (matches.Length == 1)
-                roots[endpoint.Id] = matches[0];
+                roots[endpoint.Id] = (matches, false);
         }
 
         var attributed = roots.Count == endpoints.Length;
-        var parents = roots.Count != 0 ? ReadParents() : [];
+        var parents = roots.Values.Any(root => !root.Exact) ? ReadParents() : [];
         attributed &= parents is not null;
         var workers = new Dictionary<Guid, WorkerMemory>();
         var allIds = new HashSet<int>();
@@ -54,15 +60,18 @@ internal sealed class WindowsObservation : IDisposable
         foreach (var (endpoint, root) in roots)
         {
             var tree = new Dictionary<int, ProcessSample>();
-            if (ReadProcess(root) is not { } process)
+            foreach (var pid in root.Processes)
             {
-                attributed = false;
-                continue;
+                if (ReadProcess(pid) is { } process)
+                    tree[pid] = process;
+                else
+                    attributed = false;
             }
-            tree[root] = process;
-            if (parents is not null)
+            if (!root.Exact && tree.Count == 0)
+                continue;
+            if (!root.Exact && parents is not null)
             {
-                WalkDescendants(root, parents, (parent, child) =>
+                WalkDescendants(root.Processes[0], parents, (parent, child) =>
                 {
                     if (ReadProcess(child) is { } sample)
                     {
@@ -130,7 +139,8 @@ internal sealed class WindowsObservation : IDisposable
             : gpuSample.Devices.Any(item => !item.Integrated && item.UsedBytes is null)
                 ? "Windows did not report dedicated memory usage for every GPU." : null;
         return new(now, checked((long)memory.Total), checked((long)memory.Available), externalCpu, externalGpu,
-            gpuSample.Devices, gpuSample.Hardware, workers, attributed, limitation, managedCpu, totalCpu, totalGpu);
+            gpuSample.Devices, gpuSample.Hardware, workers, attributed, limitation, managedCpu, totalCpu, totalGpu,
+            checked((long)memory.AvailableCommit), endpoints.FirstOrDefault(endpoint => endpoint.ExclusiveHost)?.Id);
     }
 
     internal static bool StableWorkers(IEnumerable<(int Id, long Start)> before, IEnumerable<(int Id, long Start)> after) =>

@@ -54,11 +54,13 @@ try
         return;
     }
     if (args is ["--settlement-checks"]) { await SettlementChecks.RunAsync(directory); return; }
+    if (args is ["--strata-checks"]) { await StrataChecks.RunAsync(directory); return; }
     await SettlementChecks.RunAsync(directory);
     TestDefaults();
     await WebUiChecks.RunAsync(directory);
     await TestHostAsync(directory);
     await ProviderChecks.RunAsync();
+    await StrataChecks.RunAsync(directory);
     await GenericProviderChecks.RunAsync(directory);
     await PeerChecks.RunAsync(directory);
     await ResourceChecks.RunAsync(directory);

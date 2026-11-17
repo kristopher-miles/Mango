@@ -21,7 +21,7 @@ const providerForm = document.querySelector("#provider-form");
 const providerStatus = document.querySelector("#provider-status");
 const aliasRatingForm = document.querySelector("#alias-rating-form");
 const profileNames = { lmStudio: "LM Studio", unslothStudio: "Unsloth Studio", unslothRun: "Unsloth run",
-  llamaSingle: "llama.cpp single model", llamaEmbedding: "llama.cpp embeddings", llamaRouter: "llama.cpp router", generic: "Generic endpoint" };
+  llamaSingle: "llama.cpp single model", llamaEmbedding: "llama.cpp embeddings", llamaRouter: "llama.cpp router", strata: "Strata", generic: "Generic endpoint" };
 const operationNames = { chat: "Chat", embeddings: "Embeddings", images: "Images", transcription: "Transcription", speech: "Speech", systemOne: "System One" };
 const servingFields = ["servedContext", "embeddingDimensions", "embeddingFamily", "mediaTokensPerItem"];
 const stateNames = { contributor: "Contributing", withdrawing: "Withdrawing", cooldown: "Cooling down", manualLeech: "Contribution off", fault: "Protection needs attention" };

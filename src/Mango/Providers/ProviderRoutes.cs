@@ -9,12 +9,17 @@ namespace Mango.Providers;
 
 internal static class ProviderRoutes
 {
+    private static readonly SemaphoreSlim folderDialog = new(1);
+
     public static void Map(WebApplication app, RouteGroupBuilder local, ProviderCatalog providers, PeerNetwork peers)
     {
         local.MapGet("/providers", () => providers.View);
         local.MapPut("/providers", (EndpointUpdate update, HttpContext context) =>
             HandleAsync(context, async cancellation => await context.Response.WriteAsJsonAsync(
                 await peers.ConfigureLocalProviderAsync(context.Request, update, cancellation), cancellation)));
+        local.MapPost("/providers/strata/folder", (HttpContext context) =>
+            HandleAsync(context, async cancellation => await context.Response.WriteAsJsonAsync(
+                new { Folder = await PickStrataFolderAsync(cancellation) }, cancellation)));
         local.MapDelete("/providers/{id:guid}", (Guid id, HttpContext context) =>
             CommandAsync(context, cancellation => peers.RemoveLocalProviderAsync(context.Request, id, cancellation)));
         local.MapPut("/providers/{id:guid}/stop", (Guid id, HttpContext context) =>
@@ -52,6 +57,40 @@ internal static class ProviderRoutes
         }
 
         MapInference(app, peers);
+    }
+
+    private static async Task<string?> PickStrataFolderAsync(CancellationToken cancellation)
+    {
+        if (!await folderDialog.WaitAsync(0, cancellation))
+            throw new ProviderFailure(409, "A Strata folder picker is already open.");
+        var selected = new TaskCompletionSource<string?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var thread = new Thread(() =>
+        {
+            try
+            {
+                using var dialog = new FolderBrowserDialog
+                {
+                    Description = "Choose a local Strata folder", UseDescriptionForTitle = true, ShowNewFolderButton = false
+                };
+                selected.TrySetResult(dialog.ShowDialog() == DialogResult.OK ? dialog.SelectedPath : null);
+            }
+            catch (Exception error) when (error is System.Runtime.InteropServices.ExternalException or InvalidOperationException)
+            {
+                selected.TrySetException(new ProviderFailure(503, "Enter the folder path or open Mango in the Windows desktop session."));
+            }
+            finally { folderDialog.Release(); }
+        }) { IsBackground = true };
+        try
+        {
+            thread.SetApartmentState(ApartmentState.STA);
+            thread.Start();
+        }
+        catch
+        {
+            folderDialog.Release();
+            throw;
+        }
+        return await selected.Task.WaitAsync(cancellation);
     }
 
     public static void MapInference(WebApplication app, PeerNetwork peers)

@@ -7,6 +7,7 @@ namespace Mango.Resources;
 internal sealed partial class ResourceProtection : IDisposable
 {
     internal const long MiB = 1024 * 1024;
+    private const long StrataCommitReserve = 4L * 1024 * MiB;
     private static readonly TimeSpan Sustained = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan BenchmarkIdle = TimeSpan.FromMinutes(5);
     private readonly object sync = new();
@@ -182,7 +183,8 @@ internal sealed partial class ResourceProtection : IDisposable
     }
 
     // Read-only explanation of the same availability facts; admission still checks live pressure and reserves capacity.
-    public ServingReadiness Readiness(Deployment model, EndpointStatus endpoint, InferenceOperation? requested = null)
+    public ServingReadiness Readiness(Deployment model, EndpointStatus endpoint, InferenceOperation? requested = null,
+        string? exclusiveBlocker = null)
     {
         lock (sync)
         {
@@ -193,6 +195,7 @@ internal sealed partial class ResourceProtection : IDisposable
             if (!model.Online) return State("offline", "The provider is unreachable. Check its address, credential, and process.", "provider");
             if (!model.Model.Installed) return State("installation", "Install this model in its provider, then refresh the inventory.", "provider");
             if (settings.Value.Role != LocalRole.Contributor) return State("contribution", "Turn on contribution for this computer to serve network requests.", "contribution");
+            if (exclusiveBlocker is not null) return State("busy", exclusiveBlocker, "provider");
             if (model.Yolo)
                 return State(model.Instance is null ? "readyToLoad" : "ready",
                     "YOLO: the provider owns native defaults and capacity. Mango automatic resource protection is bypassed for this model.");
@@ -221,7 +224,8 @@ internal sealed partial class ResourceProtection : IDisposable
             var cost = model.Instance is null ? qualified.Budget.Load : qualified.Budget.Execute;
             if (model.Instance is null && cost.RamBytes == 0 && cost.DeviceBytes.Values.All(value => value == 0))
                 return State("loadLimit", "Enter a measured peak memory allowance before loading this model.", "qualification");
-            if (!Fits(cost, latest, latest?.TotalRam > 0 ? latest.FreeRam : null, settings.Value))
+            if (!Fits(cost, latest, latest?.TotalRam > 0 ? latest.FreeRam : null, settings.Value,
+                settledExclusive: endpoint.ExclusiveHost && model.Instance is not null))
                 return State("capacity", "The qualified workload does not fit current RAM or dedicated VRAM reserves. Work may wait.", "qualification");
             return model.Instance is null ? State("readyToLoad", "Ready for automatic loading when a matching request arrives.")
                 : State("ready", "Ready for matching requests. Admission checks live resources before starting work.");
@@ -278,7 +282,7 @@ internal sealed partial class ResourceProtection : IDisposable
             var cost = work == ResourceWork.Load ? budget.Load : ProjectExecutionCost(budget, workload, payloadBytes);
             if (work == ResourceWork.Load && cost.RamBytes == 0 && cost.DeviceBytes.Values.All(value => value == 0))
                 return Refuse("Set a peak memory allowance before loading this model.");
-            var overlap = AllowsOverlap(budget) &&
+            var overlap = !endpoint.ExclusiveHost && AllowsOverlap(budget) &&
                 !profiling && work == ResourceWork.Execute && workload.Items == 1 &&
                 workload.MediaItems <= budget.Workload.MediaItems;
             var peersOnEndpoint = reservations.Where(item => item.Endpoint == model.EndpointId && !item.Settled).ToArray();
@@ -289,9 +293,11 @@ internal sealed partial class ResourceProtection : IDisposable
                 peersOnEndpoint.Length >= slots)
                 return new(AdmissionStatus.Wait, "Local resources are reserved by another provider operation.", null);
             long? freeRam = null;
+            var freeCommit = latest?.FreeCommit;
             try
             {
-                var memory = ram();
+                var memory = endpoint.ExclusiveHost && work == ResourceWork.Load && windows is not null
+                    ? ReadStrataMemory() : ram();
                 freeRam = (long)memory.Available;
                 latest = latest is null
                     ? new(clock.GetUtcNow(), (long)memory.Total, freeRam.Value, null, null, [], null, [], false, null)
@@ -299,6 +305,8 @@ internal sealed partial class ResourceProtection : IDisposable
             }
             catch (Win32Exception)
             {
+                if (endpoint.ExclusiveHost && work == ResourceWork.Load)
+                    return Refuse("Mango could not verify Windows memory and commit headroom for Strata.");
                 freeRam = latest?.TotalRam > 0 ? latest.FreeRam : null;
                 WarnTelemetry();
             }
@@ -307,12 +315,22 @@ internal sealed partial class ResourceProtection : IDisposable
                 BeginWithdrawal(pressure);
                 return Refuse(pressure);
             }
-            if (!Fits(cost, latest, freeRam, current))
+            if (endpoint.ExclusiveHost && work == ResourceWork.Load && freeCommit is { } commit &&
+                commit - StrataCommitReserve < cost.RamBytes)
+                return new(AdmissionStatus.Wait, "Strata needs more Windows commit headroom before loading.", null, MemoryWait: true);
+            if (!Fits(cost, latest, freeRam, current, settledExclusive: endpoint.ExclusiveHost && work != ResourceWork.Load))
                 return new(AdmissionStatus.Wait, "The request does not fit current RAM or per-device VRAM reserves.", null, MemoryWait: true);
             var lease = new ResourceReservation(this, model.EndpointId, model.Id, work, fingerprint, cost, overlap,
                 sampleNumber, latest?.Workers.GetValueOrDefault(model.EndpointId));
             reservations.Add(lease);
             return new(AdmissionStatus.Admitted, null, lease);
+
+            (ulong Total, ulong Available) ReadStrataMemory()
+            {
+                var actual = WindowsMemory.ReadWithCommit();
+                freeCommit = checked((long)actual.AvailableCommit);
+                return (actual.Total, actual.Available);
+            }
         }
     }
 
@@ -370,7 +388,8 @@ internal sealed partial class ResourceProtection : IDisposable
         !settings.ActivityMonitoring || (endpoint.CanUnload || endpoint.CanStop ||
             !endpoint.Online && endpoint.Executable is not null);
 
-    private bool Fits(MemoryCost cost, ResourceObservation? latest, long? freeRam, LocalSettings current)
+    private bool Fits(MemoryCost cost, ResourceObservation? latest, long? freeRam, LocalSettings current,
+        bool settledExclusive = false)
     {
         if (latest is null) return true;
         var reserve = Math.Max((long)current.EffectiveRamReserveMiB(LocalSettings.DefaultRamReserveMiB((ulong)latest.TotalRam)) * MiB,
@@ -384,6 +403,8 @@ internal sealed partial class ResourceProtection : IDisposable
             if (device is not { TotalBytes: { } total, UsedBytes: { } used })
                 continue;
             var outstanding = reservations.Sum(item => Unused(item, latest, id));
+            if (settledExclusive && outstanding == 0 && cost.DeviceBytes.GetValueOrDefault(id) == 0)
+                continue;
             var deviceReserve = Math.Max((long)current.EffectiveVramReserveMiB * MiB, MinimumFree(total, current.VramCutoffPercent));
             if (cost.DeviceBytes.GetValueOrDefault(id) > total - used - deviceReserve - outstanding)
                 return false;
@@ -509,7 +530,7 @@ internal sealed partial class ResourceProtection : IDisposable
                 if (now >= nextSample)
                 {
                     Interlocked.Exchange(ref settlementSample, 0);
-                    await SampleAndApplyAsync(() => providers.View, cancellation);
+                    await SampleAndApplyAsync(() => providers.ResourceView, cancellation);
                     sampled = now;
                     nextSample = sampled + interval;
                 }
@@ -642,12 +663,23 @@ internal sealed partial class ResourceProtection : IDisposable
     {
         if (latest is null) return null;
         var reserve = (long)current.EffectiveRamReserveMiB(LocalSettings.DefaultRamReserveMiB((ulong)latest.TotalRam)) * MiB;
-        if (latest.TotalRam > 0 && (latest.FreeRam < reserve || (latest.TotalRam - latest.FreeRam) * 100.0 >= latest.TotalRam * current.RamCutoffPercent))
+        WorkerMemory? exclusive = null;
+        if (latest.ExclusiveEndpoint is { } endpoint)
+        {
+            if (latest.FreeCommit is < StrataCommitReserve)
+                return "Windows commit headroom is too low to keep the Strata runtime loaded.";
+            latest.Workers.TryGetValue(endpoint, out exclusive);
+        }
+        var freeForPressure = Math.Min(latest.TotalRam, latest.FreeRam + (exclusive?.ResidentBytes ?? 0));
+        if (latest.TotalRam > 0 && (latest.FreeRam < reserve || (latest.TotalRam - freeForPressure) * 100.0 >= latest.TotalRam * current.RamCutoffPercent))
             return "Host RAM is below the reserve or above its pressure cutoff.";
         foreach (var device in latest.Devices.Where(device => !device.Integrated))
-            if (device is { TotalBytes: { } total, UsedBytes: { } used } &&
-                (total - used < (long)current.EffectiveVramReserveMiB * MiB || used * 100.0 >= total * current.VramCutoffPercent))
-                return $"Dedicated memory pressure on {device.Name}.";
+            if (device is { TotalBytes: { } total, UsedBytes: { } used })
+            {
+                var external = Math.Max(0, used - (exclusive?.DedicatedBytes?.GetValueOrDefault(device.Id) ?? 0));
+                if (total - external < (long)current.EffectiveVramReserveMiB * MiB || external * 100.0 >= total * current.VramCutoffPercent)
+                    return $"Dedicated memory pressure on {device.Name}.";
+            }
         return null;
     }
 

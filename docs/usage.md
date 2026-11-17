@@ -70,6 +70,14 @@ For the already-loaded workflow, disable just-in-time model loading in LM Studio
 
 The inference surface includes chat completions, embeddings, images, audio transcriptions, speech, and System One decisions when an eligible deployment advertises the protocol. Image generation returns inline base64. Transcriptions accept a multipart audio file. Local policy, qualified limits, and provider slots determine which executions can overlap. See the [provider plan and qualification results](plan/02-provider-integration.md) for tested versions and runtime limits.
 
+### Serve a prepared Strata model
+
+Prepare a model in Strata Desktop or Terminal first. In **Serving → Add provider**, choose **Strata** and connect. Mango looks for Strata Control in standard Windows install locations. For a portable or custom installation, enter the local Strata installation folder. If Strata keeps its run configurations elsewhere, enter the folder that contains the `strata-*.json` files. **Refresh catalog** picks up changes made in Strata.
+
+Choose a prepared text chat model and set its local workload and memory limits before enabling contribution. You can lower **Served context** to reduce the memory required by Mango's copy of the run configuration. Leave headroom for Windows commit as well as physical RAM and GPU memory. Mango keeps the prepared weights and settings in Strata and starts a private loopback runtime for each load. It serves one Strata request at a time.
+
+Mango waits for active work and releases other managed models before starting Strata. Unload resident models in Attached providers yourself or grant their supported lifecycle controls in Serving. Close any separate Strata runtime that uses the same computer resources. New work for another provider, contribution withdrawal, or five idle minutes can stop Mango's Strata runtime. **Stop and release computer** also cancels a load in progress.
+
 ### Enable local inference
 
 1. In **Contribution**, select **Contributor** and save. Choose **Never** to use estimated or owner-configured limits without automatic benchmarks, **Now** to finish benchmarks before serving, or **When convenient** to benchmark after five minutes without client work. You can also choose the local benchmark policy when creating or joining a network.

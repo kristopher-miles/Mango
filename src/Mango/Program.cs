@@ -12,6 +12,8 @@ internal static class Program
     [STAThread]
     public static int Main(string[] args)
     {
+        if (args.FirstOrDefault() == WindowsJob.StarterArgument)
+            return WindowsJob.StartChildAsync(args).GetAwaiter().GetResult();
         LaunchOptions options;
         try
         {

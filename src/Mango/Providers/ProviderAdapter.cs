@@ -13,6 +13,7 @@ internal abstract class ProviderAdapter(HttpClient http, ProviderEndpoint endpoi
     protected ProviderEndpoint Endpoint { get; } = endpoint;
     protected bool Managed => Endpoint.Mode == ProviderMode.Managed;
     public virtual int? OwnedProcessId => null;
+    protected virtual string? Bearer => Endpoint.ProtectedToken is { } token ? ProviderSecrets.Open(token) : null;
     public abstract Task<ProviderInventory> InspectAsync(CancellationToken cancellation);
 
     public virtual Task LoadAsync(ProviderModel model, int? context, CancellationToken cancellation) =>
@@ -85,8 +86,8 @@ internal abstract class ProviderAdapter(HttpClient http, ProviderEndpoint endpoi
         CancellationToken cancellation)
     {
         using var request = new HttpRequestMessage(method, new Uri(new Uri(Endpoint.Address), path)) { Content = content };
-        if (Endpoint.ProtectedToken is { } protectedToken)
-            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", ProviderSecrets.Open(protectedToken));
+        if (Bearer is { } bearer)
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", bearer);
         try
         {
             return await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellation);

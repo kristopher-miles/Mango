@@ -498,7 +498,8 @@ internal sealed partial class PeerNetwork
             model.Instance?.Fingerprint, model.Instance?.Slots, model.EmbeddingDimensions, model.EmbeddingSpace,
             model.Model.Installed && (protection is null ? model.Eligible : workloads.Length != 0), model.Model.ClientTools,
             model.Model.StructuredOutput, model.MediaTokensPerItem, model.Model.EmbeddingEncodings, model.PlacementEpoch,
-            protection is null ? null : workloads, EffectiveAlias: model.Alias, Readiness: protection?.Readiness(model, endpoint),
+            protection is null ? null : workloads, EffectiveAlias: model.Alias, Readiness: protection?.Readiness(model, endpoint,
+                exclusiveBlocker: ProviderCatalog.ExclusiveBlocker(view, endpoint)),
             Origin: model.Model.Origin, SourceDevice: SafeDetail(model.Model.SourceDevice, 100),
             ProviderIdentifiers: model.ProviderIdentifiers, Yolo: model.Yolo);
     }

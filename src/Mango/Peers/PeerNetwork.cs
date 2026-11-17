@@ -385,7 +385,7 @@ internal sealed partial class PeerNetwork(string directory, int port, ProviderCa
                     };
                 }).ToArray();
             var existing = current.Records.Catalogs.FirstOrDefault(catalog => catalog.Node == self.Id);
-            var endpoints = view.Endpoints.Select(endpoint => new ObservedProvider(endpoint.Id, endpoint.Profile, endpoint.Address,
+            var endpoints = view.Endpoints.Select(endpoint => new ObservedProvider(endpoint.Id, endpoint.NetworkProfile, endpoint.Address,
                 SafeDetail(endpoint.Version, 512), endpoint.ObservedAt, endpoint.ObservedAt is null ? null : endpoint.Online,
                 endpointReports.GetValueOrDefault(endpoint.Id))).Concat(endpointReports
                 .Where(item => view.Endpoints.All(endpoint => endpoint.Id != item.Key))
@@ -414,7 +414,7 @@ internal sealed partial class PeerNetwork(string directory, int port, ProviderCa
             var providerIntents = current.Records.Providers ?? [];
             var addedEndpoints = view.Endpoints.Where(endpoint => providerIntents.All(item => item.Owner != self.Id || item.Id != endpoint.Id))
                 .Take(PeerLimits.Providers - providerIntents.Length).Select(endpoint => new SharedProvider(endpoint.Id, self.Id,
-                    catalog.Revision, endpoint.Profile, endpoint.Address, true)).ToArray();
+                    catalog.Revision, endpoint.NetworkProfile, endpoint.Address, true)).ToArray();
             if (!changed && created.Length == 0 && migrated.Length == 0 && addedEndpoints.Length == 0)
                 return current.Disk;
             var records = current.Records.Merge(NetworkRecords.Empty with

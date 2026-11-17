@@ -120,10 +120,16 @@ internal static class WindowsMemory
 
     public static (ulong Total, ulong Available) Read()
     {
+        var memory = ReadWithCommit();
+        return (memory.Total, memory.Available);
+    }
+
+    public static (ulong Total, ulong Available, ulong AvailableCommit) ReadWithCommit()
+    {
         var memory = new MemoryStatus { Length = (uint)Marshal.SizeOf<MemoryStatus>() };
         if (!GlobalMemoryStatusEx(ref memory))
             throw new Win32Exception(Marshal.GetLastWin32Error(), "Unable to read physical memory.");
-        return (memory.TotalPhysical, memory.AvailablePhysical);
+        return (memory.TotalPhysical, memory.AvailablePhysical, memory.AvailablePageFile);
     }
 
     [DllImport("kernel32.dll", SetLastError = true)]
