@@ -1,5 +1,7 @@
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using Mango.Host;
 using Mango.Providers;
 using Mango.Resources;
@@ -50,6 +52,20 @@ internal static class StrataChecks
         Check(resources.Status.State == ContributionState.Contributor, "Commit headroom uses the confirmed Mango RAM reserve.");
         resources.ApplyObservation(observed with { FreeCommit = gib });
         Check(resources.Status.State == ContributionState.Withdrawing, "Commit below the configured reserve releases Strata.");
+
+        Check(StrataAdapter.AllowsClientTools(default), "Cold Strata can route client tools before its template is loaded.");
+        using var compatible = JsonDocument.Parse("""{"chat_template_caps":{"supports_tools":true,"supports_tool_calls":true}}""");
+        using var noToolHistory = JsonDocument.Parse("""{"chat_template_caps":{"supports_tools":true,"supports_tool_calls":false}}""");
+        using var noDeclarations = JsonDocument.Parse("""{"chat_template_caps":{"supports_tools":false}}""");
+        Check(StrataAdapter.AllowsClientTools(compatible.RootElement) && !StrataAdapter.AllowsClientTools(noToolHistory.RootElement) &&
+            !StrataAdapter.AllowsClientTools(noDeclarations.RootElement), "An observed Strata template must support declarations and tool calls.");
+        using var http = new HttpClient();
+        var adapter = new StrataAdapter(http, new(strata.Id, ProviderProfile.Strata, ProviderMode.Managed,
+            "http://127.0.0.1:1", null, null, null), state, () => { });
+        var toolRequest = JsonNode.Parse("""{"strata_mcp":true,"tools":[{"type":"function","function":{"name":"lookup"}}]}""")!.AsObject();
+        adapter.Prepare(InferenceOperation.Chat, toolRequest);
+        Check(!toolRequest.ContainsKey("strata_mcp") && toolRequest["tools"] is JsonArray { Count: 1 },
+            "Mango forwards client function declarations without enabling Strata-side MCP.");
 
         await CheckJobAsync();
         Console.WriteLine("Strata registration, host exclusivity, and Windows job checks passed.");

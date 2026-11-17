@@ -30,13 +30,18 @@ internal sealed class StrataAdapter(HttpClient http, ProviderEndpoint endpoint, 
     private string? activeModel;
     private long lastUse;
     private Prepared[] models = [];
-    private sealed record Prepared(string Id, string NativeId, string Path, string Digest, int? Context, string? Backend, bool Present);
+    private readonly HashSet<string> noClientTools = new(StringComparer.Ordinal);
+    private sealed record Prepared(string Id, string NativeId, string Path, string Digest, string Configuration,
+        int? Context, string? Backend, bool Present);
 
     protected override string? Bearer => bearer;
     public override bool ValidatesChatContext => true;
     public override void Prepare(InferenceOperation operation, JsonObject payload)
     {
-        if (operation == InferenceOperation.Chat && !payload.ContainsKey("fit_max_tokens"))
+        if (operation != InferenceOperation.Chat)
+            return;
+        payload.Remove("strata_mcp");
+        if (!payload.ContainsKey("fit_max_tokens"))
             payload["fit_max_tokens"] = false;
     }
     internal bool Reserved => pending || job is not null;
@@ -77,20 +82,23 @@ internal sealed class StrataAdapter(HttpClient http, ProviderEndpoint endpoint, 
                 ? config["model_name"]!.GetValue<string>() : null;
             if (!ProviderIdentity.ValidIdentifier(native))
                 continue;
-            found.Add(new(id!, native!, path, digest, ValidContext(NativeArgument(config!, "--max-context") ?? row.Number("context_tokens")), row.Text("backend"),
+            found.Add(new(id!, native!, path, digest, ProviderIdentity.Hash(control, version, digest),
+                ValidContext(NativeArgument(config!, "--max-context") ?? row.Number("context_tokens")), row.Text("backend"),
                 row.Text("component_status") == "present"));
         }
         models = found.DistinctBy(model => model.Id).ToArray();
+        noClientTools.IntersectWith(models.Select(model => model.Configuration));
 
         ProviderInstance? running = null;
         if (pending && instance is not null && models.FirstOrDefault(model => model.Id == activeModel) is { } active)
             running = await ObserveAsync(active.NativeId, instance, cancellation);
         return new(version, models.Select(model =>
             Model(model.NativeId, model.NativeId, model.Backend, ["text"], ["text"], [InferenceOperation.Chat],
-                model.Id == activeModel && running is not null ? [running] : [], null, managementId: model.Id,
+                model.Id == activeModel && running is not null ? [running] : [], null,
+                tools: !noClientTools.Contains(model.Configuration), managementId: model.Id,
                 installed: model.Present, supportsLoad: model.Present, supportsUnload: model.Present, format: "GGUF")
             with { Id = ProviderIdentity.Model(Endpoint.Id, model.Id), PreparedContext = model.Context,
-                PreparedConfiguration = ProviderIdentity.Hash(control, version, model.Digest) }).ToArray(),
+                PreparedConfiguration = model.Configuration }).ToArray(),
             CanLoad: true, CanUnload: true, CanStop: pending, MaxLoadedModels: 1);
     }
 
@@ -150,6 +158,15 @@ internal sealed class StrataAdapter(HttpClient http, ProviderEndpoint endpoint, 
                 ready.Text("api_url") != Endpoint.Address || await ObserveAsync(selected.NativeId, id!, cancellation) is null)
                 throw new ProviderFailure(502, "Strata did not verify the expected loaded model and private endpoint.");
             instance = id;
+            try
+            {
+                var properties = await JsonAsync("/props", cancellation, optional: true);
+                if (AllowsClientTools(properties))
+                    noClientTools.Remove(selected.Configuration);
+                else
+                    noClientTools.Add(selected.Configuration);
+            }
+            catch (ProviderFailure) { /* Capability metadata is optional for a ready runtime. */ }
             Touch();
         }
         finally { changed(); }
@@ -241,6 +258,14 @@ internal sealed class StrataAdapter(HttpClient http, ProviderEndpoint endpoint, 
     }
 
     private static int? ValidContext(int? context) => context is > 0 and <= ProviderLimits.MaxContext ? context : null;
+
+    internal static bool AllowsClientTools(JsonElement properties)
+    {
+        // Strata loads its chat template before it can report these capabilities.
+        var capabilities = properties.Get("chat_template_caps");
+        return capabilities.Get("supports_tools").ValueKind != JsonValueKind.False &&
+            capabilities.Get("supports_tool_calls").ValueKind != JsonValueKind.False;
+    }
 
     private static int? NativeArgument(JsonObject config, string flag)
     {

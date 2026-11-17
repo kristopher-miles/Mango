@@ -52,6 +52,17 @@ internal static partial class PeerChecks
         var listed = catalogue.GetProperty("data").EnumerateArray().Single(item => item.GetProperty("id").GetString() == alias);
         Check(listed.GetProperty("context_size").GetInt32() == 262_144, "a shared alias advertises the largest observed context");
         Check(Served(await Chat("ordinary text")) == smallId, "text can use the smaller text-only deployment under the mixed alias");
+        var key = (await Issue(http, large, await Unlock(http, large, Password), "fixture-bot")).GetProperty("secret").GetString();
+        var toolReply = await Request(http, HttpMethod.Post, large.TailAddress + "/v1/chat/completions", key, new
+        {
+            model = alias,
+            messages = new[] { new { role = "system", content = "fixture tool request" },
+                new { role = "user", content = "Previous turn" }, new { role = "user", content = "Choose a function" } },
+            tools = new[] { "lookup", "check" }.Select(name => new { type = "function", function = new { name } }).ToArray(),
+            tool_choice = "auto",
+            max_tokens = 8192
+        });
+        Check(Served(toolReply) == smallId, "a scoped chat request with client tools can be forwarded to the capable alias host");
         var picture = await Request(http, HttpMethod.Post, small.LocalAddress + "/v1/chat/completions", small.Session, new
         {
             model = alias,
@@ -137,6 +148,7 @@ internal static partial class PeerChecks
         object Row(string id, string type, string[] modalities) => new
         {
             key = id, type, input_modalities = modalities, media_tokens_per_item = vision ? 512 : (int?)null,
+            client_tools = !vision,
             loaded_instances = new[] { new { id, config = new { context_length = context, parallel = 1 } } }
         };
         app.MapGet("/api/v1/models", () => new { models = vision
@@ -149,6 +161,10 @@ internal static partial class PeerChecks
             var content = body.RootElement.GetProperty("messages")[0].GetProperty("content");
             var text = content.ValueKind == JsonValueKind.String ? content.GetString()! : "vision";
             Check(vision || content.ValueKind == JsonValueKind.String, "text-only fixture never receives an image");
+            if (text == "fixture tool request")
+                Check(!vision && body.RootElement.GetProperty("tools").GetArrayLength() == 2 &&
+                    body.RootElement.GetProperty("max_tokens").GetInt32() == 8192,
+                    "the serving host receives both function definitions and the caller's output limit");
             await Record(text, native, web.RequestAborted);
             var tokens = text.StartsWith("compressible ", StringComparison.Ordinal) ? text.Length / 4 : text.Length;
             if (tokens > context || !vision && text == "provider measured overflow")
