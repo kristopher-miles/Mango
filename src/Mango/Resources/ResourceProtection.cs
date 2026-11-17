@@ -436,6 +436,12 @@ internal sealed partial class ResourceProtection : IDisposable
                 RequestCancel(item.Stop);
     }
 
+    internal void ReleaseUnstarted(ResourceReservation item)
+    {
+        lock (sync)
+            Remove(item);
+    }
+
     internal void Settle(ResourceReservation item, bool settled)
     {
         lock (sync)

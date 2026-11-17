@@ -71,5 +71,6 @@ internal sealed class ResourceReservation(ResourceProtection owner, Guid endpoin
     public CancellationToken Cancellation => Stop.Token;
     public void Cancel() => owner.Cancel(this);
     public void Complete(bool settled = true) => owner.Settle(this, settled);
+    public void ReleaseUnstarted() => owner.ReleaseUnstarted(this);
     public void Dispose() => owner.Settle(this, false);
 }

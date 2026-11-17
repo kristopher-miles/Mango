@@ -206,7 +206,12 @@ internal sealed class LmStudioAdapter(HttpClient http, ProviderEndpoint endpoint
         var body = new Dictionary<string, object> { ["model"] = model.ManagementId, ["echo_load_config"] = true };
         if (context.HasValue)
             body["context_length"] = context.Value;
-        await JsonAsync("/api/v1/models/load", cancellation, body, lifecycle: true);
+        try { await JsonAsync("/api/v1/models/load", cancellation, body, lifecycle: true); }
+        catch (ProviderFailure error) when (Generic && error.Status == 409)
+        {
+            // The generic lifecycle contract rejects a full-capacity load before starting it.
+            throw new ProviderFailure(409, error.Message, code: "load_rejected");
+        }
     }
 
     public override async Task UnloadAsync(ProviderModel model, CancellationToken cancellation)

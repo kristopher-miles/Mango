@@ -498,6 +498,12 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
         {
             if (invoked)
                 LifecycleFailed?.Invoke(id, load, error.Status);
+            if (load && error.Code == "load_rejected")
+            {
+                reservation?.ReleaseUnstarted();
+                reservation = null;
+                invoked = false;
+            }
             if (target is not null)
                 SignalRefresh(target.EndpointId);
             if (error.AllocationFailure && reservation is not null)

@@ -20,6 +20,7 @@ internal static class ColdRouteChecks
         Func<Task>? observeStartup = null;
         Task? startupObservation = null;
         var loads = 0;
+        var refuseLoad = false;
         var calls = 0;
         var builder = WebApplication.CreateSlimBuilder();
         builder.Logging.ClearProviders();
@@ -32,6 +33,8 @@ internal static class ColdRouteChecks
         } } });
         native.MapPost("/api/v1/models/load", async (HttpContext context) =>
         {
+            if (refuseLoad)
+                return Results.Conflict();
             using var body = await JsonDocument.ParseAsync(context.Request.Body);
             Check(!body.RootElement.TryGetProperty("context_length", out _), "cold load uses provider defaults");
             loads++; loaded = true;
@@ -88,6 +91,16 @@ internal static class ColdRouteChecks
         Check(loads == 0 && calls == 0, "unqualified cold route keeps its ordinary rejection");
         await resources.SaveBudgetAsync(new(model.Id, InferenceOperation.Chat, 262144, 1, 0,
             64, 8192, null, null, false, 1, false), providers, default);
+        refuseLoad = true;
+        try
+        {
+            await providers.ManageAsync(model.Id, true, default);
+            throw new InvalidOperationException("Expected a busy rejection from the generic provider.");
+        }
+        catch (ProviderFailure error) when (error.Status == 409) { }
+        Check(!providers.HasUnsettled(model.Id) && !providers.HasUnsettledLoad(model.Id),
+            "an explicit generic load refusal releases the reservation for the next attempt");
+        refuseLoad = false;
         var catalogue = JsonSerializer.SerializeToElement(network.ModelList(null), PeerNetwork.Json);
         var row = catalogue.GetProperty("data").EnumerateArray().Single(item => item.GetProperty("id").GetString() == "qualified-cold");
         Check(!row.TryGetProperty("context_size", out _) && !row.TryGetProperty("max_context_length", out _),
