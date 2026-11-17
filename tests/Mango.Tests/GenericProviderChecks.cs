@@ -66,6 +66,7 @@ internal static class GenericProviderChecks
         using var request = await providers.ReadInferenceAsync(InferenceOperation.Chat, context, default);
         var placement = providers.Placement(request.Shape, second.Id) ??
             throw new InvalidOperationException("The installed generic model was not considered for loading.");
+        Check(providers.WouldDisplace(placement), "a cold target on a full one-slot endpoint advertises a displacement");
         var displaced = new List<string>();
         await providers.PreparePlacementAsync(placement, id =>
         {
@@ -83,6 +84,7 @@ internal static class GenericProviderChecks
             Encoding.UTF8.GetString(output.ToArray()) == Stream.Replace("__instance__", instance.Id),
             "provider model ID routed to the new instance over SSE");
         var resident = providers.View.Models.Single(model => model.Id == second.Id);
+        Check(!providers.WouldDisplace(placement with { Model = resident }), "the resident target can serve without a displacement");
         Check(resident.ProviderIdentifiers.SequenceEqual(["sample-b", instance.Id]) &&
             providers.Placement(request.Shape with { Alias = instance.Id }, second.Id) is not null,
             "the provider's distinct loaded-instance ID also routes to the instance");
