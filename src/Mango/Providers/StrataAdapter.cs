@@ -103,7 +103,6 @@ internal sealed class StrataAdapter(HttpClient http, ProviderEndpoint endpoint, 
         config["host"] = "127.0.0.1";
         var port = new Uri(Endpoint.Address).Port;
         config["port"] = port;
-        config["parallel"] = 1;
         config["lazy_load"] = false;
         if (context is { } limit)
         {

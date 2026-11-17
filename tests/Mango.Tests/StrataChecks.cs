@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Runtime.InteropServices;
 using Mango.Host;
 using Mango.Providers;
+using Mango.Resources;
 
 internal static class StrataChecks
 {
@@ -37,6 +38,18 @@ internal static class StrataChecks
             "A resident attached endpoint blocks Strata.");
         Check(ProviderCatalog.ExclusiveBlocker(new([strata with { HostReserved = true }, attached], [], null, null), attached) is not null,
             "Strata's reservation blocks another endpoint even before model readiness.");
+
+        const long gib = 1024L * 1024 * 1024;
+        var settings = new SnapshotFile<LocalSettings>(Path.Combine(state, "local-settings.json"), LocalSettings.Validate);
+        await settings.LoadAsync(new LocalSettings { Role = LocalRole.Contributor, RamReserveMiB = 2048, ReducedReserveConsent = true });
+        var observed = new ResourceObservation(DateTimeOffset.UtcNow, 64 * gib, 24 * gib, 0, 0, [], "fixture", [], true, null,
+            FreeCommit: 3 * gib, ExclusiveEndpoint: strata.Id);
+        using var resources = new ResourceProtection(state, settings, (_, _) => observed);
+        await resources.InitializeAsync();
+        resources.ApplyObservation(observed);
+        Check(resources.Status.State == ContributionState.Contributor, "Commit headroom uses the confirmed Mango RAM reserve.");
+        resources.ApplyObservation(observed with { FreeCommit = gib });
+        Check(resources.Status.State == ContributionState.Withdrawing, "Commit below the configured reserve releases Strata.");
 
         await CheckJobAsync();
         Console.WriteLine("Strata registration, host exclusivity, and Windows job checks passed.");

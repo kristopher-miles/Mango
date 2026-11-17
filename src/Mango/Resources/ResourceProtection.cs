@@ -7,7 +7,6 @@ namespace Mango.Resources;
 internal sealed partial class ResourceProtection : IDisposable
 {
     internal const long MiB = 1024 * 1024;
-    private const long StrataCommitReserve = 4L * 1024 * MiB;
     private static readonly TimeSpan Sustained = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan BenchmarkIdle = TimeSpan.FromMinutes(5);
     private readonly object sync = new();
@@ -316,7 +315,7 @@ internal sealed partial class ResourceProtection : IDisposable
                 return Refuse(pressure);
             }
             if (endpoint.ExclusiveHost && work == ResourceWork.Load && freeCommit is { } commit &&
-                commit - StrataCommitReserve < cost.RamBytes)
+                commit - ConfiguredRamReserve(latest, current) < cost.RamBytes)
                 return new(AdmissionStatus.Wait, "Strata needs more Windows commit headroom before loading.", null, MemoryWait: true);
             if (!Fits(cost, latest, freeRam, current, settledExclusive: endpoint.ExclusiveHost && work != ResourceWork.Load))
                 return new(AdmissionStatus.Wait, "The request does not fit current RAM or per-device VRAM reserves.", null, MemoryWait: true);
@@ -392,7 +391,7 @@ internal sealed partial class ResourceProtection : IDisposable
         bool settledExclusive = false)
     {
         if (latest is null) return true;
-        var reserve = Math.Max((long)current.EffectiveRamReserveMiB(LocalSettings.DefaultRamReserveMiB((ulong)latest.TotalRam)) * MiB,
+        var reserve = Math.Max(ConfiguredRamReserve(latest, current),
             MinimumFree(latest.TotalRam, current.RamCutoffPercent));
         var outstandingRam = reservations.Sum(item => Unused(item, latest, null));
         if (latest.TotalRam > 0 && freeRam is not null && cost.RamBytes > freeRam - reserve - outstandingRam)
@@ -413,6 +412,9 @@ internal sealed partial class ResourceProtection : IDisposable
     }
 
     private static long MinimumFree(long total, int cutoff) => (long)Math.Ceiling(total * (100 - cutoff) / 100.0);
+
+    private static long ConfiguredRamReserve(ResourceObservation? latest, LocalSettings current) =>
+        (long)current.EffectiveRamReserveMiB(LocalSettings.DefaultRamReserveMiB((ulong)(latest?.TotalRam ?? 0))) * MiB;
 
     private long Unused(ResourceReservation item, ResourceObservation latest, string? device)
     {
@@ -662,11 +664,11 @@ internal sealed partial class ResourceProtection : IDisposable
     private static string? Pressure(ResourceObservation? latest, LocalSettings current)
     {
         if (latest is null) return null;
-        var reserve = (long)current.EffectiveRamReserveMiB(LocalSettings.DefaultRamReserveMiB((ulong)latest.TotalRam)) * MiB;
+        var reserve = ConfiguredRamReserve(latest, current);
         WorkerMemory? exclusive = null;
         if (latest.ExclusiveEndpoint is { } endpoint)
         {
-            if (latest.FreeCommit is < StrataCommitReserve)
+            if (latest.FreeCommit is { } commit && commit < reserve)
                 return "Windows commit headroom is too low to keep the Strata runtime loaded.";
             latest.Workers.TryGetValue(endpoint, out exclusive);
         }
