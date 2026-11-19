@@ -473,6 +473,8 @@ internal sealed partial class ResourceProtection
         var openedForBenchmark = false;
         try
         {
+            if (model.Instance is null && target.HasLoadAllowance)
+                await ReleaseBenchmarkSlotAsync(providers, target, cancellation);
             var needsCold = target.CanColdLoad && (model.Instance is null || !profile.Measurements.Any(pass => pass.Pass == "cold"));
             if (needsCold && (!protectSelected || model.Instance is null))
             {
@@ -559,6 +561,22 @@ internal sealed partial class ResourceProtection
                 catch (ProviderFailure) { }
             }
         }
+    }
+
+    private async Task ReleaseBenchmarkSlotAsync(ProviderCatalog providers, Target target, CancellationToken cancellation)
+    {
+        if (target.Endpoint.MaxLoadedModels is not > 0 || target.Endpoint.Mode != ProviderMode.Managed)
+            return;
+        var view = providers.View;
+        var residents = view.Models.Where(model => model.EndpointId == target.Endpoint.Id && model.Instance is not null).ToArray();
+        if (residents.Length < target.Endpoint.MaxLoadedModels || residents.Any(model => model.Id == target.Model.Id))
+            return;
+        var idle = residents.FirstOrDefault(model => model.Id != view.Selected && !model.Yolo && !model.Busy &&
+            model.Instance is { Busy: false } && model.Model.SupportsUnload);
+        if (!target.Endpoint.CanUnload || target.Endpoint.Profile == ProviderProfile.LmStudio || idle is null)
+            throw new ProviderFailure(409, "Waiting for an idle provider slot that Mango can release for benchmarking.");
+        await providers.ManageAsync(idle.Id, load: false, cancellation, target.Operation);
+        await WaitForObservationAsync(cancellation);
     }
 
     internal async Task<bool> WaitForObservationAsync(CancellationToken cancellation)

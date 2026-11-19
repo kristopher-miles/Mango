@@ -487,7 +487,7 @@ internal static class ResourceChecks
         var directory = Directory.CreateDirectory(Path.Combine(root, "cold-benchmark-slot")).FullName;
         var settings = new SnapshotFile<LocalSettings>(Path.Combine(directory, "local-settings.json"), LocalSettings.Validate);
         await settings.LoadAsync(new LocalSettings { Role = LocalRole.Contributor, BenchmarkPolicy = BenchmarkPolicy.Now, SampleSeconds = 2 });
-        string? resident = null;
+        string? resident = "previous";
         var releases = 0;
         var holdRefresh = 0;
         var refreshing = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -506,7 +506,7 @@ internal static class ResourceChecks
             return new
             {
                 max_loaded_models = 1, loads_settled = true,
-                models = new[] { "first", "second" }.Select(key => new
+                models = new[] { "first", "second", "previous" }.Select(key => new
                 {
                     key, type = "llm", size_bytes = 64 * MiB, max_context_length = 512,
                     loaded_instances = resident == key ? new[] { new { id = key, config = new { context_length = 512 } } } : []
@@ -538,6 +538,8 @@ internal static class ResourceChecks
         var endpoint = await providers.ConfigureAsync(new(null, ProviderProfile.Generic, ProviderMode.Managed,
             fixture.Urls.Single(), null, false, null, null), default);
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        var previous = providers.View.Models.Single(model => model.Model.NativeId == "previous");
+        await providers.SetServingAsync(previous.Id, false, deadline.Token);
         Volatile.Write(ref holdRefresh, 1);
         var refresh = providers.RefreshAsync(endpoint.Id, deadline.Token);
         await refreshing.Task.WaitAsync(deadline.Token);
@@ -549,10 +551,11 @@ internal static class ResourceChecks
                 await Task.Delay(25, deadline.Token);
             releaseRefresh.TrySetResult();
             await refresh;
-            while (Volatile.Read(ref releases) < 2 || providers.View.Models.Any(model => model.Instance is not null))
+            while (Volatile.Read(ref releases) < 3 || providers.View.Models.Any(model => model.Instance is not null))
                 await Task.Delay(25, deadline.Token);
-            Check(providers.View.Models.All(model => resources.RouteTiming(model, Chat.Operation).GenerationTokensPerSecond == 25),
-                "each cold deployment gets a warm rate before Mango releases its single provider slot");
+            Check(providers.View.Models.Where(model => !model.ServingDisabled)
+                .All(model => resources.RouteTiming(model, Chat.Operation).GenerationTokensPerSecond == 25),
+                "Mango releases an idle occupied slot and records a warm rate for each eligible cold deployment");
         }
         finally
         {
@@ -560,7 +563,7 @@ internal static class ResourceChecks
             releaseRefresh.TrySetResult();
             await worker;
         }
-        var first = providers.View.Models.First();
+        var first = providers.View.Models.First(model => !model.ServingDisabled);
         await resources.RetryBenchmarkAsync(first.Id, Chat.Operation, providers, default);
         var evidence = JsonSerializer.SerializeToElement(resources.View(providers), SnapshotFile<ResourceData>.Json)
             .GetProperty("models").EnumerateArray().Single(item => item.GetProperty("id").GetString() == first.Id)
