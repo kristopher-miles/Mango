@@ -11,13 +11,18 @@ function percent(value) { return value == null ? "unavailable" : `${value.toFixe
 function renderResourceProfile(model) {
   const profile = model.profile, active = resourceView.benchmark?.deployment === model.id;
   document.querySelector("#resource-profile").textContent = [model.unsafe ? "An allocation failed. Correct the limits or explicitly retry before using this placement." : "",
-    profile?.error || (profile?.complete ? "Benchmark complete." : profile?.measurements.length ? "Benchmark measurements are incomplete." : "No benchmark measurements."),
+    profile?.complete ? "Benchmark complete." : profile?.speed?.elapsed ? "Warm benchmark recorded." :
+      profile?.measurements.length ? "Benchmark measurements are incomplete." : "No benchmark measurements.",
+    profile?.error,
     model.canColdLoad ? "" : "Cold-load measurement is unavailable for this provider."].filter(Boolean).join(" ");
   document.querySelector("#resource-retry").disabled = !model.budget || active;
   document.querySelector("#measurement-title").textContent = `${model.identifier} · ${operationNames[model.operation]}`;
   const speed = profile?.speed;
-  const speedRow = speed ? [element("li", `Generation speed · ${speed.tokensPerSecond == null
-    ? speed.error || "Provider returned no usable token timing." : `${speed.tokensPerSecond.toFixed(1)} tokens/s`}`)] : [];
+  const speedRow = speed ? [element("li", ["Warm sample", speed.error,
+    speed.elapsed, speed.promptTokens == null ? "" : `${speed.promptTokens} prompt tokens`,
+    speed.tokensPerSecond == null ? "" : `${speed.tokensPerSecond.toFixed(1)} tokens/s`,
+    !speed.error && model.operation === "chat" && speed.tokensPerSecond == null ? "Generation speed unavailable" : ""
+  ].filter(Boolean).join(" · "))] : [];
   document.querySelector("#resource-passes").replaceChildren(...speedRow, ...(profile?.measurements || []).map(pass => element("li", [pass.pass, pass.elapsed,
     pass.workload.width ? `${pass.workload.width} × ${pass.workload.height}` : "",
     pass.promptTokens == null ? "" : `${pass.promptTokens} prompt tokens`,

@@ -515,7 +515,8 @@ internal sealed partial class PeerNetwork
         {
             if (model.Yolo && protection?.IsAvailable(model, endpoint, operation) == true)
                 return new ObservedWorkload(new(operation, model.Context ?? ProviderLimits.MaxContext), null, null,
-                    Math.Clamp(model.Instance?.Slots ?? 1, 1, 256));
+                    Math.Clamp(model.Instance?.Slots ?? 1, 1, 256),
+                    GenerationTokensPerSecond: protection.RouteTiming(model, operation).GenerationTokensPerSecond);
             var budget = protection?.Estimate(model, endpoint, operation);
             if (budget is null || protection?.IsAvailable(model, endpoint, operation) != true)
                 return null;

@@ -9,6 +9,7 @@ internal sealed partial class ResourceProtection : IDisposable
     internal const long MiB = 1024 * 1024;
     private static readonly TimeSpan Sustained = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan BenchmarkIdle = TimeSpan.FromMinutes(5);
+    private const string DedicatedMemoryPressure = "Dedicated memory pressure on ";
     private readonly object sync = new();
     private readonly SnapshotFile<LocalSettings> settings;
     private readonly SnapshotFile<ResourceData> store;
@@ -232,6 +233,14 @@ internal sealed partial class ResourceProtection : IDisposable
         }
     }
 
+    // A resident, opted-in model can accept a small native probe under its existing capacity policy.
+    private bool NativeWarmBenchmarkAllowed(LocalSettings current) =>
+        status.State == ContributionState.Contributor ||
+        status.State == ContributionState.Fault && observed is { WorkerAttribution: true } latest &&
+        status.Reason?.StartsWith(DedicatedMemoryPressure, StringComparison.Ordinal) == true &&
+        status.Reason == Pressure(latest, current) &&
+        latest.ExternalCpu < current.CpuCutoffPercent && latest.ExternalGpu < current.GpuCutoffPercent;
+
     public Admission TryAdmit(Deployment model, EndpointStatus endpoint, Workload workload, ResourceWork work,
         bool profiling = false, long payloadBytes = 0, bool speedSample = false)
     {
@@ -239,7 +248,9 @@ internal sealed partial class ResourceProtection : IDisposable
         {
             lock (sync)
             {
-                if (!IsAvailable(model, endpoint, workload.Operation) || work == ResourceWork.Benchmark)
+                if (!IsAvailable(model, endpoint, workload.Operation) || work == ResourceWork.Benchmark &&
+                    (!speedSample || model.Instance is null || !NativeWarmBenchmarkAllowed(settings.Value) ||
+                        reservations.Any(item => !item.Settled)))
                     return Refuse("This model is paused, unavailable, or delegates qualification to its provider.");
                 if (work == ResourceWork.Load && (endpoint.Mode != ProviderMode.Managed || !endpoint.CanLoad || !model.Model.SupportsLoad))
                     return Refuse("The provider does not authorize loading this deployment.");
@@ -693,7 +704,7 @@ internal sealed partial class ResourceProtection : IDisposable
             {
                 var external = Math.Max(0, used - (exclusive?.DedicatedBytes?.GetValueOrDefault(device.Id) ?? 0));
                 if (total - external < (long)current.EffectiveVramReserveMiB * MiB || external * 100.0 >= total * current.VramCutoffPercent)
-                    return $"Dedicated memory pressure on {device.Name}.";
+                    return $"{DedicatedMemoryPressure}{device.Name}.";
             }
         return null;
     }

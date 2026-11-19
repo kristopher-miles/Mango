@@ -372,7 +372,7 @@ function renderModelCard(item) {
         "Updating provider capacity policy…",
         () => api(`providers/models/${item.id}/yolo`, { enabled: !yolo, revision: item.local.options.revision }),
         yolo ? "Mango resource protection restored." : "YOLO enabled: native provider owns capacity."));
-      capacity.title = "YOLO bypasses Mango memory estimates, reservations, benchmarks and automatic pressure unload for this model. Native provider defaults and errors apply. Explicit pause and stop remain available.";
+      capacity.title = "YOLO bypasses Mango memory estimates, reservations, full qualification and automatic pressure unload for this model. Native provider defaults and errors apply. Explicit pause and stop remain available.";
       if (!endpoint.exclusiveHost) actions.append(capacity);
       actions.append(action(disabled ? "Enable serving" : "Disable serving", event => providerAction(event.currentTarget,
         disabled ? "Enabling serving…" : "Disabling serving…",

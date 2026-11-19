@@ -36,7 +36,8 @@ internal sealed record BenchmarkMeasurement(Workload Workload, string Pass, int?
     MemoryCost? ObservedIncrement, long? WorkerPeakRamBytes, int Samples, int? CachedTokens = null);
 internal sealed record BenchmarkProfile(string Deployment, string Configuration, string Runtime, InferenceOperation Operation,
     DateTimeOffset Updated, BenchmarkMeasurement[] Measurements, bool Complete, string? Error, BenchmarkSpeed? Speed = null);
-internal sealed record BenchmarkSpeed(DateTimeOffset At, double? TokensPerSecond, string? Error);
+internal sealed record BenchmarkSpeed(DateTimeOffset At, double? TokensPerSecond, string? Error,
+    TimeSpan? Elapsed = null, int? PromptTokens = null);
 internal sealed record ResourceData(ResourceBudget[] Budgets, BenchmarkProfile[] Profiles, string[] Unsafe,
     ResourceHold? Hold)
 {

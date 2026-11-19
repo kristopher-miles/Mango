@@ -31,6 +31,7 @@ internal static class ResourceChecks
             });
         Check(visited.SetEquals([3, 4]), "fresh creation identities exclude reused-parent PID ancestry and its subtree while retaining live workers");
         await CheckLoadedLmStudioBenchmarkAsync(root);
+        await CheckColdBenchmarkSlotsAsync(root);
         await CheckTransientReleaseRecoveryAsync(root);
         var directory = Directory.CreateDirectory(Path.Combine(root, "resources")).FullName;
         var settings = new SnapshotFile<LocalSettings>(Path.Combine(directory, "local-settings.json"), LocalSettings.Validate);
@@ -479,6 +480,74 @@ internal static class ResourceChecks
         await late;
         Check(lateRelease.Error is null && !loaded && !providers.HasUnsettledLoad(deployment),
             "release waits for late load completion, then unloads and verifies absence");
+    }
+
+    private static async Task CheckColdBenchmarkSlotsAsync(string root)
+    {
+        var directory = Directory.CreateDirectory(Path.Combine(root, "cold-benchmark-slot")).FullName;
+        var settings = new SnapshotFile<LocalSettings>(Path.Combine(directory, "local-settings.json"), LocalSettings.Validate);
+        await settings.LoadAsync(new LocalSettings { Role = LocalRole.Contributor, BenchmarkPolicy = BenchmarkPolicy.Now, SampleSeconds = 2 });
+        string? resident = null;
+        var releases = 0;
+        var builder = WebApplication.CreateSlimBuilder();
+        builder.Logging.ClearProviders();
+        builder.WebHost.ConfigureKestrel(server => server.Listen(IPAddress.Loopback, 0));
+        await using var fixture = builder.Build();
+        fixture.MapGet("/api/v1/models", () => new
+        {
+            max_loaded_models = 1, loads_settled = true,
+            models = new[] { "first", "second" }.Select(key => new
+            {
+                key, type = "llm", size_bytes = 64 * MiB, max_context_length = 512,
+                loaded_instances = resident == key ? new[] { new { id = key, config = new { context_length = 512 } } } : []
+            })
+        });
+        fixture.MapPost("/api/v1/models/load", async (HttpContext context) =>
+        {
+            using var body = await JsonDocument.ParseAsync(context.Request.Body);
+            if (resident is not null) return Results.Conflict();
+            resident = body.RootElement.GetProperty("model").GetString();
+            return Results.Ok();
+        });
+        fixture.MapPost("/api/v1/models/unload", () => { resident = null; Interlocked.Increment(ref releases); return Results.Ok(); });
+        fixture.MapPost("/v1/chat/completions", async (HttpContext context) =>
+        {
+            var (count, speed) = await PromptAsync(context);
+            context.Response.ContentType = "text/event-stream";
+            await context.Response.WriteAsync(speed
+                ? "data: {\"timings\":{\"predicted_per_second\":25}}\n\ndata: [DONE]\n\n"
+                : $"data: {{\"usage\":{{\"prompt_tokens\":{count},\"completion_tokens\":1}}}}\n\ndata: [DONE]\n\n");
+        });
+        await fixture.StartAsync();
+        using var resources = new ResourceProtection(directory, settings, (_, now) =>
+            new(now, Total, Total, 0, 0, [], "fixture", [], true, null), () => ((ulong)Total, (ulong)Total));
+        await resources.InitializeAsync();
+        await using var providers = new ProviderCatalog(directory, resources);
+        await providers.InitializeAsync();
+        await providers.ConfigureAsync(new(null, ProviderProfile.Generic, ProviderMode.Managed,
+            fixture.Urls.Single(), null, false, null, null), default);
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        var worker = resources.RunAsync(providers, deadline.Token);
+        try
+        {
+            while (Volatile.Read(ref releases) < 2 || providers.View.Models.Any(model => model.Instance is not null))
+                await Task.Delay(25, deadline.Token);
+            Check(providers.View.Models.All(model => resources.RouteTiming(model, Chat.Operation).GenerationTokensPerSecond == 25),
+                "each cold deployment gets a warm rate before Mango releases its single provider slot");
+        }
+        finally
+        {
+            await deadline.CancelAsync();
+            await worker;
+        }
+        var first = providers.View.Models.First();
+        await resources.RetryBenchmarkAsync(first.Id, Chat.Operation, providers, default);
+        var evidence = JsonSerializer.SerializeToElement(resources.View(providers), SnapshotFile<ResourceData>.Json)
+            .GetProperty("models").EnumerateArray().Single(item => item.GetProperty("id").GetString() == first.Id)
+            .GetProperty("profile");
+        Check(evidence.GetProperty("measurements").EnumerateArray().Single().GetProperty("pass").GetString() == "cold" &&
+            evidence.GetProperty("speed").ValueKind == JsonValueKind.Null && !evidence.GetProperty("complete").GetBoolean(),
+            "retry keeps matching cold-load evidence while discarding the previous warm samples");
     }
 
     private static async Task CheckTransientReleaseRecoveryAsync(string root)

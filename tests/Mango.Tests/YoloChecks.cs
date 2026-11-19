@@ -25,6 +25,7 @@ internal static class YoloChecks
         Directory.CreateDirectory(directory);
         var loaded = new Dictionary<string, bool> { ["native-model"] = false, ["ordinary-model"] = true };
         var loads = 0;
+        var nativeKind = "llm";
         var nativeStatus = 200;
         var nativeBody = "{\"result\":\"native\"}";
         var nativeType = "application/json";
@@ -34,7 +35,7 @@ internal static class YoloChecks
         await using var fixture = builder.Build();
         fixture.MapGet("/api/v1/models", () => new { version = "fixture", models = loaded.Select(item => new
         {
-            key = item.Key, type = "llm", max_context_length = 8192,
+            key = item.Key, type = item.Key == "native-model" ? nativeKind : "llm", max_context_length = 8192,
             loaded_instances = item.Value ? new[] { new { id = item.Key + "-instance", config = new { context_length = 1024, parallel = 2 } } } : []
         }) });
         fixture.MapPost("/api/v1/models/load", async (HttpContext context) =>
@@ -56,6 +57,12 @@ internal static class YoloChecks
         fixture.MapPost("/v1/chat/completions", async (HttpContext context) =>
         {
             using var body = await JsonDocument.ParseAsync(context.Request.Body);
+            if (body.RootElement.TryGetProperty("max_tokens", out var output) && output.GetInt32() == 64)
+            {
+                context.Response.ContentType = "text/event-stream";
+                await context.Response.WriteAsync("data: {\"timings\":{\"predicted_per_second\":25}}\n\ndata: [DONE]\n\n");
+                return;
+            }
             Check(body.RootElement.GetProperty("model").GetString() == "native-model-instance" &&
                 body.RootElement.GetProperty("unknown_provider_field").GetProperty("nested").GetInt32() == 7 &&
                 !body.RootElement.TryGetProperty("max_tokens", out _), "YOLO preserves provider body and omitted output limit");
@@ -63,14 +70,16 @@ internal static class YoloChecks
             context.Response.ContentType = nativeType;
             await context.Response.WriteAsync(nativeBody);
         });
+        fixture.MapPost("/v1/embeddings", () => new { data = new[] { new { embedding = new[] { 0.1, 0.2 } } }, usage = new { prompt_tokens = 8 } });
+        fixture.MapPost("/v1/systemone", () => new { answers = new { benchmark = 0.8 } });
         await fixture.StartAsync();
         var settings = new SnapshotFile<LocalSettings>(Path.Combine(directory, "local-settings.json"), LocalSettings.Validate);
         await settings.LoadAsync(new LocalSettings { Role = LocalRole.Contributor, BenchmarkPolicy = BenchmarkPolicy.Now });
         var pressure = false;
-        ResourceObservation Sample() => new(DateTimeOffset.UtcNow, 16 * GiB, pressure ? GiB : 12 * GiB,
+        ResourceObservation Sample() => new(DateTimeOffset.UtcNow, 16 * GiB, 12 * GiB,
             0, 0, [new("gpu", "fixture", false, 8 * GiB, pressure ? 8 * GiB : GiB)], "fixture", [], true, null);
         using var resources = new ResourceProtection(directory, settings, (_, _) => Sample(),
-            () => ((ulong)(16 * GiB), (ulong)(pressure ? GiB : 12 * GiB)));
+            () => ((ulong)(16 * GiB), (ulong)(12 * GiB)));
         await resources.InitializeAsync();
         await using var providers = new ProviderCatalog(directory, resources);
         await providers.InitializeAsync();
@@ -125,6 +134,36 @@ internal static class YoloChecks
         var release = await providers.ReleaseManagedAsync(default);
         Check(release.Error is null && loaded["native-model"] && !loaded["ordinary-model"],
             "automatic release unloads unmarked models and retains marked cotenants");
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        while (resources.Status.State == ContributionState.Withdrawing)
+        {
+            await resources.AdvanceWithdrawalAsync(providers, deadline.Token);
+            resources.ApplyObservation(Sample());
+            await Task.Delay(20, deadline.Token);
+        }
+        Check(resources.Status is { State: ContributionState.Fault, Reason: "Dedicated memory pressure on fixture." },
+            "resident YOLO leaves the normal dedicated-memory protection fault in place");
+        foreach (var kind in new[] { "llm", "embedding", "decision" })
+        {
+            nativeKind = kind;
+            await providers.RefreshAsync(endpoint.Id, deadline.Token);
+            var operation = Model().Model.Operations.Single();
+            JsonElement SampleEvidence() => JsonSerializer.SerializeToElement(resources.View(providers), SnapshotFile<ResourceData>.Json)
+                .GetProperty("models").EnumerateArray().Single(item => item.GetProperty("id").GetString() == Model().Id)
+                .GetProperty("profile");
+            while (SampleEvidence().ValueKind == JsonValueKind.Null)
+            {
+                resources.AdvanceBenchmarks(providers, deadline.Token);
+                await Task.Delay(20, deadline.Token);
+            }
+            var sample = SampleEvidence().GetProperty("speed");
+            Check(sample.GetProperty("elapsed").ValueKind == JsonValueKind.String && sample.GetProperty("error").ValueKind == JsonValueKind.Null &&
+                (operation != InferenceOperation.Chat || resources.RouteTiming(Model(), operation).GenerationTokensPerSecond == 25),
+                "each resident YOLO text workload records valid evidence through native admission without reloading");
+        }
+        Check(loads == 1 && loaded["native-model"], "native benchmark retains the loaded instance across samples");
+        nativeKind = "llm";
+        await providers.RefreshAsync(endpoint.Id, deadline.Token);
         await providers.SetServingAsync(Model().Id, false, default);
         Check(!resources.IsAvailable(Model(), endpoint), "explicit per-model serving disable still blocks YOLO");
         await providers.SetServingAsync(Model().Id, true, default);

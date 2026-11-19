@@ -18,6 +18,14 @@ internal static class BenchmarkProtocol
     internal const int SpeedContext = 128;
     private const int SpeedOutput = 64;
 
+    public static Workload SampleWorkload(InferenceOperation operation) => operation switch
+    {
+        InferenceOperation.Images => new(operation, 512 * 512, Width: 512, Height: 512),
+        InferenceOperation.Speech => new(operation, 60),
+        InferenceOperation.Transcription => new(operation, 32_046),
+        _ => new(operation, SpeedContext)
+    };
+
     public static (string Name, Workload Workload)[] Plan(Deployment model, InferenceOperation operation, Workload limit)
     {
         if (operation is InferenceOperation.Chat or InferenceOperation.Embeddings or InferenceOperation.SystemOne)
@@ -104,16 +112,38 @@ internal static class BenchmarkProtocol
                 if (!terminal)
                     throw new ProviderFailure(502, "The benchmark stream ended before the provider reported completion.");
             }
-            else if (operation is InferenceOperation.Chat or InferenceOperation.Embeddings or InferenceOperation.SystemOne)
+            else if (operation is InferenceOperation.Chat or InferenceOperation.Embeddings or InferenceOperation.SystemOne ||
+                pass == SpeedPass && operation is InferenceOperation.Images or InferenceOperation.Transcription)
             {
                 var body = await ProviderAdapter.ReadBoundedAsync(response.Content, ProviderLimits.MaxRequestBytes, token);
                 using var document = JsonDocument.Parse(body);
-                (promptTokens, outputTokens, promptMilliseconds, tokensPerSecond, cachedTokens) =
-                    ReadMetrics(document.RootElement, default);
+                var payload = document.RootElement;
+                (promptTokens, outputTokens, promptMilliseconds, tokensPerSecond, cachedTokens) = ReadMetrics(payload, default);
+                if (pass == SpeedPass && (operation switch
+                    {
+                        InferenceOperation.Embeddings => !payload.Get("data").Items().Any(item =>
+                            item.Get("embedding").ValueKind == JsonValueKind.Array && item.Get("embedding").GetArrayLength() > 0),
+                        InferenceOperation.SystemOne => payload.Get("answers").Get("benchmark").ValueKind is
+                            JsonValueKind.Undefined or JsonValueKind.Null,
+                        InferenceOperation.Images => !payload.Get("data").Items().Any(item =>
+                            item.Text("b64_json") is { Length: > 0 } || item.Text("url") is { Length: > 0 }),
+                        InferenceOperation.Transcription => payload.Text("text") is null,
+                        _ => false
+                    }))
+                {
+                    settled();
+                    throw new ProviderFailure(502, "The provider did not return a result for the benchmark request.");
+                }
             }
             else
             {
                 await using var stream = await response.Content.ReadAsStreamAsync(token);
+                if (pass == SpeedPass && (response.Content.Headers.ContentType?.MediaType == "application/json" ||
+                    await stream.ReadAsync(new byte[1], token) == 0))
+                {
+                    settled();
+                    throw new ProviderFailure(502, "The provider did not return audio for the benchmark request.");
+                }
                 await stream.CopyToAsync(Stream.Null, token);
             }
             settled();
@@ -192,18 +222,24 @@ internal static class BenchmarkProtocol
             }
             case InferenceOperation.Embeddings:
             {
-                var input = await FitAsync((int)workload.Units, prefix, text => adapter.CountEmbeddingAsync(
-                    JsonValue.Create(text)!, id, cancellation), cancellation);
+                var input = pass == SpeedPass ? "A green tree grows beside a quiet river."
+                    : await FitAsync((int)workload.Units, prefix, text => adapter.CountEmbeddingAsync(
+                        JsonValue.Create(text)!, id, cancellation), cancellation);
                 payload["input"] = new JsonArray(Enumerable.Range(0, workload.Items)
                     .Select(_ => (JsonNode?)JsonValue.Create(input)).ToArray());
                 break;
             }
             case InferenceOperation.SystemOne:
-                payload["state"] = prefix + Repeat(Math.Max(1, (int)workload.Units - 132));
-                payload["questions"] = new JsonObject { ["benchmark"] = new JsonObject { ["type"] = "noul" } };
+                payload["state"] = pass == SpeedPass ? "A green tree grows beside a quiet river."
+                    : prefix + Repeat(Math.Max(1, (int)workload.Units - 132));
+                payload["questions"] = new JsonObject
+                {
+                    ["benchmark"] = new JsonObject { ["type"] = "noul", ["instructions"] = "Is a tree described?" }
+                };
                 break;
             case InferenceOperation.Images:
                 payload["prompt"] = "A small green circle on a plain gray background";
+                payload["response_format"] = "b64_json";
                 payload["size"] = $"{workload.Width}x{workload.Height}";
                 payload["n"] = workload.Items;
                 break;
