@@ -481,7 +481,7 @@ internal sealed partial class ResourceProtection
                 var freshBaseline = true;
                 if (model.Instance is not null)
                 {
-                    await providers.ManageAsync(model.Id, load: false, cancellation);
+                    await providers.ManageAsync(model.Id, load: false, cancellation, target.Operation);
                     freshBaseline = await WaitForObservationAsync(cancellation);
                 }
                 BeginMeasurement("cold", model.EndpointId, freshBaseline);
@@ -553,7 +553,7 @@ internal sealed partial class ResourceProtection
             {
                 try
                 {
-                    await providers.ManageAsync(model.Id, load: false, cancellation);
+                    await providers.ManageAsync(model.Id, load: false, cancellation, target.Operation);
                     await WaitForObservationAsync(cancellation);
                 }
                 catch (ProviderFailure) { }

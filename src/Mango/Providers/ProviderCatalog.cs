@@ -393,7 +393,9 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
     public async Task ManageAsync(string id, bool load, CancellationToken cancellation, InferenceOperation? benchmark = null,
         InferenceOperation? requested = null, bool scheduled = false, Func<string, Task>? displaced = null)
     {
-        if (!await operation.WaitAsync(0, cancellation))
+        if (benchmark.HasValue)
+            await operation.WaitAsync(cancellation);
+        else if (!await operation.WaitAsync(0, cancellation))
             throw new ProviderFailure(409, "A provider operation is in progress.");
         await ManageUnderGateAsync(id, load, cancellation, benchmark, requested, scheduled, displaced);
     }

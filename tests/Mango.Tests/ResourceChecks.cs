@@ -489,18 +489,29 @@ internal static class ResourceChecks
         await settings.LoadAsync(new LocalSettings { Role = LocalRole.Contributor, BenchmarkPolicy = BenchmarkPolicy.Now, SampleSeconds = 2 });
         string? resident = null;
         var releases = 0;
+        var holdRefresh = 0;
+        var refreshing = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseRefresh = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var builder = WebApplication.CreateSlimBuilder();
         builder.Logging.ClearProviders();
         builder.WebHost.ConfigureKestrel(server => server.Listen(IPAddress.Loopback, 0));
         await using var fixture = builder.Build();
-        fixture.MapGet("/api/v1/models", () => new
+        fixture.MapGet("/api/v1/models", async (CancellationToken cancellation) =>
         {
-            max_loaded_models = 1, loads_settled = true,
-            models = new[] { "first", "second" }.Select(key => new
+            if (Interlocked.Exchange(ref holdRefresh, 0) != 0)
             {
-                key, type = "llm", size_bytes = 64 * MiB, max_context_length = 512,
-                loaded_instances = resident == key ? new[] { new { id = key, config = new { context_length = 512 } } } : []
-            })
+                refreshing.TrySetResult();
+                await releaseRefresh.Task.WaitAsync(cancellation);
+            }
+            return new
+            {
+                max_loaded_models = 1, loads_settled = true,
+                models = new[] { "first", "second" }.Select(key => new
+                {
+                    key, type = "llm", size_bytes = 64 * MiB, max_context_length = 512,
+                    loaded_instances = resident == key ? new[] { new { id = key, config = new { context_length = 512 } } } : []
+                })
+            };
         });
         fixture.MapPost("/api/v1/models/load", async (HttpContext context) =>
         {
@@ -524,12 +535,20 @@ internal static class ResourceChecks
         await resources.InitializeAsync();
         await using var providers = new ProviderCatalog(directory, resources);
         await providers.InitializeAsync();
-        await providers.ConfigureAsync(new(null, ProviderProfile.Generic, ProviderMode.Managed,
+        var endpoint = await providers.ConfigureAsync(new(null, ProviderProfile.Generic, ProviderMode.Managed,
             fixture.Urls.Single(), null, false, null, null), default);
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        Volatile.Write(ref holdRefresh, 1);
+        var refresh = providers.RefreshAsync(endpoint.Id, deadline.Token);
+        await refreshing.Task.WaitAsync(deadline.Token);
         var worker = resources.RunAsync(providers, deadline.Token);
         try
         {
+            while (JsonSerializer.SerializeToElement(resources.View(providers), SnapshotFile<ResourceData>.Json)
+                .GetProperty("benchmark").ValueKind == JsonValueKind.Null)
+                await Task.Delay(25, deadline.Token);
+            releaseRefresh.TrySetResult();
+            await refresh;
             while (Volatile.Read(ref releases) < 2 || providers.View.Models.Any(model => model.Instance is not null))
                 await Task.Delay(25, deadline.Token);
             Check(providers.View.Models.All(model => resources.RouteTiming(model, Chat.Operation).GenerationTokensPerSecond == 25),
@@ -538,6 +557,7 @@ internal static class ResourceChecks
         finally
         {
             await deadline.CancelAsync();
+            releaseRefresh.TrySetResult();
             await worker;
         }
         var first = providers.View.Models.First();
