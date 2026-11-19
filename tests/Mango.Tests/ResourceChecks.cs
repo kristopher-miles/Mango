@@ -64,10 +64,16 @@ internal static class ResourceChecks
         });
         fixture.MapGet("/slots", () => new[] { new { is_processing = !providerIdle } });
         fixture.MapPost("/v1/chat/completions/input_tokens", async (HttpContext context) =>
-            new { input_tokens = await PromptAsync(context) });
+            new { input_tokens = (await PromptAsync(context)).Tokens });
         fixture.MapPost("/v1/chat/completions", async (HttpContext context) =>
         {
-            var count = await PromptAsync(context);
+            var (count, speed) = await PromptAsync(context);
+            if (speed)
+            {
+                context.Response.ContentType = "text/event-stream";
+                await context.Response.WriteAsync("data: {\"timings\":{\"predicted_per_second\":25}}\n\ndata: [DONE]\n\n");
+                return;
+            }
             if (Interlocked.Increment(ref calls) == Volatile.Read(ref blockCall))
             {
                 blocked.TrySetResult();
@@ -232,8 +238,8 @@ internal static class ResourceChecks
         Check(calls == 0, "convenient benchmark waits for five local idle minutes");
         blockCall = 2;
         Tick(1);
-        resources.AdvanceBenchmarks(providers, default);
-        await blocked.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        await EventuallyAsync(() => blocked.Task.IsCompleted);
+        Check(resources.RouteTiming(model, Chat.Operation).GenerationTokensPerSecond == 25, "native generation rate is preferred");
         await resources.ClientArrivedAsync(default);
         var partial = Profile(model.Id);
         Check(!partial.GetProperty("complete").GetBoolean() && partial.GetProperty("measurements").GetArrayLength() == 1 &&
@@ -348,22 +354,24 @@ internal static class ResourceChecks
         var directory = Directory.CreateDirectory(Path.Combine(root, "lmstudio-benchmark")).FullName;
         var settings = new SnapshotFile<LocalSettings>(Path.Combine(directory, "local-settings.json"), LocalSettings.Validate);
         await settings.LoadAsync(new LocalSettings { Role = LocalRole.Contributor,
-            BenchmarkPolicy = BenchmarkPolicy.WhenConvenient });
+            BenchmarkPolicy = BenchmarkPolicy.WhenConvenient, SampleSeconds = 2 });
         var clock = new Clock();
         var calls = 0;
+        var speedCalls = 0;
         var loads = 0;
         var unloads = 0;
         var loaded = true;
         var slowUnload = false;
         var keepLoaded = false;
+        var contextLength = 512;
         var endpointId = Guid.Empty;
         var builder = WebApplication.CreateSlimBuilder();
         builder.Logging.ClearProviders();
         builder.WebHost.ConfigureKestrel(server => server.Listen(IPAddress.Loopback, 0));
         await using var fixture = builder.Build();
         fixture.MapGet("/api/v1/models", () => new { models = new[] { new {
-            key = "bounded", type = "llm", max_context_length = 32768, size_bytes = MiB,
-            loaded_instances = loaded ? new[] { new { id = "bounded-live", config = new { context_length = 512, parallel = 1 } } } : []
+            key = "bounded", type = "llm", max_context_length = 32768,
+            loaded_instances = loaded ? new[] { new { id = "bounded-live", config = new { context_length = contextLength, parallel = 1 } } } : []
         } } });
         fixture.MapPost("/api/v1/models/unload", async () => {
             unloads++; loaded = keepLoaded;
@@ -373,9 +381,23 @@ internal static class ResourceChecks
         fixture.MapPost("/api/v1/models/load", () => { loads++; loaded = true; return Results.Ok(); });
         fixture.MapPost("/v1/chat/completions", async (HttpContext context) =>
         {
-            var tokens = await PromptAsync(context);
-            Interlocked.Increment(ref calls);
+            var (tokens, speed) = await PromptAsync(context);
+            if (speed && Interlocked.Increment(ref speedCalls) == 1)
+            {
+                context.Response.StatusCode = 503;
+                return;
+            }
             context.Response.ContentType = "text/event-stream";
+            if (speed)
+            {
+                await context.Response.WriteAsync("data: {\"choices\":[{\"delta\":{\"content\":\"1\"}}]}\n\n");
+                await Task.Delay(80, context.RequestAborted);
+                await context.Response.WriteAsync("data: {\"choices\":[{\"delta\":{\"content\":\"2\"}}]}\n\n");
+                await Task.Delay(600, context.RequestAborted);
+                await context.Response.WriteAsync("data: {\"usage\":{\"completion_tokens\":11}}\n\ndata: [DONE]\n\n");
+                return;
+            }
+            Interlocked.Increment(ref calls);
             await context.Response.WriteAsync($"data: {{\"choices\":[{{\"delta\":{{\"content\":\"ok\"}}}}],\"usage\":{{\"prompt_tokens\":{tokens},\"completion_tokens\":1}}}}\n\ndata: [DONE]\n\n");
         });
         await fixture.StartAsync();
@@ -389,32 +411,49 @@ internal static class ResourceChecks
         var endpoint = await providers.ConfigureAsync(new(null, ProviderProfile.LmStudio, ProviderMode.Managed,
             fixture.Urls.Single(), null, false, null, null), default);
         endpointId = endpoint.Id;
-        resources.ApplyObservation(Sample());
-        resources.AdvanceBenchmarks(providers, default);
-        clock.Advance(301);
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(20));
         JsonElement Profile() => JsonSerializer.SerializeToElement(resources.View(providers), SnapshotFile<ResourceData>.Json)
             .GetProperty("models")[0].GetProperty("profile");
-        while (Profile().ValueKind == JsonValueKind.Null || Profile().GetProperty("measurements").GetArrayLength() < 4)
+        var worker = resources.RunAsync(providers, deadline.Token);
+        var model = providers.View.Models.Single();
+        try
         {
-            resources.ApplyObservation(Sample());
-            resources.AdvanceBenchmarks(providers, deadline.Token);
-            await Task.Delay(25, deadline.Token);
+            Check(speedCalls == 0 && calls == 0, "the background worker waits for local idle time");
+            clock.Advance(301);
+            while (Profile().ValueKind == JsonValueKind.Null || Profile().GetProperty("measurements").GetArrayLength() < 4)
+                await Task.Delay(25, deadline.Token);
+            Check(speedCalls == 1 && Profile().GetProperty("speed").GetProperty("error").ValueKind == JsonValueKind.String,
+                "failed speed samples back off while warm qualification proceeds");
+            clock.Advance(300);
+            while (resources.RouteTiming(model, Chat.Operation).GenerationTokensPerSecond is null)
+                await Task.Delay(25, deadline.Token);
+            Check(resources.RouteTiming(model, Chat.Operation).GenerationTokensPerSecond > 20 && speedCalls == 2,
+                "idle retry measures generation between content chunks without counting the stream footer");
         }
-        Check(calls == 4 && loads == 0 && unloads == 0 && loaded,
-            "idle LM Studio qualification measures warm passes without replacing the loaded configuration");
-        clock.Advance(301);
-        resources.ApplyObservation(Sample());
-        resources.AdvanceBenchmarks(providers, deadline.Token);
-        await Task.Delay(100, deadline.Token);
-        Check(calls == 4 && !Profile().GetProperty("complete").GetBoolean(),
-            "deferred cold qualification stays incomplete and does not repeat warm work");
+        finally
+        {
+            await deadline.CancelAsync();
+            await worker;
+        }
+        Check(calls == 4 && loads == 0 && unloads == 0 && loaded && !Profile().GetProperty("complete").GetBoolean(),
+            "speed evidence does not certify a cold load or require replacing the running LM Studio configuration");
+        using (var restarted = new ResourceProtection(directory, settings, (_, _) => Sample(), clock: clock))
+        {
+            await restarted.InitializeAsync();
+            restarted.ApplyObservation(Sample());
+            Check(restarted.RouteTiming(model, Chat.Operation).GenerationTokensPerSecond > 20, "generation speed survives restart");
+            contextLength = 1024;
+            await providers.RefreshAsync(endpointId, default);
+            Check(restarted.RouteTiming(providers.View.Models.Single(), Chat.Operation).GenerationTokensPerSecond is null,
+                "a changed runtime configuration invalidates generation speed");
+        }
+        using var releaseDeadline = new CancellationTokenSource(TimeSpan.FromSeconds(20));
         await settings.UpdateAsync(value => value with { Role = LocalRole.Leech });
         while (resources.Status.State == ContributionState.Withdrawing)
         {
-            await resources.AdvanceWithdrawalAsync(providers, deadline.Token);
+            await resources.AdvanceWithdrawalAsync(providers, releaseDeadline.Token);
             resources.ApplyObservation(Sample());
-            await Task.Delay(25, deadline.Token);
+            await Task.Delay(25, releaseDeadline.Token);
         }
         Check(!loaded && unloads == 1 && resources.Status.State == ContributionState.ManualLeech,
             "resource withdrawal still unloads the same protected LM Studio instance");
@@ -526,10 +565,12 @@ internal static class ResourceChecks
         }
     }
 
-    private static async Task<int> PromptAsync(HttpContext context)
+    private static async Task<(int Tokens, bool Speed)> PromptAsync(HttpContext context)
     {
         using var document = await JsonDocument.ParseAsync(context.Request.Body, cancellationToken: context.RequestAborted);
-        return document.RootElement.GetProperty("messages")[0].GetProperty("content").GetString()!.Count(value => value == ' ') + 3;
+        var request = document.RootElement;
+        return (request.GetProperty("messages")[0].GetProperty("content").GetString()!.Count(value => value == ' ') + 3,
+            request.GetProperty("max_tokens").GetInt32() == 64);
     }
 
     private static void Check(bool condition, string description)

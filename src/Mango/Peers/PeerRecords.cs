@@ -54,7 +54,7 @@ internal sealed record ObservedDeployment(string Id, string DisplayName, string?
     bool Busy = false, int BenchmarksComplete = 0, int BenchmarksPartial = 0, ServingReadiness? Readiness = null,
     ModelOrigin? Origin = null, string? SourceDevice = null, string[]? ProviderIdentifiers = null, bool Yolo = false);
 internal sealed record ObservedWorkload(Workload Limit, double? PromptMilliseconds, double? CacheSavingsMilliseconds,
-    int Slots = 1, bool Qualified = false);
+    int Slots = 1, bool Qualified = false, double? GenerationTokensPerSecond = null);
 internal sealed record NodeCatalog(Guid Node, Revision Revision, string Name, LocalRole Role, ObservedDeployment[] Models,
     ContributionState? ResourceState = null, string? SchedulingEpoch = null, ObservedProvider[]? Providers = null,
     string? ContributionReason = null, LocalRole? PreferredRole = null, BenchmarkPolicy? LocalBenchmarkPolicy = null,
@@ -318,7 +318,8 @@ internal static class PeerValidation
                     (model.Workloads is null || model.Workloads.Length <= 6 && model.Workloads.All(work => work is not null &&
                         model.Operations.Contains(work.Limit.Operation) && work.Limit.Units > 0 && work.Limit.Items > 0 &&
                         work.Limit.MediaItems >= 0 && work.Slots is >= 1 and <= 128 && work.PromptMilliseconds is null or >= 0 &&
-                        work.CacheSavingsMilliseconds is null or >= 0)))) &&
+                        work.CacheSavingsMilliseconds is null or >= 0 &&
+                        work.GenerationTokensPerSecond is null or (> 0 and < double.PositiveInfinity))))) &&
             records.Catalogs.Select(catalog => catalog.Node).Distinct().Count() == records.Catalogs.Length &&
             records.Retired.All(node => node is not null && PeerCredentials.IsSecret(node.Verifier) && node.Node != Guid.Empty && Valid(node.Revision)) &&
             records.Retired.Select(node => node.Verifier).Distinct(StringComparer.OrdinalIgnoreCase).Count() == records.Retired.Length;

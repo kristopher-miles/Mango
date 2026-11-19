@@ -14,6 +14,9 @@ internal sealed record BenchmarkResult(TimeSpan Elapsed, int? PromptTokens, int?
 internal static class BenchmarkProtocol
 {
     private const int Output = 16;
+    internal const string SpeedPass = "speed";
+    internal const int SpeedContext = 128;
+    private const int SpeedOutput = 64;
 
     public static (string Name, Workload Workload)[] Plan(Deployment model, InferenceOperation operation, Workload limit)
     {
@@ -49,6 +52,7 @@ internal static class BenchmarkProtocol
         int? promptTokens = null;
         int? outputTokens = null;
         TimeSpan? firstToken = null;
+        TimeSpan? lastToken = null;
         double? promptMilliseconds = null;
         double? tokensPerSecond = null;
         int? cachedTokens = null;
@@ -87,10 +91,13 @@ internal static class BenchmarkProtocol
                             throw new ProviderFailure(503, "The provider could not allocate benchmark memory.", allocationFailure: true);
                         throw new ProviderFailure(502, "The provider reported an error during the benchmark.");
                     }
-                    if (firstToken is null && body.Get("choices").Items().Any(item =>
+                    if (body.Get("choices").Items().Any(item =>
                         item.Get("delta").Text("content") is { Length: > 0 } ||
                         item.Get("delta").Text("reasoning_content") is { Length: > 0 }))
-                        firstToken = Stopwatch.GetElapsedTime(started);
+                    {
+                        lastToken = Stopwatch.GetElapsedTime(started);
+                        firstToken ??= lastToken;
+                    }
                     (promptTokens, outputTokens, promptMilliseconds, tokensPerSecond, cachedTokens) =
                         ReadMetrics(body, (promptTokens, outputTokens, promptMilliseconds, tokensPerSecond, cachedTokens));
                 }
@@ -111,7 +118,7 @@ internal static class BenchmarkProtocol
             }
             settled();
             var elapsed = Stopwatch.GetElapsedTime(started);
-            if (operation is InferenceOperation.Chat or InferenceOperation.Embeddings or InferenceOperation.SystemOne)
+            if (pass != SpeedPass && operation is (InferenceOperation.Chat or InferenceOperation.Embeddings or InferenceOperation.SystemOne))
             {
                 var reserved = operation == InferenceOperation.Embeddings ? 0 : operation == InferenceOperation.Chat ? Output : 128;
                 var target = workload.Units - reserved;
@@ -121,8 +128,8 @@ internal static class BenchmarkProtocol
                     throw new ProviderFailure(502, "The provider did not confirm the intended benchmark context was processed.");
             }
             return new(elapsed, promptTokens, outputTokens, firstToken, promptMilliseconds,
-                tokensPerSecond ?? (outputTokens is > 1 && firstToken is { } first && elapsed > first
-                    ? (outputTokens - 1) / (elapsed - first).TotalSeconds : null), cachedTokens,
+                tokensPerSecond is > 0 ? tokensPerSecond : outputTokens is > 1 && firstToken is { } first && lastToken is { } last && last > first
+                    ? (outputTokens - 1) / (last - first).TotalSeconds : null, cachedTokens,
                 pass == "reuse" && cachedTokens.HasValue ? cachedTokens > 0 : null);
         }
         catch (JsonException)
@@ -165,9 +172,14 @@ internal static class BenchmarkProtocol
             {
                 var message = new JsonObject { ["role"] = "user" };
                 payload["messages"] = new JsonArray(message);
-                payload["max_tokens"] = Output;
+                payload["max_tokens"] = pass == SpeedPass ? SpeedOutput : Output;
                 payload["stream"] = true;
                 payload["stream_options"] = new JsonObject { ["include_usage"] = true };
+                if (pass == SpeedPass)
+                {
+                    message["content"] = "List the numbers from 1 to 100 in order, one number per line.";
+                    break;
+                }
                 if (workload.Items != 1)
                     payload["n"] = workload.Items;
                 var input = await FitAsync((int)workload.Units - Output, prefix, async text =>

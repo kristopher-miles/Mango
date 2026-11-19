@@ -525,7 +525,8 @@ internal sealed partial class PeerNetwork
             var timing = protection.RouteTiming(model, operation);
             var qualified = protection.QualifiedUnits(model, endpoint, operation);
             return new ObservedWorkload(budget.Workload with { Units = qualified ?? budget.Workload.Units },
-                timing.PromptMilliseconds, timing.CacheSavingsMilliseconds, slots, Qualified: qualified is not null);
+                timing.PromptMilliseconds, timing.CacheSavingsMilliseconds, slots, Qualified: qualified is not null,
+                GenerationTokensPerSecond: timing.GenerationTokensPerSecond);
         }).OfType<ObservedWorkload>().ToArray();
         return new(model.Id, DisplayName(model.Model.DisplayName), model.Model.Variant, model.Version, model.Model.Inputs,
             model.Model.Outputs, model.Model.Operations, model.Context, model.ContextSource, model.Online, model.Instance is not null,

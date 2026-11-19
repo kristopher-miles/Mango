@@ -30,7 +30,7 @@ internal sealed partial class ResourceProtection : IDisposable
     private TaskCompletionSource nextObservation = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private DateTimeOffset? highSince;
     private DateTimeOffset? quietSince;
-    private DateTimeOffset? lastClient;
+    private DateTimeOffset lastClient;
     private ResourceEvent? lastEvent;
     private bool withdraw;
     private string? withdrawalReason;
@@ -66,6 +66,7 @@ internal sealed partial class ResourceProtection : IDisposable
     public async Task InitializeAsync()
     {
         await store.LoadAsync(ResourceData.Empty);
+        lastClient = clock.GetUtcNow();
         unsafePlacements.UnionWith(store.Value.Unsafe);
         policy = settings.Value.BenchmarkPolicy;
         var hold = store.Value.Hold;
@@ -232,7 +233,7 @@ internal sealed partial class ResourceProtection : IDisposable
     }
 
     public Admission TryAdmit(Deployment model, EndpointStatus endpoint, Workload workload, ResourceWork work,
-        bool profiling = false, long payloadBytes = 0)
+        bool profiling = false, long payloadBytes = 0, bool speedSample = false)
     {
         if (model.Yolo)
         {
@@ -278,7 +279,13 @@ internal sealed partial class ResourceProtection : IDisposable
                 return Refuse("An allocation failed for this placement. Update its local limits or retry explicitly.");
             if (work == ResourceWork.Execute && workload.MediaItems > 0 && budget.Workload.MediaItems == 0)
                 return Refuse("A host media memory qualification is required for this workload.");
-            var cost = work == ResourceWork.Load ? budget.Load : ProjectExecutionCost(budget, workload, payloadBytes);
+            var cost = work switch
+            {
+                ResourceWork.Load => budget.Load,
+                ResourceWork.Benchmark when speedSample && budget.Estimated =>
+                    EstimateBudget(model, workload.Operation, budget.Configuration, budget.Runtime, workload).Execute,
+                _ => ProjectExecutionCost(budget, workload, payloadBytes)
+            };
             if (work == ResourceWork.Load && cost.RamBytes == 0 && cost.DeviceBytes.Values.All(value => value == 0))
                 return Refuse("Set a peak memory allowance before loading this model.");
             var overlap = !endpoint.ExclusiveHost && AllowsOverlap(budget) &&

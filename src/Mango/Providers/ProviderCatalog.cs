@@ -880,7 +880,8 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
         return new(settled, failure, execution);
     }
 
-    internal async Task<BenchmarkResult> BenchmarkAsync(string id, Workload workload, string pass, CancellationToken cancellation)
+    internal async Task<BenchmarkResult> BenchmarkAsync(string id, Workload workload, string pass, string runtime,
+        CancellationToken cancellation)
     {
         Deployment model;
         ProviderAdapter adapter;
@@ -892,11 +893,12 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
             var endpoint = View.Endpoints.First(item => item.Id == model.EndpointId);
             if (ExclusiveBlocker(View, endpoint) is { } blocker)
                 throw new ProviderFailure(409, blocker);
-            if (!model.Eligible || model.Busy || model.Instance?.Busy == true || uncertainModels.ContainsKey(id))
+            if (!model.Eligible || model.Instance?.ResourceFingerprint != runtime || model.Busy ||
+                model.Instance?.Busy == true || uncertainModels.ContainsKey(id))
                 throw new ProviderFailure(409, "The benchmark deployment is not settled and ready.");
             adapter = adapters[model.EndpointId];
             reservation = resources!.TryAdmit(model, endpoint,
-                workload, ResourceWork.Benchmark, profiling: true).Require();
+                workload, ResourceWork.Benchmark, profiling: true, speedSample: pass == BenchmarkProtocol.SpeedPass).Require();
             MarkActive(model, true);
         }
         finally { ReleaseOperation(); }

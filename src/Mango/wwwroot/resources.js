@@ -15,7 +15,10 @@ function renderResourceProfile(model) {
     model.canColdLoad ? "" : "Cold-load measurement is unavailable for this provider."].filter(Boolean).join(" ");
   document.querySelector("#resource-retry").disabled = !model.budget || active;
   document.querySelector("#measurement-title").textContent = `${model.identifier} · ${operationNames[model.operation]}`;
-  document.querySelector("#resource-passes").replaceChildren(...(profile?.measurements || []).map(pass => element("li", [pass.pass, pass.elapsed,
+  const speed = profile?.speed;
+  const speedRow = speed ? [element("li", `Generation speed · ${speed.tokensPerSecond == null
+    ? speed.error || "Provider returned no usable token timing." : `${speed.tokensPerSecond.toFixed(1)} tokens/s`}`)] : [];
+  document.querySelector("#resource-passes").replaceChildren(...speedRow, ...(profile?.measurements || []).map(pass => element("li", [pass.pass, pass.elapsed,
     pass.workload.width ? `${pass.workload.width} × ${pass.workload.height}` : "",
     pass.promptTokens == null ? "" : `${pass.promptTokens} prompt tokens`,
     pass.promptMilliseconds == null ? "" : `Prompt processing ${pass.promptMilliseconds.toFixed(1)} ms`,
