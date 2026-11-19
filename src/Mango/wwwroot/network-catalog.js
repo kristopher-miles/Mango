@@ -331,12 +331,14 @@ function renderModelCard(item) {
   card.querySelector(".model-link-mark").hidden = !isLmLinkModel(item);
   card.querySelector(".badge").textContent = local ? item.local.instance ? item.local.busy || item.local.instance.busy ? "Busy" : "Loaded" : "Unloaded" : "Remote";
   const origin = facts?.origin === "local" ? "Local to LM Studio" : facts?.origin === "lmLink" ? `LM Link${facts.sourceDevice ? ` · ${facts.sourceDevice}` : ""}` : "";
-  const rate = local
-    ? resourceView?.models.find(model => model.id === item.id && model.operation === "chat")?.generationTokensPerSecond
-    : item.observed?.workloads?.find(work => work.limit.operation === "chat")?.generationTokensPerSecond;
+  const timing = local
+    ? resourceView?.models.find(model => model.id === item.id && model.operation === "chat")
+    : item.observed?.workloads?.find(work => work.limit.operation === "chat");
+  const rate = timing?.generationTokensPerSecond;
   card.querySelector(".model-facts").textContent = [identifiers.length ? `Provider ${identifiers.length === 1 ? "ID" : "IDs"} ${identifiers.join(", ")}` : "",
     origin, (facts?.operations || []).map(key => operationNames[key]).join(", "),
-    rate == null ? "" : `${rate.toFixed(1)} tokens/s`,
+    rate == null ? "" : `${rate.toFixed(1)} tokens/s (${timing.providerGenerationRate === true
+      ? "provider reported" : timing.providerGenerationRate === false ? "stream estimate" : "source unrecorded"})`,
     facts?.inputs?.length ? `${facts.inputs.join(", ")} → ${(facts.outputs || []).join(", ")}` : "Capabilities unobserved",
     facts?.tools ? "Function tools" : "", facts?.structuredOutput ? "Structured output" : "", `Context ${item.local?.context ?? item.observed?.context ?? "unconfirmed"}`].filter(Boolean).join(" · ");
   card.querySelector(".model-readiness").textContent = readinessText(item);

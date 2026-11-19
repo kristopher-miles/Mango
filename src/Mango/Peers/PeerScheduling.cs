@@ -514,9 +514,12 @@ internal sealed partial class PeerNetwork
         var workloads = model.Model.Operations.Select(operation =>
         {
             if (model.Yolo && protection?.IsAvailable(model, endpoint, operation) == true)
+            {
+                var nativeTiming = protection.RouteTiming(model, operation);
                 return new ObservedWorkload(new(operation, model.Context ?? ProviderLimits.MaxContext), null, null,
-                    Math.Clamp(model.Instance?.Slots ?? 1, 1, 256),
-                    GenerationTokensPerSecond: protection.RouteTiming(model, operation).GenerationTokensPerSecond);
+                    Math.Clamp(model.Instance?.Slots ?? 1, 1, 256), GenerationTokensPerSecond: nativeTiming.GenerationTokensPerSecond,
+                    ProviderGenerationRate: nativeTiming.ProviderGenerationRate);
+            }
             var budget = protection?.Estimate(model, endpoint, operation);
             if (budget is null || protection?.IsAvailable(model, endpoint, operation) != true)
                 return null;
@@ -527,7 +530,7 @@ internal sealed partial class PeerNetwork
             var qualified = protection.QualifiedUnits(model, endpoint, operation);
             return new ObservedWorkload(budget.Workload with { Units = qualified ?? budget.Workload.Units },
                 timing.PromptMilliseconds, timing.CacheSavingsMilliseconds, slots, Qualified: qualified is not null,
-                GenerationTokensPerSecond: timing.GenerationTokensPerSecond);
+                GenerationTokensPerSecond: timing.GenerationTokensPerSecond, ProviderGenerationRate: timing.ProviderGenerationRate);
         }).OfType<ObservedWorkload>().ToArray();
         return new(model.Id, DisplayName(model.Model.DisplayName), model.Model.Variant, model.Version, model.Model.Inputs,
             model.Model.Outputs, model.Model.Operations, model.Context, model.ContextSource, model.Online, model.Instance is not null,

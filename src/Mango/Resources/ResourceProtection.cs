@@ -102,7 +102,7 @@ internal sealed partial class ResourceProtection : IDisposable
             {
                 policy = next;
                 SetBenchmarkReady(next == BenchmarkPolicy.Never);
-                if (next == BenchmarkPolicy.Never)
+                if (next == BenchmarkPolicy.Never && !runningForcedBenchmark)
                     RequestCancel(benchmarkStop);
             }
         }
@@ -121,7 +121,7 @@ internal sealed partial class ResourceProtection : IDisposable
         lock (sync)
         {
             lastClient = clock.GetUtcNow();
-            if (settings.Value.BenchmarkPolicy == BenchmarkPolicy.WhenConvenient)
+            if (settings.Value.BenchmarkPolicy == BenchmarkPolicy.WhenConvenient && !runningForcedBenchmark)
             {
                 RequestCancel(benchmarkStop);
                 interrupt = benchmark;
@@ -248,6 +248,8 @@ internal sealed partial class ResourceProtection : IDisposable
         {
             lock (sync)
             {
+                if (!profiling && ForcedBenchmarkHoldsServing)
+                    return new(AdmissionStatus.Wait, ForcedBenchmarkWait, null);
                 if (!IsAvailable(model, endpoint, workload.Operation) || work == ResourceWork.Benchmark &&
                     (!speedSample || model.Instance is null || !NativeWarmBenchmarkAllowed(settings.Value) ||
                         reservations.Any(item => !item.Settled)))
@@ -273,6 +275,8 @@ internal sealed partial class ResourceProtection : IDisposable
             if (work == ResourceWork.Load && (endpoint.Mode != ProviderMode.Managed || !endpoint.CanLoad || !model.Model.SupportsLoad))
                 return Refuse("The provider does not authorize loading this deployment.");
             var current = settings.Value;
+            if (!profiling && ForcedBenchmarkHoldsServing)
+                return new(AdmissionStatus.Wait, ForcedBenchmarkWait, null);
             if (!profiling && work != ResourceWork.Load && current.BenchmarkPolicy == BenchmarkPolicy.Now && !benchmarksReady)
                 return Refuse("The local benchmark policy requires complete profiles before inference.");
             var latest = CurrentObservation;

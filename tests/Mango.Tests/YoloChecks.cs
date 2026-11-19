@@ -57,7 +57,7 @@ internal static class YoloChecks
         fixture.MapPost("/v1/chat/completions", async (HttpContext context) =>
         {
             using var body = await JsonDocument.ParseAsync(context.Request.Body);
-            if (body.RootElement.TryGetProperty("max_tokens", out var output) && output.GetInt32() == 64)
+            if (body.RootElement.TryGetProperty("max_tokens", out var output) && output.GetInt32() == BenchmarkProtocol.SpeedOutput)
             {
                 context.Response.ContentType = "text/event-stream";
                 await context.Response.WriteAsync("data: {\"timings\":{\"predicted_per_second\":25}}\n\ndata: [DONE]\n\n");

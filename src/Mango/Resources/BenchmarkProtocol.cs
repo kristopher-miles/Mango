@@ -9,14 +9,15 @@ using Mango.Providers;
 namespace Mango.Resources;
 
 internal sealed record BenchmarkResult(TimeSpan Elapsed, int? PromptTokens, int? OutputTokens,
-    TimeSpan? FirstToken, double? PromptMilliseconds, double? TokensPerSecond, int? CachedTokens, bool? ReusedCache);
+    TimeSpan? FirstToken, double? PromptMilliseconds, double? TokensPerSecond, int? CachedTokens, bool? ReusedCache,
+    bool ProviderGenerationRate = false);
 
 internal static class BenchmarkProtocol
 {
     private const int Output = 16;
     internal const string SpeedPass = "speed";
-    internal const int SpeedContext = 128;
-    private const int SpeedOutput = 64;
+    internal const int SpeedContext = 256;
+    internal const int SpeedOutput = 128;
 
     public static Workload SampleWorkload(InferenceOperation operation) => operation switch
     {
@@ -160,7 +161,7 @@ internal static class BenchmarkProtocol
             return new(elapsed, promptTokens, outputTokens, firstToken, promptMilliseconds,
                 tokensPerSecond is > 0 ? tokensPerSecond : outputTokens is > 1 && firstToken is { } first && lastToken is { } last && last > first
                     ? (outputTokens - 1) / (last - first).TotalSeconds : null, cachedTokens,
-                pass == "reuse" && cachedTokens.HasValue ? cachedTokens > 0 : null);
+                pass == "reuse" && cachedTokens.HasValue ? cachedTokens > 0 : null, ProviderGenerationRate: tokensPerSecond is > 0);
         }
         catch (JsonException)
         {
@@ -178,9 +179,15 @@ internal static class BenchmarkProtocol
         var usage = body.Get("usage");
         var timings = body.Get("timings");
         var cached = Nonnegative(usage.Get("prompt_tokens_details").Get("cached_tokens")) ?? Nonnegative(timings.Get("cache_n"));
-        return (usage.Number("prompt_tokens") ?? previous.Prompt, usage.Number("completion_tokens") ?? previous.Output,
+        var decoded = Nonnegative(timings.Get("predicted_n"));
+        var decodeMilliseconds = Number(timings.Get("predicted_ms"));
+        var rate = Number(timings.Get("predicted_per_second"));
+        if (rate is not > 0 && decoded is > 0 && decodeMilliseconds is > 0)
+            rate = decoded.Value * 1000d / decodeMilliseconds.Value;
+        return (Nonnegative(usage.Get("prompt_tokens")) ?? Nonnegative(timings.Get("prompt_n")) ?? previous.Prompt,
+            Nonnegative(usage.Get("completion_tokens")) ?? decoded ?? previous.Output,
             Number(timings.Get("prompt_ms")) ?? previous.Milliseconds,
-            Number(timings.Get("predicted_per_second")) ?? previous.Rate, cached ?? previous.Cache);
+            rate is > 0 and < double.PositiveInfinity ? rate : previous.Rate, cached ?? previous.Cache);
     }
 
     private static int? Nonnegative(JsonElement value) => value.ValueKind == JsonValueKind.Number &&

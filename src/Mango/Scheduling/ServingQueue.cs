@@ -334,6 +334,7 @@ internal sealed class ServingQueue : IAsyncDisposable
             pending = entries.Values.Where(entry => entry.State.State == AttemptState.Waiting).ToArray();
             active = entries.Values.Where(entry => entry.State.State == AttemptState.Running).ToList();
         }
+        var forcedBenchmark = providers.Resources?.ForcedBenchmarkHoldsServing == true;
         foreach (var entry in pending)
         {
             var work = entry.Work!;
@@ -343,10 +344,19 @@ internal sealed class ServingQueue : IAsyncDisposable
                 Finish(entry, Maintenance());
             else if (Expired(entry))
                 Finish(entry, Expiration(entry));
-            else if ((entry.Placement = providers.Placement(work.Payload.Shape, work.Ticket.Deployment)) is null)
+            else if (!forcedBenchmark && (entry.Placement = providers.Placement(work.Payload.Shape, work.Ticket.Deployment)) is null)
                 Finish(entry, Rejected("The local deployment no longer has eligible resources."));
         }
         var ready = pending.Where(entry => entry.State.State == AttemptState.Waiting).ToArray();
+        if (forcedBenchmark)
+        {
+            if (providers.Resources?.ForcedBenchmarkDisplacesWork == true && loading is { Work.IsCompleted: false } starting &&
+                starting.Entry.Stop is { } loadStop)
+                _ = loadStop.CancelAsync();
+            foreach (var entry in ready)
+                WaitingReason(entry, ResourceProtection.ForcedBenchmarkWait);
+            return ready.Min(entry => (DateTimeOffset?)entry.Work!.Ticket.QueueUntil);
+        }
         foreach (var entry in ready.Where(entry => entry.Work!.Protection is not null))
         {
             var work = entry.Work!;

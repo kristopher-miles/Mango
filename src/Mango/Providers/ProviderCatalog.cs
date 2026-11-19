@@ -414,6 +414,8 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
         {
             var model = Find(id);
             target = model;
+            if (scheduled && resources?.ForcedBenchmarkHoldsServing == true)
+                throw new ProviderFailure(503, ResourceProtection.ForcedBenchmarkWait, capacityWait: true);
             if (load && (scheduled || benchmark.HasValue) && model.ServingDisabled)
                 throw new ProviderFailure(409, "Serving is disabled for this model.");
             var adapter = adapters[model.EndpointId];
@@ -766,6 +768,8 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
     public async Task PreparePlacementAsync(ServingPlacement placement, Func<string, Task> displaced,
         CancellationToken cancellation)
     {
+        if (resources?.ForcedBenchmarkHoldsServing == true)
+            throw new ProviderFailure(503, ResourceProtection.ForcedBenchmarkWait, capacityWait: true);
         var target = placement.Model;
         var operationKind = placement.Workload.Operation;
         if (target.Instance is not null)

@@ -54,7 +54,7 @@ internal sealed record ObservedDeployment(string Id, string DisplayName, string?
     bool Busy = false, int BenchmarksComplete = 0, int BenchmarksPartial = 0, ServingReadiness? Readiness = null,
     ModelOrigin? Origin = null, string? SourceDevice = null, string[]? ProviderIdentifiers = null, bool Yolo = false);
 internal sealed record ObservedWorkload(Workload Limit, double? PromptMilliseconds, double? CacheSavingsMilliseconds,
-    int Slots = 1, bool Qualified = false, double? GenerationTokensPerSecond = null);
+    int Slots = 1, bool Qualified = false, double? GenerationTokensPerSecond = null, bool? ProviderGenerationRate = null);
 internal sealed record NodeCatalog(Guid Node, Revision Revision, string Name, LocalRole Role, ObservedDeployment[] Models,
     ContributionState? ResourceState = null, string? SchedulingEpoch = null, ObservedProvider[]? Providers = null,
     string? ContributionReason = null, LocalRole? PreferredRole = null, BenchmarkPolicy? LocalBenchmarkPolicy = null,

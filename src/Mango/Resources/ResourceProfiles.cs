@@ -13,8 +13,24 @@ internal sealed partial class ResourceProtection
     private bool benchmarksReady;
     private string? benchmarkDeployment;
     private string? benchmarkPass;
-    private (string Deployment, InferenceOperation Operation)? requestedBenchmark;
+    private sealed record ForcedBenchmark(string Deployment, InferenceOperation Operation, bool SampleOnly);
+    private ForcedBenchmark? requestedBenchmark;
+    private bool preparingForcedBenchmark;
+    private bool runningForcedBenchmark;
+    private string? forcedBenchmarkError;
     private MeasurementWindow? measurement;
+
+    internal const string ForcedBenchmarkWait = "Waiting for a forced benchmark to finish.";
+
+    internal bool ForcedBenchmarkHoldsServing
+    {
+        get { lock (sync) return requestedBenchmark is not null || runningForcedBenchmark; }
+    }
+
+    internal bool ForcedBenchmarkDisplacesWork
+    {
+        get { lock (sync) return ForcedBenchmarkHoldsServing && !preparingForcedBenchmark; }
+    }
 
     public bool ServingAllowed
     {
@@ -64,7 +80,8 @@ internal sealed partial class ResourceProtection
         }
     }
 
-    public (double? PromptMilliseconds, double? CacheSavingsMilliseconds, double? GenerationTokensPerSecond) RouteTiming(
+    public (double? PromptMilliseconds, double? CacheSavingsMilliseconds, double? GenerationTokensPerSecond,
+        bool? ProviderGenerationRate) RouteTiming(
         Deployment model, InferenceOperation operation)
     {
         lock (sync)
@@ -77,7 +94,7 @@ internal sealed partial class ResourceProtection
                 .Select(item => item.PromptMilliseconds ?? item.FirstToken?.TotalMilliseconds).OfType<double>()
                 .DefaultIfEmpty().Average();
             return (cold is > 0 ? cold : null, cold is > 0 && warm is > 0 && warm < cold ? cold - warm : null,
-                GenerationRate(profile));
+                GenerationRate(profile), profile?.Speed is { TokensPerSecond: > 0 } speed ? speed.ProviderGenerationRate : null);
         }
     }
 
@@ -125,6 +142,7 @@ internal sealed partial class ResourceProtection
                     item.Workload.Operation == target.Operation), target.Configuration, target.Model.Instance?.ResourceFingerprint),
                 Profile = target.Profile,
                 GenerationTokensPerSecond = GenerationRate(target.Profile),
+                ProviderGenerationRate = target.Profile?.Speed is { TokensPerSecond: > 0 } speed ? speed.ProviderGenerationRate : null,
                 Readiness = Readiness(target.Model, target.Endpoint, target.Operation, ProviderCatalog.ExclusiveBlocker(catalog, target.Endpoint)),
                 Unsafe = target.Budget is { } budget && unsafePlacements.Contains(FaultKey(budget)),
                 target.Model.Context,
@@ -136,6 +154,7 @@ internal sealed partial class ResourceProtection
                 Status = status, Observation = observed, LastEvent = lastEvent, BenchmarkReady = benchmarksReady,
                 Benchmark = benchmarkDeployment is not null ? new { Deployment = benchmarkDeployment, Pass = benchmarkPass }
                     : requestedBenchmark is { } requested ? new { requested.Deployment, Pass = (string?)"Waiting for local resources" } : null,
+                Forced = ForcedBenchmarkHoldsServing, ForcedBenchmarkError = forcedBenchmarkError,
                 Models = targets, RecoveryWarning = store.RecoveryWarning
             };
         }
@@ -205,7 +224,7 @@ internal sealed partial class ResourceProtection
         ProviderIdentity.Hash(configuration, runtime, JsonSerializer.Serialize(budget, SnapshotFile<ResourceData>.Json));
 
     public async Task RetryBenchmarkAsync(string deployment, InferenceOperation operation, ProviderCatalog providers,
-        CancellationToken cancellation)
+        CancellationToken cancellation, bool sampleOnly = false)
     {
         var target = Targets(providers.View).FirstOrDefault(item => item.Model.Id == deployment && item.Operation == operation)
             ?? throw new ProviderFailure(404, "This deployment was not found.");
@@ -213,28 +232,58 @@ internal sealed partial class ResourceProtection
             throw new ProviderFailure(409, "Enable serving for this model before benchmarking it.");
         if (target.Budget is not { } budget)
             throw new ProviderFailure(409, "Set a local memory limit before benchmarking this deployment.");
-        lock (sync)
-            if (benchmarkDeployment == deployment && benchmark is { IsCompleted: false } ||
-                reservations.Any(item => item.Deployment == deployment && !item.Settled))
-                throw new ProviderFailure(409, "Wait for this deployment's benchmark to settle before retrying.");
-        await store.UpdateAsync(data => data with
-        {
-            Unsafe = data.Unsafe.Where(item => item != FaultKey(budget)).ToArray(),
-            Profiles = data.Profiles.Where(item => item.Deployment != deployment || item.Operation != operation)
-                .Concat(target.Profile is { } profile && profile.Measurements.Any(pass => pass.Pass == "cold")
-                    ? [profile with { Complete = false, Error = null, Speed = null,
-                        Measurements = profile.Measurements.Where(pass => pass.Pass == "cold").ToArray() }]
-                    : []).ToArray()
-        }, cancellation);
+        var request = new ForcedBenchmark(deployment, operation, sampleOnly);
         lock (sync)
         {
-            unsafePlacements.Remove(FaultKey(budget));
-            if (settings.Value.BenchmarkPolicy == BenchmarkPolicy.Now)
-                SetBenchmarkReady(false);
-            requestedBenchmark = (deployment, operation);
+            if (settings.Value.Role != LocalRole.Contributor)
+                throw new ProviderFailure(409, "Turn on contribution before forcing a benchmark.");
+            if (observed is null)
+                throw new ProviderFailure(503, "Wait for current local resource observations before forcing a benchmark.");
+            if (ForcedBenchmarkHoldsServing || benchmark is { IsCompleted: false })
+                throw new ProviderFailure(409, "Wait for the existing benchmark to settle.");
+            if (sampleOnly && target.Model.Instance is null && (!target.CanColdLoad || !target.HasLoadAllowance))
+                throw new ProviderFailure(409, "Mango needs a verified peak-memory allowance and managed load and unload before sampling this cold model.");
+            preparingForcedBenchmark = true;
+            requestedBenchmark = request;
+            forcedBenchmarkError = null;
         }
-        Changed?.Invoke();
-        Signal();
+        try
+        {
+            if (!sampleOnly)
+                await store.UpdateAsync(data => data with
+                {
+                    Unsafe = data.Unsafe.Where(item => item != FaultKey(budget)).ToArray(),
+                    Profiles = data.Profiles.Where(item => item.Deployment != deployment || item.Operation != operation)
+                        .Concat(target.Profile is { } profile && profile.Measurements.Any(pass => pass.Pass == "cold")
+                            ? [profile with { Complete = false, Error = null, Speed = null,
+                                Measurements = profile.Measurements.Where(pass => pass.Pass == "cold").ToArray() }]
+                            : []).ToArray()
+                }, cancellation);
+            lock (sync)
+            {
+                if (!sampleOnly)
+                {
+                    unsafePlacements.Remove(FaultKey(budget));
+                    if (settings.Value.BenchmarkPolicy == BenchmarkPolicy.Now)
+                        SetBenchmarkReady(false);
+                }
+                foreach (var lease in reservations.Where(item => item.Running && item.Work != ResourceWork.Benchmark))
+                    RequestCancel(lease.Stop);
+            }
+        }
+        catch
+        {
+            lock (sync)
+                requestedBenchmark = null;
+            throw;
+        }
+        finally
+        {
+            lock (sync)
+                preparingForcedBenchmark = false;
+            Changed?.Invoke();
+            Signal();
+        }
     }
 
     internal InferenceOperation LoadOperation(Deployment model, EndpointStatus endpoint)
@@ -353,12 +402,23 @@ internal sealed partial class ResourceProtection
                 benchmarkStop = null;
                 benchmark = null;
                 benchmarkDeployment = benchmarkPass = null;
+                if (runningForcedBenchmark)
+                {
+                    runningForcedBenchmark = false;
+                    Changed?.Invoke();
+                }
             }
             var catalog = providers.View;
             var targets = Targets(catalog);
             SetBenchmarkReady(current.BenchmarkPolicy == BenchmarkPolicy.Never || !targets.Any(IsPending));
-            if (benchmark is not null || reservations.Any(item => !item.Settled) ||
-                observed is null || current.Role != LocalRole.Contributor)
+            if (benchmark is not null || preparingForcedBenchmark || reservations.Any(item => !item.Settled))
+                return;
+            if (current.Role != LocalRole.Contributor)
+            {
+                FailForcedBenchmark("Contribution is paused.");
+                return;
+            }
+            if (observed is null)
                 return;
             var now = clock.GetUtcNow();
             if (requestedBenchmark is null && (current.BenchmarkPolicy == BenchmarkPolicy.Never ||
@@ -369,25 +429,33 @@ internal sealed partial class ResourceProtection
             bool Protected(Target item) => status.State == ContributionState.Contributor && item.Budget is { } budget &&
                 !unsafePlacements.Contains(FaultKey(budget)) && AttributionAllows(item.Endpoint, current, observed, budget.AllowAttached);
 
+            var forced = requestedBenchmark;
+            bool Matches(Target item) => forced is null ||
+                (forced.Deployment, forced.Operation) == (item.Model.Id, item.Operation);
             var target = candidates.FirstOrDefault(item =>
-                (requestedBenchmark is null || item.Model.Yolo && requestedBenchmark == (item.Model.Id, item.Operation)) &&
+                Matches(item) && (forced is null || forced.SampleOnly || item.Model.Yolo) &&
                 CanSample(item.Model, item.Operation) &&
                 (item.Model.Yolo ? IsTextBenchmark(item.Operation) && NativeWarmBenchmarkAllowed(current) :
                     Protected(item) && Covers(item.Budget!.Workload, BenchmarkProtocol.SampleWorkload(item.Operation))) &&
-                (item.Profile?.Speed is null || item.Profile.Speed.Error is not null && now - item.Profile.Speed.At >= BenchmarkIdle));
+                (forced is not null || item.Profile?.Speed is null || item.Profile.Speed.Error is not null &&
+                    item.Profile.Speed.Attempts < 2 && now - item.Profile.Speed.At >= BenchmarkIdle));
             var speedOnly = target is not null;
-            var convenient = requestedBenchmark is null && current.BenchmarkPolicy == BenchmarkPolicy.WhenConvenient;
-            target ??= candidates.FirstOrDefault(item => IsPending(item) && Protected(item) &&
-                (requestedBenchmark is null || requestedBenchmark == (item.Model.Id, item.Operation)) &&
-                (item.Profile?.Error is null || convenient && now - item.Profile.Updated >= BenchmarkIdle) &&
+            var convenient = forced is null && current.BenchmarkPolicy == BenchmarkPolicy.WhenConvenient;
+            target ??= candidates.FirstOrDefault(item => Matches(item) && Protected(item) &&
+                (forced?.SampleOnly == true ? !item.Model.Yolo : IsPending(item)) &&
+                (forced is not null || item.Profile?.Error is null) &&
                 !(convenient && PreserveLoadedBenchmark(item, catalog) && item.CanColdLoad &&
                     item.Profile?.Measurements.Any(pass => pass.Pass is "reuse" or "warm") == true &&
                     !item.Profile.Measurements.Any(pass => pass.Pass == "cold")) &&
                 (item.Model.Instance is not null || item.Endpoint.CanLoad && item.Model.Model.SupportsLoad));
             if (target is null)
+            {
+                FailForcedBenchmark("The deployment is unavailable for benchmarking. Check its provider state and local resource limits.");
                 return;
-            var protectSelected = convenient && PreserveLoadedBenchmark(target, catalog);
+            }
+            var protectSelected = forced?.SampleOnly == true || convenient && PreserveLoadedBenchmark(target, catalog);
             requestedBenchmark = null;
+            runningForcedBenchmark = forced is not null;
             benchmarkStop = CancellationTokenSource.CreateLinkedTokenSource(stopping);
             benchmarkDeployment = target.Model.Id;
             benchmarkPass = speedOnly ? "Warm sample" : "Preparing";
@@ -397,12 +465,26 @@ internal sealed partial class ResourceProtection
                 try
                 {
                     if (speedOnly) await RunSpeedBenchmarkAsync(providers, target.Model, ProfileFor(target), cancellation);
-                    else await RunBenchmarkAsync(providers, target, protectSelected, cancellation);
+                    else await RunBenchmarkAsync(providers, target, protectSelected, forced?.SampleOnly == true, cancellation);
                 }
-                catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { }
+                catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+                {
+                    lock (sync)
+                        if (runningForcedBenchmark)
+                            forcedBenchmarkError = status.Reason ?? "The forced benchmark was interrupted.";
+                }
                 finally { Signal(); }
             }, CancellationToken.None);
         }
+    }
+
+    private void FailForcedBenchmark(string reason)
+    {
+        if (requestedBenchmark is null)
+            return;
+        requestedBenchmark = null;
+        forcedBenchmarkError = reason;
+        Changed?.Invoke();
     }
 
     // LM Studio load defaults do not reproduce a live instance's context, GPU placement or slots.
@@ -453,10 +535,17 @@ internal sealed partial class ResourceProtection
         catch (Exception error) when (error is ProviderFailure or HttpRequestException or IOException or UnauthorizedAccessException)
         {
             failure = error is ProviderFailure provider ? provider.Message : "Mango could not finish the provider speed sample.";
+            lock (sync)
+                if (runningForcedBenchmark)
+                    forcedBenchmarkError = failure;
+            if (runningForcedBenchmark && profile.Speed is { Error: null })
+                return profile;
         }
         profile = profile with
         {
-            Speed = new(clock.GetUtcNow(), result?.TokensPerSecond, failure, result?.Elapsed, result?.PromptTokens)
+            Speed = new(clock.GetUtcNow(), result?.TokensPerSecond, failure, result?.Elapsed, result?.PromptTokens,
+                Math.Min(2, (profile.Speed?.Attempts ?? 0) + 1), result?.ProviderGenerationRate,
+                result?.FirstToken, result?.OutputTokens)
         };
         await SaveProfileAsync(profile);
         return profile;
@@ -466,7 +555,8 @@ internal sealed partial class ResourceProtection
         target.Profile ?? new BenchmarkProfile(target.Model.Id, target.Configuration, target.Runtime, target.Operation,
             clock.GetUtcNow(), [], false, null);
 
-    private async Task RunBenchmarkAsync(ProviderCatalog providers, Target target, bool protectSelected, CancellationToken cancellation)
+    private async Task RunBenchmarkAsync(ProviderCatalog providers, Target target, bool protectSelected, bool sampleOnly,
+        CancellationToken cancellation)
     {
         var profile = ProfileFor(target);
         var model = target.Model;
@@ -497,7 +587,7 @@ internal sealed partial class ResourceProtection
                     profile = profile with { Runtime = runtime, Measurements = [], Speed = null };
                 await WaitForObservationAsync(cancellation);
                 var pass = EndMeasurement(new(target.Operation, model.Context ?? 1), "cold", elapsed);
-                profile = await SavePassAsync(profile, pass);
+                profile = await SavePassAsync(profile, pass, preserveCompletion: sampleOnly);
             }
             if (model.Instance is null)
             {
@@ -509,9 +599,15 @@ internal sealed partial class ResourceProtection
                 throw new ProviderFailure(409, "This operation is not supported by the loaded model.");
             if (profile.Runtime != instance.ResourceFingerprint)
                 profile = profile with { Runtime = instance.ResourceFingerprint, Measurements = [], Speed = null };
-            if (openedForBenchmark && profile.Speed is null && CanSample(model, target.Operation) &&
+            if ((sampleOnly || openedForBenchmark && profile.Speed is null) && CanSample(model, target.Operation) &&
                 Covers(target.Budget!.Workload, BenchmarkProtocol.SampleWorkload(target.Operation)))
                 profile = await RunSpeedBenchmarkAsync(providers, model, profile, cancellation);
+            if (sampleOnly)
+            {
+                if (profile.Speed is null)
+                    throw new ProviderFailure(409, "The model's current context or workload limit is too small for the sample.");
+                return;
+            }
             var plan = BenchmarkProtocol.Plan(model, target.Operation, target.Budget!.Workload);
             foreach (var (name, workload) in plan)
             {
@@ -533,16 +629,24 @@ internal sealed partial class ResourceProtection
         }
         catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
         {
-            if (settings.Value.BenchmarkPolicy == BenchmarkPolicy.Now)
-                await SaveProfileAsync(profile with { Complete = false, Error = "The benchmark was interrupted. Retry to continue." });
+            if (runningForcedBenchmark)
+                throw;
+            string? safetyFailure;
+            lock (sync)
+                safetyFailure = withdrawalCause == WithdrawalCause.Safety &&
+                    status.State is (ContributionState.Withdrawing or ContributionState.Fault) ? status.Reason : null;
+            if (safetyFailure is not null || settings.Value.BenchmarkPolicy == BenchmarkPolicy.Now)
+                await SaveProfileAsync(profile with { Complete = false, Updated = clock.GetUtcNow(),
+                    Error = safetyFailure ?? "The benchmark was interrupted. Retry to continue." });
         }
         catch (Exception error) when (error is ProviderFailure or HttpRequestException or IOException or UnauthorizedAccessException)
         {
-            await SaveProfileAsync(profile with
-            {
-                Complete = false, Updated = clock.GetUtcNow(),
-                Error = error is ProviderFailure provider ? provider.Message : "Mango could not read or save a benchmark profile."
-            });
+            var reason = error is ProviderFailure provider ? provider.Message : "Mango could not read or save a benchmark profile.";
+            lock (sync)
+                if (runningForcedBenchmark)
+                    forcedBenchmarkError = reason;
+            if (!sampleOnly)
+                await SaveProfileAsync(profile with { Complete = false, Updated = clock.GetUtcNow(), Error = reason });
         }
         finally
         {
@@ -629,12 +733,15 @@ internal sealed partial class ResourceProtection
         }
     }
 
-    private async Task<BenchmarkProfile> SavePassAsync(BenchmarkProfile profile, BenchmarkMeasurement pass)
+    private async Task<BenchmarkProfile> SavePassAsync(BenchmarkProfile profile, BenchmarkMeasurement pass,
+        bool preserveCompletion = false)
     {
+        if (preserveCompletion && profile.Measurements.FirstOrDefault(item => item.Pass == pass.Pass)?.ObservedIncrement is { } known)
+            pass = pass with { ObservedIncrement = pass.ObservedIncrement is { } fresh ? Maximum(known, fresh) : known };
         profile = profile with
         {
             Updated = clock.GetUtcNow(), Measurements = profile.Measurements.Where(item => item.Pass != pass.Pass).Append(pass).ToArray(),
-            Complete = false, Error = null
+            Complete = preserveCompletion && profile.Complete, Error = preserveCompletion ? profile.Error : null
         };
         await SaveProfileAsync(profile);
         return profile;

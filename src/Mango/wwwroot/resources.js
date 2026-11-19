@@ -9,18 +9,22 @@ let resourceView, resourceLoading = false, budgetWriter, qualificationKey;
 function bytes(value) { return value == null ? "unavailable" : `${(value / mib).toFixed(1)} MiB`; }
 function percent(value) { return value == null ? "unavailable" : `${value.toFixed(0)}%`; }
 function renderResourceProfile(model) {
-  const profile = model.profile, active = resourceView.benchmark?.deployment === model.id;
+  const profile = model.profile;
   document.querySelector("#resource-profile").textContent = [model.unsafe ? "An allocation failed. Correct the limits or explicitly retry before using this placement." : "",
     profile?.complete ? "Benchmark complete." : profile?.speed?.elapsed ? "Warm benchmark recorded." :
       profile?.measurements.length ? "Benchmark measurements are incomplete." : "No benchmark measurements.",
     profile?.error,
     model.canColdLoad ? "" : "Cold-load measurement is unavailable for this provider."].filter(Boolean).join(" ");
-  document.querySelector("#resource-retry").disabled = !model.budget || active;
+  document.querySelector("#resource-retry").disabled = !model.budget || !!resourceView.benchmark;
   document.querySelector("#measurement-title").textContent = `${model.identifier} · ${operationNames[model.operation]}`;
   const speed = profile?.speed;
   const speedRow = speed ? [element("li", ["Warm sample", speed.error,
-    speed.elapsed, speed.promptTokens == null ? "" : `${speed.promptTokens} prompt tokens`,
-    speed.tokensPerSecond == null ? "" : `${speed.tokensPerSecond.toFixed(1)} tokens/s`,
+    speed.elapsed == null ? "" : `Request ${speed.elapsed}`,
+    speed.firstToken == null ? "" : `First token ${speed.firstToken}`,
+    speed.promptTokens == null ? "" : `${speed.promptTokens} prompt tokens`,
+    speed.outputTokens == null ? "" : `${speed.outputTokens} generated tokens`,
+    speed.tokensPerSecond == null ? "" : `${speed.tokensPerSecond.toFixed(1)} tokens/s (${speed.providerGenerationRate === true
+      ? "provider reported" : speed.providerGenerationRate === false ? "stream estimate" : "source unrecorded"})`,
     !speed.error && model.operation === "chat" && speed.tokensPerSecond == null ? "Generation speed unavailable" : ""
   ].filter(Boolean).join(" · "))] : [];
   document.querySelector("#resource-passes").replaceChildren(...speedRow, ...(profile?.measurements || []).map(pass => element("li", [pass.pass, pass.elapsed,
@@ -180,7 +184,8 @@ async function loadResources() {
     document.querySelector("#resource-release").hidden = state.state !== "fault";
     document.querySelector("#resource-observation").textContent = reading ? [`Free RAM ${bytes(reading.freeRam)}`, `External CPU ${percent(reading.externalCpu)}`, `External GPU ${percent(reading.externalGpu)}`,
       ...reading.devices.map(device => device.integrated ? `${device.name} uses shared RAM` : `${device.name}: ${bytes(device.usedBytes)} of ${bytes(device.totalBytes)}`), reading.limitation, resourceView.recoveryWarning].filter(Boolean).join(" · ") : "Waiting for Windows observations.";
-    document.querySelector("#resource-benchmark").textContent = resourceView.benchmark ? `Benchmark running · ${resourceView.benchmark.pass}` : view?.settings.benchmarkPolicy === "now" && !resourceView.benchmarkReady ? "Complete local benchmarks are required before serving." : "No benchmark is running.";
+    document.querySelector("#resource-benchmark").textContent = resourceView.benchmark ? `${resourceView.forced ? "Forced benchmark" : "Benchmark"} · ${resourceView.benchmark.pass}` :
+      resourceView.forcedBenchmarkError || (view?.settings.benchmarkPolicy === "now" && !resourceView.benchmarkReady ? "Complete local benchmarks are required before serving." : "No benchmark is running.");
     drawResources(); renderQualification();
     if (catalogView) renderServingModels();
     const attention = document.querySelector("#overview-attention"), items = [];
@@ -197,5 +202,5 @@ document.querySelector("#chart-device").addEventListener("change", drawResources
 document.addEventListener("visibilitychange", () => { if (document.hidden) resourceHistory.pause(); });
 document.addEventListener("mango:route", () => { if (!["overview", "serving", "protection"].includes(route.group)) resourceHistory.pause(); });
 for (const [id, feedback, work] of [["resource-refresh", "protection-feedback", loadResources], ["resource-release", "protection-feedback", () => api("resources/release", {})],
-  ["resource-retry", "resource-feedback", () => { const [deployment, operation] = resourceTarget.value.split("/"); return api("resources/retry", { deployment, operation }); }]])
+  ["resource-retry", "resource-feedback", () => { const [deployment, operation] = resourceTarget.value.split("/"); return api("resources/retry", { deployment, operation, sampleOnly: true }); }]])
   document.querySelector(`#${id}`).addEventListener("click", event => perform(event.currentTarget, document.querySelector(`#${feedback}`), async () => { await work(); await loadResources(); return "Updated local observations."; }));

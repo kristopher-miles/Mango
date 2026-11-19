@@ -50,6 +50,9 @@ internal static class ResourceChecks
         var endpointId = Guid.Empty;
         var blockCall = int.MaxValue;
         var blocked = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var holdForcedSample = false;
+        var forcedStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var finishForced = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var builder = WebApplication.CreateSlimBuilder();
         builder.Logging.ClearProviders();
         builder.WebHost.ConfigureKestrel(server => server.Listen(IPAddress.Loopback, 0));
@@ -71,8 +74,13 @@ internal static class ResourceChecks
             var (count, speed) = await PromptAsync(context);
             if (speed)
             {
+                if (holdForcedSample)
+                {
+                    forcedStarted.TrySetResult();
+                    await finishForced.Task.WaitAsync(context.RequestAborted);
+                }
                 context.Response.ContentType = "text/event-stream";
-                await context.Response.WriteAsync("data: {\"timings\":{\"predicted_per_second\":25}}\n\ndata: [DONE]\n\n");
+                await context.Response.WriteAsync("data: {\"timings\":{\"predicted_n\":25,\"predicted_ms\":1000}}\n\ndata: [DONE]\n\n");
                 return;
             }
             if (Interlocked.Increment(ref calls) == Volatile.Read(ref blockCall))
@@ -267,6 +275,29 @@ internal static class ResourceChecks
         await resources.RetryBenchmarkAsync(model.Id, Chat.Operation, providers, default);
         await EventuallyAsync(() => Profile(model.Id).ValueKind != JsonValueKind.Null && Profile(model.Id).GetProperty("complete").GetBoolean());
         Check(calls == 13, "Never permits an explicitly requested benchmark");
+        await EventuallyAsync(() => !resources.ForcedBenchmarkHoldsServing);
+
+        await settings.UpdateAsync(value => value with { BenchmarkPolicy = BenchmarkPolicy.WhenConvenient });
+        var displaced = resources.TryAdmit(model, endpoint, Chat, ResourceWork.Execute).Require();
+        holdForcedSample = true;
+        await resources.RetryBenchmarkAsync(model.Id, Chat.Operation, providers, default, sampleOnly: true);
+        Check(displaced.Cancellation.IsCancellationRequested && resources.ForcedBenchmarkHoldsServing,
+            "a forced benchmark cancels active inference");
+        resources.AdvanceBenchmarks(providers, default);
+        Check(!forcedStarted.Task.IsCompleted &&
+            resources.TryAdmit(model, endpoint, Chat, ResourceWork.Execute).Status == AdmissionStatus.Wait,
+            "the forced benchmark waits for native settlement and holds new inference");
+        displaced.Complete();
+        await EventuallyAsync(() => forcedStarted.Task.IsCompleted);
+        await resources.ClientArrivedAsync(default);
+        Check(resources.ForcedBenchmarkHoldsServing &&
+            resources.TryAdmit(model, endpoint, Chat, ResourceWork.Execute).Status == AdmissionStatus.Wait,
+            "new client work cannot preempt a forced benchmark");
+        finishForced.TrySetResult();
+        await EventuallyAsync(() => !resources.ForcedBenchmarkHoldsServing);
+        Check(Profile(model.Id).GetProperty("complete").GetBoolean() &&
+            Profile(model.Id).GetProperty("speed").GetProperty("providerGenerationRate").GetBoolean(),
+            "a forced warm sample preserves qualification and records provider timing provenance");
         await settings.UpdateAsync(value => value with { BenchmarkPolicy = BenchmarkPolicy.Now });
         await resources.SaveBudgetAsync(update with { Items = 2 }, providers, default);
         Check(!resources.ServingAllowed && Profile(model.Id).ValueKind == JsonValueKind.Null &&
@@ -428,8 +459,9 @@ internal static class ResourceChecks
             clock.Advance(300);
             while (resources.RouteTiming(model, Chat.Operation).GenerationTokensPerSecond is null)
                 await Task.Delay(25, deadline.Token);
-            Check(resources.RouteTiming(model, Chat.Operation).GenerationTokensPerSecond > 20 && speedCalls == 2,
-                "idle retry measures generation between content chunks without counting the stream footer");
+            Check(resources.RouteTiming(model, Chat.Operation).GenerationTokensPerSecond > 20 && speedCalls == 2 &&
+                !Profile().GetProperty("speed").GetProperty("providerGenerationRate").GetBoolean(),
+                "idle retry labels stream estimates and excludes the stream footer");
         }
         finally
         {
@@ -662,7 +694,7 @@ internal static class ResourceChecks
         using var document = await JsonDocument.ParseAsync(context.Request.Body, cancellationToken: context.RequestAborted);
         var request = document.RootElement;
         return (request.GetProperty("messages")[0].GetProperty("content").GetString()!.Count(value => value == ' ') + 3,
-            request.GetProperty("max_tokens").GetInt32() == 64);
+            request.GetProperty("max_tokens").GetInt32() == BenchmarkProtocol.SpeedOutput);
     }
 
     private static void Check(bool condition, string description)

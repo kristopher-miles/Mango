@@ -48,7 +48,7 @@ internal static class ProviderRoutes
                 CommandAsync(context, cancellation => resources.SaveBudgetAsync(update, providers, cancellation)));
             local.MapPut("/resources/retry", (BenchmarkRequest request, HttpContext context) =>
                 CommandAsync(context, cancellation => resources.RetryBenchmarkAsync(request.Deployment, request.Operation,
-                    providers, cancellation)));
+                    providers, cancellation, request.SampleOnly)));
             local.MapPut("/resources/release", () =>
             {
                 resources.RetryRelease();
@@ -165,5 +165,5 @@ internal static class ProviderRoutes
     private sealed record RatingsRequest(string? Alias, Dictionary<string, int?>? Ratings);
     private sealed record SelectionRequest([property: JsonRequired] string? Id);
     private sealed record LifecycleRequest(string Id, [property: JsonRequired] bool Load);
-    private sealed record BenchmarkRequest(string Deployment, InferenceOperation Operation);
+    private sealed record BenchmarkRequest(string Deployment, InferenceOperation Operation, bool SampleOnly = false);
 }
