@@ -13,6 +13,8 @@ internal sealed partial class ResourceProtection
     private bool benchmarksReady;
     private string? benchmarkDeployment;
     private string? benchmarkPass;
+    private bool nativeBenchmark;
+    private const string MissingColdAllowance = "A peak memory allowance is required for the cold load benchmark.";
     private sealed record ForcedBenchmark(string Deployment, InferenceOperation Operation, bool SampleOnly);
     private ForcedBenchmark? requestedBenchmark;
     private bool preparingForcedBenchmark;
@@ -115,6 +117,8 @@ internal sealed partial class ResourceProtection
 
         public bool HasLoadAllowance => Budget is { } budget &&
             (budget.Load.RamBytes > 0 || budget.Load.DeviceBytes.Values.Any(bytes => bytes > 0));
+
+        public bool NativeBenchmark => CanUseNativeBenchmark(Model, Endpoint);
     }
     private sealed class MeasurementWindow(ResourceObservation? before, Guid endpoint)
     {
@@ -239,10 +243,11 @@ internal sealed partial class ResourceProtection
                 throw new ProviderFailure(409, "Turn on contribution before forcing a benchmark.");
             if (observed is null)
                 throw new ProviderFailure(503, "Wait for current local resource observations before forcing a benchmark.");
-            if (ForcedBenchmarkHoldsServing || benchmark is { IsCompleted: false })
-                throw new ProviderFailure(409, "Wait for the existing benchmark to settle.");
-            if (sampleOnly && target.Model.Instance is null && (!target.CanColdLoad || !target.HasLoadAllowance))
-                throw new ProviderFailure(409, "Mango needs a verified peak-memory allowance and managed load and unload before sampling this cold model.");
+            if (ForcedBenchmarkHoldsServing)
+                throw new ProviderFailure(409, "Wait for the existing forced benchmark to settle.");
+            if (sampleOnly && target.Model.Instance is null && (!target.CanColdLoad ||
+                !target.HasLoadAllowance && !target.NativeBenchmark))
+                throw new ProviderFailure(409, "This provider must support managed load and unload before Mango can sample the cold model.");
             preparingForcedBenchmark = true;
             requestedBenchmark = request;
             forcedBenchmarkError = null;
@@ -267,6 +272,7 @@ internal sealed partial class ResourceProtection
                     if (settings.Value.BenchmarkPolicy == BenchmarkPolicy.Now)
                         SetBenchmarkReady(false);
                 }
+                RequestCancel(benchmarkStop);
                 foreach (var lease in reservations.Where(item => item.Running && item.Work != ResourceWork.Benchmark))
                     RequestCancel(lease.Stop);
             }
@@ -402,6 +408,7 @@ internal sealed partial class ResourceProtection
                 benchmarkStop = null;
                 benchmark = null;
                 benchmarkDeployment = benchmarkPass = null;
+                nativeBenchmark = false;
                 if (runningForcedBenchmark)
                 {
                     runningForcedBenchmark = false;
@@ -426,8 +433,10 @@ internal sealed partial class ResourceProtection
                 return;
             var candidates = targets.Where(item => !item.Model.ServingDisabled && !item.Model.Busy &&
                 item.Model.Instance?.Busy != true && ProviderCatalog.ExclusiveBlocker(catalog, item.Endpoint) is null).ToArray();
-            bool Protected(Target item) => status.State == ContributionState.Contributor && item.Budget is { } budget &&
-                !unsafePlacements.Contains(FaultKey(budget)) && AttributionAllows(item.Endpoint, current, observed, budget.AllowAttached);
+            bool Protected(Target item) => item.Budget is { } budget &&
+                (item.NativeBenchmark ? NativeBenchmarkAllowed(current) : status.State == ContributionState.Contributor) &&
+                (!unsafePlacements.Contains(FaultKey(budget)) || item.NativeBenchmark && requestedBenchmark is not null) &&
+                AttributionAllows(item.Endpoint, current, observed, budget.AllowAttached);
 
             var forced = requestedBenchmark;
             bool Matches(Target item) => forced is null ||
@@ -435,7 +444,7 @@ internal sealed partial class ResourceProtection
             var target = candidates.FirstOrDefault(item =>
                 Matches(item) && (forced is null || forced.SampleOnly || item.Model.Yolo) &&
                 CanSample(item.Model, item.Operation) &&
-                (item.Model.Yolo ? IsTextBenchmark(item.Operation) && NativeWarmBenchmarkAllowed(current) :
+                (item.Model.Yolo ? IsTextBenchmark(item.Operation) && NativeBenchmarkAllowed(current) :
                     Protected(item) && Covers(item.Budget!.Workload, BenchmarkProtocol.SampleWorkload(item.Operation))) &&
                 (forced is not null || item.Profile?.Speed is null || item.Profile.Speed.Error is not null &&
                     item.Profile.Speed.Attempts < 2 && now - item.Profile.Speed.At >= BenchmarkIdle));
@@ -443,7 +452,8 @@ internal sealed partial class ResourceProtection
             var convenient = forced is null && current.BenchmarkPolicy == BenchmarkPolicy.WhenConvenient;
             target ??= candidates.FirstOrDefault(item => Matches(item) && Protected(item) &&
                 (forced?.SampleOnly == true ? !item.Model.Yolo : IsPending(item)) &&
-                (forced is not null || item.Profile?.Error is null) &&
+                (forced is not null || item.Profile?.Error is null ||
+                    item.NativeBenchmark && item.Profile.Error == MissingColdAllowance) &&
                 !(convenient && PreserveLoadedBenchmark(item, catalog) && item.CanColdLoad &&
                     item.Profile?.Measurements.Any(pass => pass.Pass is "reuse" or "warm") == true &&
                     !item.Profile.Measurements.Any(pass => pass.Pass == "cold")) &&
@@ -456,6 +466,7 @@ internal sealed partial class ResourceProtection
             var protectSelected = forced?.SampleOnly == true || convenient && PreserveLoadedBenchmark(target, catalog);
             requestedBenchmark = null;
             runningForcedBenchmark = forced is not null;
+            nativeBenchmark = target.NativeBenchmark && !target.Model.Yolo;
             benchmarkStop = CancellationTokenSource.CreateLinkedTokenSource(stopping);
             benchmarkDeployment = target.Model.Id;
             benchmarkPass = speedOnly ? "Warm sample" : "Preparing";
@@ -563,13 +574,13 @@ internal sealed partial class ResourceProtection
         var openedForBenchmark = false;
         try
         {
-            if (model.Instance is null && target.HasLoadAllowance)
+            if (model.Instance is null && (target.HasLoadAllowance || target.NativeBenchmark))
                 await ReleaseBenchmarkSlotAsync(providers, target, cancellation);
             var needsCold = target.CanColdLoad && (model.Instance is null || !profile.Measurements.Any(pass => pass.Pass == "cold"));
             if (needsCold && (!protectSelected || model.Instance is null))
             {
-                if (!target.HasLoadAllowance)
-                    throw new ProviderFailure(409, "A peak memory allowance is required for the cold load benchmark.");
+                if (!target.HasLoadAllowance && !target.NativeBenchmark)
+                    throw new ProviderFailure(409, MissingColdAllowance);
                 var freshBaseline = true;
                 if (model.Instance is not null)
                 {

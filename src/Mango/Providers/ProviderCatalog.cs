@@ -431,7 +431,7 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
             var operationKind = benchmark ?? requested ?? resources?.LoadOperation(model, endpoint);
             if (load && adapter is StrataAdapter)
             {
-                if (resources is not null)
+                if (resources is not null && !benchmark.HasValue)
                 {
                     if (resources.Status is { State: not ContributionState.Contributor } status)
                         throw new ProviderFailure(503, status.Reason ?? "Turn on contribution before loading Strata.");

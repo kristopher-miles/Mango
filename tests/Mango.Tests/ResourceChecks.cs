@@ -462,14 +462,29 @@ internal static class ResourceChecks
             Check(resources.RouteTiming(model, Chat.Operation).GenerationTokensPerSecond > 20 && speedCalls == 2 &&
                 !Profile().GetProperty("speed").GetProperty("providerGenerationRate").GetBoolean(),
                 "idle retry labels stream estimates and excludes the stream footer");
+            Check(calls == 4 && loads == 0 && unloads == 0 && loaded && !Profile().GetProperty("complete").GetBoolean(),
+                "a warm sample preserves the running LM Studio configuration");
+
+            await settings.UpdateAsync(value => value with { BenchmarkPolicy = BenchmarkPolicy.Never });
+            loaded = false;
+            await providers.RefreshAsync(endpointId, deadline.Token);
+            await resources.RetryBenchmarkAsync(model.Id, Chat.Operation, providers, deadline.Token, sampleOnly: true);
+            while (resources.ForcedBenchmarkHoldsServing)
+            {
+                clock.Advance(1);
+                await Task.Delay(30, deadline.Token);
+            }
+            Check(loads == 1 && unloads == 1 && speedCalls == 3 &&
+                Profile().GetProperty("measurements").EnumerateArray().Any(pass => pass.GetProperty("pass").GetString() == "cold"),
+                "a forced cold benchmark starts an unmeasured managed model, samples it and releases it");
+            loaded = true;
+            await providers.RefreshAsync(endpointId, deadline.Token);
         }
         finally
         {
             await deadline.CancelAsync();
             await worker;
         }
-        Check(calls == 4 && loads == 0 && unloads == 0 && loaded && !Profile().GetProperty("complete").GetBoolean(),
-            "speed evidence does not certify a cold load or require replacing the running LM Studio configuration");
         using (var restarted = new ResourceProtection(directory, settings, (_, _) => Sample(), clock: clock))
         {
             await restarted.InitializeAsync();
@@ -488,13 +503,13 @@ internal static class ResourceChecks
             resources.ApplyObservation(Sample());
             await Task.Delay(25, releaseDeadline.Token);
         }
-        Check(!loaded && unloads == 1 && resources.Status.State == ContributionState.ManualLeech,
+        Check(!loaded && unloads == 2 && resources.Status.State == ContributionState.ManualLeech,
             "resource withdrawal still unloads the same protected LM Studio instance");
         loaded = true;
         slowUnload = true;
         await providers.RefreshAsync(endpointId, default);
         var released = await providers.ReleaseManagedAsync(default);
-        Check(released.Error is null && !loaded && unloads == 2,
+        Check(released.Error is null && !loaded && unloads == 3,
             "a timed out unload response is accepted only after fresh inventory verifies release");
         loaded = keepLoaded = true;
         slowUnload = false;

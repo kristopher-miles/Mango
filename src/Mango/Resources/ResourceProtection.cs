@@ -224,7 +224,9 @@ internal sealed partial class ResourceProtection : IDisposable
             if (Pressure(latest, settings.Value) is { } pressure) return State("pressure", pressure, "protection");
             var cost = model.Instance is null ? qualified.Budget.Load : qualified.Budget.Execute;
             if (model.Instance is null && cost.RamBytes == 0 && cost.DeviceBytes.Values.All(value => value == 0))
-                return State("loadLimit", "Enter a measured peak memory allowance before loading this model.", "qualification");
+                return State("loadLimit", CanUseNativeBenchmark(model, endpoint)
+                    ? "Benchmark this model to measure its startup memory."
+                    : "Enter a measured peak memory allowance before loading this model.", "qualification");
             if (!Fits(cost, latest, latest?.TotalRam > 0 ? latest.FreeRam : null, settings.Value,
                 settledExclusive: endpoint.ExclusiveHost && model.Instance is not null))
                 return State("capacity", "The qualified workload does not fit current RAM or dedicated VRAM reserves. Work may wait.", "qualification");
@@ -233,12 +235,16 @@ internal sealed partial class ResourceProtection : IDisposable
         }
     }
 
-    // A resident, opted-in model can accept a small native probe under its existing capacity policy.
-    private bool NativeWarmBenchmarkAllowed(LocalSettings current) =>
+    internal static bool CanUseNativeBenchmark(Deployment model, EndpointStatus endpoint) =>
+        endpoint.Mode == ProviderMode.Managed &&
+        (endpoint.CanUnload && model.Model.SupportsUnload || endpoint.CanStop || endpoint.Executable is not null);
+
+    // Engine admission can sample through a memory-only hold after native work has settled.
+    private bool NativeBenchmarkAllowed(LocalSettings current) =>
         status.State == ContributionState.Contributor ||
         status.State == ContributionState.Fault && observed is { WorkerAttribution: true } latest &&
-        status.Reason?.StartsWith(DedicatedMemoryPressure, StringComparison.Ordinal) == true &&
-        status.Reason == Pressure(latest, current) &&
+        store.Value.Hold?.Pending is not { Length: > 0 } &&
+        Pressure(latest, current) is { } memoryPressure && status.Reason == memoryPressure &&
         latest.ExternalCpu < current.CpuCutoffPercent && latest.ExternalGpu < current.GpuCutoffPercent;
 
     public Admission TryAdmit(Deployment model, EndpointStatus endpoint, Workload workload, ResourceWork work,
@@ -250,8 +256,10 @@ internal sealed partial class ResourceProtection : IDisposable
             {
                 if (!profiling && ForcedBenchmarkHoldsServing)
                     return new(AdmissionStatus.Wait, ForcedBenchmarkWait, null);
+                if (!profiling && nativeBenchmark)
+                    return new(AdmissionStatus.Wait, "Waiting for the native benchmark to settle.", null);
                 if (!IsAvailable(model, endpoint, workload.Operation) || work == ResourceWork.Benchmark &&
-                    (!speedSample || model.Instance is null || !NativeWarmBenchmarkAllowed(settings.Value) ||
+                    (!speedSample || model.Instance is null || !NativeBenchmarkAllowed(settings.Value) ||
                         reservations.Any(item => !item.Settled)))
                     return Refuse("This model is paused, unavailable, or delegates qualification to its provider.");
                 if (work == ResourceWork.Load && (endpoint.Mode != ProviderMode.Managed || !endpoint.CanLoad || !model.Model.SupportsLoad))
@@ -269,14 +277,18 @@ internal sealed partial class ResourceProtection : IDisposable
         var freshGpu = needsFreshGpu ? windows!.ReadFreshGpuMemory() : null;
         lock (sync)
         {
-            if (status.State != ContributionState.Contributor || settings.Value.Role != LocalRole.Contributor ||
+            var current = settings.Value;
+            var providerCapacity = profiling && CanUseNativeBenchmark(model, endpoint);
+            if (!(providerCapacity ? NativeBenchmarkAllowed(current) : status.State == ContributionState.Contributor) ||
+                current.Role != LocalRole.Contributor ||
                 Volatile.Read(ref stopping) != 0)
                 return Refuse(status.Reason ?? "This node is in leech mode.");
             if (work == ResourceWork.Load && (endpoint.Mode != ProviderMode.Managed || !endpoint.CanLoad || !model.Model.SupportsLoad))
                 return Refuse("The provider does not authorize loading this deployment.");
-            var current = settings.Value;
             if (!profiling && ForcedBenchmarkHoldsServing)
                 return new(AdmissionStatus.Wait, ForcedBenchmarkWait, null);
+            if (!profiling && nativeBenchmark)
+                return new(AdmissionStatus.Wait, "Waiting for the native benchmark to settle.", null);
             if (!profiling && work != ResourceWork.Load && current.BenchmarkPolicy == BenchmarkPolicy.Now && !benchmarksReady)
                 return Refuse("The local benchmark policy requires complete profiles before inference.");
             var latest = CurrentObservation;
@@ -290,18 +302,18 @@ internal sealed partial class ResourceProtection : IDisposable
                     ? "Confirm the attached provider limitation in this deployment's local memory limits."
                     : "Managed contribution requires a native unload or stop path.");
             var fingerprint = FaultKey(budget);
-            if (unsafePlacements.Contains(fingerprint))
+            if (unsafePlacements.Contains(fingerprint) && !(providerCapacity && runningForcedBenchmark))
                 return Refuse("An allocation failed for this placement. Update its local limits or retry explicitly.");
             if (work == ResourceWork.Execute && workload.MediaItems > 0 && budget.Workload.MediaItems == 0)
                 return Refuse("A host media memory qualification is required for this workload.");
-            var cost = work switch
+            var cost = providerCapacity ? MemoryCost.Empty : work switch
             {
                 ResourceWork.Load => budget.Load,
                 ResourceWork.Benchmark when speedSample && budget.Estimated =>
                     EstimateBudget(model, workload.Operation, budget.Configuration, budget.Runtime, workload).Execute,
                 _ => ProjectExecutionCost(budget, workload, payloadBytes)
             };
-            if (work == ResourceWork.Load && cost.RamBytes == 0 && cost.DeviceBytes.Values.All(value => value == 0))
+            if (work == ResourceWork.Load && !providerCapacity && cost.RamBytes == 0 && cost.DeviceBytes.Values.All(value => value == 0))
                 return Refuse("Set a peak memory allowance before loading this model.");
             var overlap = !endpoint.ExclusiveHost && AllowsOverlap(budget) &&
                 !profiling && work == ResourceWork.Execute && workload.Items == 1 &&
@@ -313,6 +325,13 @@ internal sealed partial class ResourceProtection : IDisposable
                     ? item.Deployment != model.Id : !SeparateWorkers(latest, item.Endpoint, model.EndpointId)))) ||
                 peersOnEndpoint.Length >= slots)
                 return new(AdmissionStatus.Wait, "Local resources are reserved by another provider operation.", null);
+            if (providerCapacity)
+            {
+                var probe = new ResourceReservation(this, model.EndpointId, model.Id, work, fingerprint, cost,
+                    overlap: false, sampleNumber, latest?.Workers.GetValueOrDefault(model.EndpointId));
+                reservations.Add(probe);
+                return new(AdmissionStatus.Admitted, null, probe);
+            }
             long? freeRam = null;
             var freeCommit = latest?.FreeCommit;
             try
@@ -656,7 +675,7 @@ internal sealed partial class ResourceProtection : IDisposable
             }
             if (status.State == ContributionState.Withdrawing && withdraw)
                 return;
-            var pressure = Pressure(latest, current);
+            var pressure = nativeBenchmark ? null : Pressure(latest, current);
             var high = external;
             if (status.State == ContributionState.Cooldown)
             {
