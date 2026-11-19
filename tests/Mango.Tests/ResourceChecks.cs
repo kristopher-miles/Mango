@@ -298,6 +298,15 @@ internal static class ResourceChecks
         Check(Profile(model.Id).GetProperty("complete").GetBoolean() &&
             Profile(model.Id).GetProperty("speed").GetProperty("providerGenerationRate").GetBoolean(),
             "a forced warm sample preserves qualification and records provider timing provenance");
+        await settings.UpdateAsync(value => value with { BenchmarkPolicy = BenchmarkPolicy.Never });
+        var unconfirmed = resources.TryAdmit(model, endpoint, Chat, ResourceWork.Execute).Require();
+        await resources.RetryBenchmarkAsync(model.Id, Chat.Operation, providers, default, sampleOnly: true);
+        Tick((int)ProviderLimits.LifecycleTimeout.TotalSeconds + 1);
+        resources.AdvanceBenchmarks(providers, default);
+        Check(!resources.ForcedBenchmarkHoldsServing && unconfirmed.Cancellation.IsCancellationRequested &&
+            resources.TryAdmit(model, endpoint, Chat, ResourceWork.Execute).Status == AdmissionStatus.Wait,
+            "a forced wait expires without falsely settling the previous native operation");
+        unconfirmed.Complete();
         await settings.UpdateAsync(value => value with { BenchmarkPolicy = BenchmarkPolicy.Now });
         await resources.SaveBudgetAsync(update with { Items = 2 }, providers, default);
         Check(!resources.ServingAllowed && Profile(model.Id).ValueKind == JsonValueKind.Null &&
@@ -383,6 +392,14 @@ internal static class ResourceChecks
 
     private static async Task CheckLoadedLmStudioBenchmarkAsync(string root)
     {
+        Check(BenchmarkProtocol.StreamLooksBuffered(TimeSpan.FromSeconds(32), TimeSpan.FromSeconds(32.25)) &&
+            !BenchmarkProtocol.StreamLooksBuffered(TimeSpan.FromMilliseconds(100), TimeSpan.FromSeconds(1)),
+            "a late output burst cannot authenticate a generation rate");
+        using var vllm = JsonDocument.Parse("""
+            {"usage":{"completion_tokens":128},"metrics":{"generation_time_ms":3175,"tokens_per_second":12}}
+            """);
+        Check(BenchmarkProtocol.ReadMetrics(vllm.RootElement, default).Item4 == 40,
+            "provider decode timing excludes prefill from the rate");
         var directory = Directory.CreateDirectory(Path.Combine(root, "lmstudio-benchmark")).FullName;
         var settings = new SnapshotFile<LocalSettings>(Path.Combine(directory, "local-settings.json"), LocalSettings.Validate);
         await settings.LoadAsync(new LocalSettings { Role = LocalRole.Contributor,
@@ -535,6 +552,7 @@ internal static class ResourceChecks
         var settings = new SnapshotFile<LocalSettings>(Path.Combine(directory, "local-settings.json"), LocalSettings.Validate);
         await settings.LoadAsync(new LocalSettings { Role = LocalRole.Contributor, BenchmarkPolicy = BenchmarkPolicy.Now, SampleSeconds = 2 });
         string? resident = "previous";
+        var batchModels = false;
         var releases = 0;
         var holdRefresh = 0;
         var refreshing = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -553,7 +571,8 @@ internal static class ResourceChecks
             return new
             {
                 max_loaded_models = 1, loads_settled = true,
-                models = new[] { "first", "second", "previous" }.Select(key => new
+                models = (batchModels ? new[] { "denied", "batch-ok", "first", "second", "previous" } :
+                    new[] { "first", "second", "previous" }).Select(key => new
                 {
                     key, type = "llm", size_bytes = 64 * MiB, max_context_length = 512,
                     loaded_instances = resident == key ? new[] { new { id = key, config = new { context_length = 512 } } } : []
@@ -564,7 +583,9 @@ internal static class ResourceChecks
         {
             using var body = await JsonDocument.ParseAsync(context.Request.Body);
             if (resident is not null) return Results.Conflict();
-            resident = body.RootElement.GetProperty("model").GetString();
+            var model = body.RootElement.GetProperty("model").GetString();
+            if (model == "denied") return Results.Conflict();
+            resident = model;
             return Results.Ok();
         });
         fixture.MapPost("/api/v1/models/unload", () => { resident = null; Interlocked.Increment(ref releases); return Results.Ok(); });
@@ -603,6 +624,15 @@ internal static class ResourceChecks
             Check(providers.View.Models.Where(model => !model.ServingDisabled)
                 .All(model => resources.RouteTiming(model, Chat.Operation).GenerationTokensPerSecond == 25),
                 "Mango releases an idle occupied slot and records a warm rate for each eligible cold deployment");
+            await settings.UpdateAsync(value => value with { BenchmarkPolicy = BenchmarkPolicy.Never });
+            batchModels = true;
+            await providers.RefreshAsync(endpoint.Id, deadline.Token);
+            Check(resources.BenchmarkMissing(providers) == 2, "the batch selects only new or invalid samples");
+            while (resources.ForcedBenchmarkHoldsServing)
+                await Task.Delay(25, deadline.Token);
+            var successful = providers.View.Models.Single(model => model.Model.NativeId == "batch-ok");
+            Check(resources.RouteTiming(successful, Chat.Operation).GenerationTokensPerSecond == 25,
+                "an engine refusal does not prevent the next missing benchmark");
         }
         finally
         {
@@ -610,7 +640,7 @@ internal static class ResourceChecks
             releaseRefresh.TrySetResult();
             await worker;
         }
-        var first = providers.View.Models.First(model => !model.ServingDisabled);
+        var first = providers.View.Models.Single(model => model.Model.NativeId == "first");
         await resources.RetryBenchmarkAsync(first.Id, Chat.Operation, providers, default);
         var evidence = JsonSerializer.SerializeToElement(resources.View(providers), SnapshotFile<ResourceData>.Json)
             .GetProperty("models").EnumerateArray().Single(item => item.GetProperty("id").GetString() == first.Id)

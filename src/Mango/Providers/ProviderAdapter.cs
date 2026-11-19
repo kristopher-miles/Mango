@@ -38,7 +38,7 @@ internal abstract class ProviderAdapter(HttpClient http, ProviderEndpoint endpoi
         SendAsync(HttpMethod.Post, InferencePaths.Path(operation) + InferenceQuery, content, cancellation);
 
     protected async Task<JsonElement> JsonAsync(string path, CancellationToken cancellation,
-        object? body = null, bool optional = false, bool lifecycle = false)
+        object? body = null, bool optional = false, bool lifecycle = false, bool lmStudioLoad = false)
     {
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
         timeout.CancelAfter(lifecycle ? ProviderLimits.LifecycleTimeout : ProviderLimits.ControlTimeout);
@@ -49,7 +49,7 @@ internal abstract class ProviderAdapter(HttpClient http, ProviderEndpoint endpoi
             if (optional && response.StatusCode is HttpStatusCode.NotFound or HttpStatusCode.MethodNotAllowed or
                 HttpStatusCode.NotImplemented or HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden)
                 return default;
-            await RequireInferenceSuccessAsync(response, timeout.Token);
+            await RequireInferenceSuccessAsync(response, timeout.Token, lmStudioLoad: lmStudioLoad);
             var bytes = await ReadBoundedAsync(response.Content, ProviderLimits.MaxControlBytes, timeout.Token);
             if (bytes.Length == 0 && lifecycle)
                 return default;
@@ -120,7 +120,7 @@ internal abstract class ProviderAdapter(HttpClient http, ProviderEndpoint endpoi
     }
 
     internal static async Task RequireInferenceSuccessAsync(HttpResponseMessage response, CancellationToken cancellation,
-        bool chat = false)
+        bool chat = false, bool lmStudioLoad = false)
     {
         if (response.IsSuccessStatusCode)
             return;
@@ -145,12 +145,27 @@ internal abstract class ProviderAdapter(HttpClient http, ProviderEndpoint endpoi
             }
             catch (OperationCanceledException) when (!cancellation.IsCancellationRequested) { }
             var message = System.Text.Encoding.UTF8.GetString(buffer, 0, read);
+            if (lmStudioLoad && IsLmStudioLoadFailure(message))
+                throw new ProviderFailure(409, IsAllocationFailure(message) ||
+                    message.Contains("insufficient system resources", StringComparison.OrdinalIgnoreCase)
+                    ? "LM Studio refused the model load because it reported insufficient memory."
+                    : "LM Studio reported that the model load failed.", code: "load_rejected");
             if (IsAllocationFailure(message))
                 throw new ProviderFailure(503, "The provider could not allocate model memory.", allocationFailure: true);
             if (chat && (int)response.StatusCode is 400 or 422 && IsContextFailure(message))
                 throw new ProviderFailure(422, "The input plus reserved output does not fit the deployment's served context.");
         }
         RequireSuccess(response);
+    }
+
+    private static bool IsLmStudioLoadFailure(string body)
+    {
+        try
+        {
+            using var json = JsonDocument.Parse(body);
+            return json.RootElement.Get("error").Text("type") == "model_load_failed";
+        }
+        catch (JsonException) { return false; }
     }
 
     private static bool IsContextFailure(string body)

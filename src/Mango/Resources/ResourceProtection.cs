@@ -321,6 +321,8 @@ internal sealed partial class ResourceProtection : IDisposable
             var peersOnEndpoint = reservations.Where(item => item.Endpoint == model.EndpointId && !item.Settled).ToArray();
             var slots = OverlapSlots(model, budget);
             if (reservations.Any(item => !item.Settled &&
+                !(providerCapacity && !endpoint.ExclusiveHost && item.NativeBenchmark && !item.Running &&
+                    item.Endpoint != endpoint.Id) &&
                 (!overlap || !item.Overlap || !item.Running || (item.Endpoint == model.EndpointId
                     ? item.Deployment != model.Id : !SeparateWorkers(latest, item.Endpoint, model.EndpointId)))) ||
                 peersOnEndpoint.Length >= slots)
@@ -328,7 +330,7 @@ internal sealed partial class ResourceProtection : IDisposable
             if (providerCapacity)
             {
                 var probe = new ResourceReservation(this, model.EndpointId, model.Id, work, fingerprint, cost,
-                    overlap: false, sampleNumber, latest?.Workers.GetValueOrDefault(model.EndpointId));
+                    overlap: false, sampleNumber, latest?.Workers.GetValueOrDefault(model.EndpointId), nativeBenchmark: true);
                 reservations.Add(probe);
                 return new(AdmissionStatus.Admitted, null, probe);
             }

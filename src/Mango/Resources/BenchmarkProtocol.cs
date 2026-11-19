@@ -159,7 +159,8 @@ internal static class BenchmarkProtocol
                     throw new ProviderFailure(502, "The provider did not confirm the intended benchmark context was processed.");
             }
             return new(elapsed, promptTokens, outputTokens, firstToken, promptMilliseconds,
-                tokensPerSecond is > 0 ? tokensPerSecond : outputTokens is > 1 && firstToken is { } first && lastToken is { } last && last > first
+                tokensPerSecond is > 0 ? tokensPerSecond : outputTokens is > 1 && firstToken is { } first && lastToken is { } last &&
+                    last > first && (pass != SpeedPass || !StreamLooksBuffered(first, last))
                     ? (outputTokens - 1) / (last - first).TotalSeconds : null, cachedTokens,
                 pass == "reuse" && cachedTokens.HasValue ? cachedTokens > 0 : null, ProviderGenerationRate: tokensPerSecond is > 0);
         }
@@ -173,6 +174,10 @@ internal static class BenchmarkProtocol
         }
     }
 
+    // A short warm prompt followed by one late burst cannot separate provider decode from buffering.
+    internal static bool StreamLooksBuffered(TimeSpan? first, TimeSpan? last) =>
+        first is { TotalSeconds: >= 2 } start && last is { } end && end - start < start / 8;
+
     internal static (int?, int?, double?, double?, int?) ReadMetrics(JsonElement body,
         (int? Prompt, int? Output, double? Milliseconds, double? Rate, int? Cache) previous)
     {
@@ -180,12 +185,23 @@ internal static class BenchmarkProtocol
         var timings = body.Get("timings");
         var cached = Nonnegative(usage.Get("prompt_tokens_details").Get("cached_tokens")) ?? Nonnegative(timings.Get("cache_n"));
         var decoded = Nonnegative(timings.Get("predicted_n"));
+        var output = Nonnegative(usage.Get("completion_tokens")) ?? decoded ?? previous.Output;
         var decodeMilliseconds = Number(timings.Get("predicted_ms"));
         var rate = Number(timings.Get("predicted_per_second"));
         if (rate is not > 0 && decoded is > 0 && decodeMilliseconds is > 0)
             rate = decoded.Value * 1000d / decodeMilliseconds.Value;
+        if (rate is not > 0)
+        {
+            var metrics = body.Get("metrics");
+            var generationMilliseconds = Number(metrics.Get("generation_time_ms"));
+            var interTokenMilliseconds = Number(metrics.Get("mean_itl_ms"));
+            if (generationMilliseconds is > 0 && output is > 1)
+                rate = (output.Value - 1d) * 1000d / generationMilliseconds.Value;
+            else if (interTokenMilliseconds is > 0)
+                rate = 1000d / interTokenMilliseconds.Value;
+        }
         return (Nonnegative(usage.Get("prompt_tokens")) ?? Nonnegative(timings.Get("prompt_n")) ?? previous.Prompt,
-            Nonnegative(usage.Get("completion_tokens")) ?? decoded ?? previous.Output,
+            output,
             Number(timings.Get("prompt_ms")) ?? previous.Milliseconds,
             rate is > 0 and < double.PositiveInfinity ? rate : previous.Rate, cached ?? previous.Cache);
     }

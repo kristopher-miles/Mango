@@ -49,6 +49,9 @@ internal static class ProviderRoutes
             local.MapPut("/resources/retry", (BenchmarkRequest request, HttpContext context) =>
                 CommandAsync(context, cancellation => resources.RetryBenchmarkAsync(request.Deployment, request.Operation,
                     providers, cancellation, request.SampleOnly)));
+            local.MapPut("/resources/benchmark-missing", (HttpContext context) =>
+                PeerRoutes.HandleAsync(context, token => context.Response.WriteAsJsonAsync(
+                    new { Queued = resources.BenchmarkMissing(providers) }, token), noContent: false));
             local.MapPut("/resources/release", () =>
             {
                 resources.RetryRelease();

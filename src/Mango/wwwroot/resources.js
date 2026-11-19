@@ -15,7 +15,7 @@ function renderResourceProfile(model) {
       profile?.measurements.length ? "Benchmark measurements are incomplete." : "No benchmark measurements.",
     profile?.error,
     model.canColdLoad ? "" : "Cold-load measurement is unavailable for this provider."].filter(Boolean).join(" ");
-  document.querySelector("#resource-retry").disabled = !model.budget || !!resourceView.benchmark;
+  document.querySelector("#resource-retry").disabled = !model.budget || resourceView.forced;
   document.querySelector("#measurement-title").textContent = `${model.identifier} · ${operationNames[model.operation]}`;
   const speed = profile?.speed;
   const speedRow = speed ? [element("li", ["Warm sample", speed.error,
@@ -186,6 +186,7 @@ async function loadResources() {
       ...reading.devices.map(device => device.integrated ? `${device.name} uses shared RAM` : `${device.name}: ${bytes(device.usedBytes)} of ${bytes(device.totalBytes)}`), reading.limitation, resourceView.recoveryWarning].filter(Boolean).join(" · ") : "Waiting for Windows observations.";
     document.querySelector("#resource-benchmark").textContent = resourceView.benchmark ? `${resourceView.forced ? "Forced benchmark" : "Benchmark"} · ${resourceView.benchmark.pass}` :
       resourceView.forcedBenchmarkError || (view?.settings.benchmarkPolicy === "now" && !resourceView.benchmarkReady ? "Complete local benchmarks are required before serving." : "No benchmark is running.");
+    document.querySelector("#resource-benchmark-missing").disabled = !resourceView.missingBenchmarks || resourceView.forced;
     drawResources(); renderQualification();
     if (catalogView) renderServingModels();
     const attention = document.querySelector("#overview-attention"), items = [];
@@ -201,6 +202,12 @@ resourceTarget.addEventListener("change", renderQualification);
 document.querySelector("#chart-device").addEventListener("change", drawResources);
 document.addEventListener("visibilitychange", () => { if (document.hidden) resourceHistory.pause(); });
 document.addEventListener("mango:route", () => { if (!["overview", "serving", "protection"].includes(route.group)) resourceHistory.pause(); });
+document.querySelector("#resource-benchmark-missing").addEventListener("click", event =>
+  perform(event.currentTarget, document.querySelector("#resource-missing-feedback"), async () => {
+    const result = await api("resources/benchmark-missing", {});
+    await loadResources();
+    return result.queued ? `Queued ${result.queued} model benchmarks.` : "All eligible models have a valid sample.";
+  }));
 for (const [id, feedback, work] of [["resource-refresh", "protection-feedback", loadResources], ["resource-release", "protection-feedback", () => api("resources/release", {})],
   ["resource-retry", "resource-feedback", () => { const [deployment, operation] = resourceTarget.value.split("/"); return api("resources/retry", { deployment, operation, sampleOnly: true }); }]])
   document.querySelector(`#${id}`).addEventListener("click", event => perform(event.currentTarget, document.querySelector(`#${feedback}`), async () => { await work(); await loadResources(); return "Updated local observations."; }));

@@ -81,6 +81,8 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
     // A live canceled load can still be in transport, even when the provider is currently idle.
     private readonly ConcurrentDictionary<string, bool> uncertainLoads = new();
     internal bool HasUnsettledLoad(string deployment) => uncertainLoads.ContainsKey(deployment);
+    internal bool HasUnsettledWork(EndpointStatus endpoint) =>
+        uncertainModels.Any(item => endpoint.ExclusiveHost || item.Value == endpoint.Id);
 
     internal void RestoreUnsettled(Guid endpoint, string deployment, bool loading = false)
     {
@@ -449,7 +451,7 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
                 await PrepareExclusiveAsync(model, displaced, cancellation, loading);
             if (WorkInProgress(model.EndpointId, includeUncertain: load))
                 throw new ProviderFailure(409, "Work on this provider must settle before changing model state.");
-            if (load && uncertainModels.Count > 0)
+            if (load && (benchmark.HasValue ? HasUnsettledWork(endpoint) : !uncertainModels.IsEmpty))
                 throw new ProviderFailure(409, "Mango has not confirmed that the prior request stopped.");
             if (load && resources is not null)
             {

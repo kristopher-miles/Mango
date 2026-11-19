@@ -42,6 +42,17 @@ internal static class ProviderChecks
             await Fails(422, () => ProviderAdapter.RequireInferenceSuccessAsync(overflow, default, chat: true));
         using (var invalid = Response(HttpStatusCode.BadRequest, """{"error":{"message":"unknown sampling parameter"}}"""))
             await Fails(400, () => ProviderAdapter.RequireInferenceSuccessAsync(invalid, default, chat: true));
+        using (var rejected = Response(HttpStatusCode.InternalServerError,
+            """{"error":{"type":"model_load_failed","message":"Model loading was stopped due to insufficient system resources."}}"""))
+        {
+            var failure = await Fails(409, () => ProviderAdapter.RequireInferenceSuccessAsync(rejected, default, lmStudioLoad: true));
+            Check(failure.Code == "load_rejected", "LM Studio's terminal failure releases the load reservation");
+        }
+        using (var uncertain = Response(HttpStatusCode.InternalServerError, """{"error":{"type":"internal_error"}}"""))
+        {
+            var failure = await Fails(502, () => ProviderAdapter.RequireInferenceSuccessAsync(uncertain, default, lmStudioLoad: true));
+            Check(failure.Code != "load_rejected", "an ambiguous HTTP failure leaves native settlement unconfirmed");
+        }
         var embedding = DeploymentFor(endpoint.Id, InferenceOperation.Embeddings);
         var incompatible = embedding with { Model = embedding.Model with { Id = "other", EmbeddingDimensions = 4 } };
         await Fails(409, () =>

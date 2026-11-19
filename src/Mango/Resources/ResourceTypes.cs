@@ -55,7 +55,8 @@ internal sealed record Admission(AdmissionStatus Status, string? Reason, Resourc
 }
 
 internal sealed class ResourceReservation(ResourceProtection owner, Guid endpoint, string deployment, ResourceWork work,
-    string fingerprint, MemoryCost cost, bool overlap, long sample, WorkerMemory? baseline, bool yolo = false) : IDisposable
+    string fingerprint, MemoryCost cost, bool overlap, long sample, WorkerMemory? baseline, bool yolo = false,
+    bool nativeBenchmark = false) : IDisposable
 {
     internal readonly CancellationTokenSource Stop = new();
     internal readonly Guid Endpoint = endpoint;
@@ -67,6 +68,7 @@ internal sealed class ResourceReservation(ResourceProtection owner, Guid endpoin
     internal readonly long Sample = sample;
     internal readonly WorkerMemory? Baseline = baseline;
     internal readonly bool Yolo = yolo;
+    internal readonly bool NativeBenchmark = nativeBenchmark;
     internal bool Running = true;
     internal bool Settled;
     internal bool Disposed;
