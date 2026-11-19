@@ -150,7 +150,8 @@ internal sealed partial class ResourceProtection
                 Profile = target.Profile,
                 GenerationTokensPerSecond = GenerationRate(target.Profile),
                 ProviderGenerationRate = target.Profile?.Speed is { TokensPerSecond: > 0 } speed ? speed.ProviderGenerationRate : null,
-                Readiness = Readiness(target.Model, target.Endpoint, target.Operation, ProviderCatalog.ExclusiveBlocker(catalog, target.Endpoint)),
+                Readiness = Readiness(target.Model, target.Endpoint, target.Operation, ProviderCatalog.ExclusiveBlocker(catalog, target.Endpoint),
+                    modeSwitch: ProviderCatalog.NeedsModeSwitch(catalog, target.Model)),
                 Unsafe = target.Budget is { } budget && unsafePlacements.Contains(FaultKey(budget)),
                 target.Model.Context,
                 Attached = target.Endpoint.Mode == ProviderMode.Attached,
@@ -749,7 +750,8 @@ internal sealed partial class ResourceProtection
         if (target.Endpoint.MaxLoadedModels is not > 0 || target.Endpoint.Mode != ProviderMode.Managed)
             return;
         var view = providers.View;
-        var residents = view.Models.Where(model => model.EndpointId == target.Endpoint.Id && model.Instance is not null).ToArray();
+        var residents = view.Models.Where(model => model.EndpointId == target.Endpoint.Id && model.Instance is not null &&
+            model.Yolo == target.Model.Yolo).ToArray();
         if (residents.Length < target.Endpoint.MaxLoadedModels || residents.Any(model => model.Id == target.Model.Id))
             return;
         var idle = residents.FirstOrDefault(model => model.Id != view.Selected && !model.Yolo && !model.Busy &&

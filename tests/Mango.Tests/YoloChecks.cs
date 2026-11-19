@@ -25,6 +25,8 @@ internal static class YoloChecks
         Directory.CreateDirectory(directory);
         var loaded = new Dictionary<string, bool> { ["native-model"] = false, ["ordinary-model"] = true };
         var loads = 0;
+        var pressure = false;
+        var pressureFromNative = false;
         var nativeKind = "llm";
         var nativeStatus = 200;
         var nativeBody = "{\"result\":\"native\"}";
@@ -33,18 +35,20 @@ internal static class YoloChecks
         builder.Logging.ClearProviders();
         builder.WebHost.ConfigureKestrel(server => server.Listen(IPAddress.Loopback, 0));
         await using var fixture = builder.Build();
-        fixture.MapGet("/api/v1/models", () => new { version = "fixture", models = loaded.Select(item => new
+        fixture.MapGet("/api/v1/models", () => new { version = "fixture", max_loaded_models = 1, models = loaded.Select(item => new
         {
-            key = item.Key, type = item.Key == "native-model" ? nativeKind : "llm", max_context_length = 8192,
+            key = item.Key, type = item.Key == "native-model" ? nativeKind : "llm", max_context_length = 8192, size_bytes = 64 * 1024 * 1024,
             loaded_instances = item.Value ? new[] { new { id = item.Key + "-instance", config = new { context_length = 1024, parallel = 2 } } } : []
         }) });
         fixture.MapPost("/api/v1/models/load", async (HttpContext context) =>
         {
             using var body = await JsonDocument.ParseAsync(context.Request.Body);
-            Check(body.RootElement.EnumerateObject().Select(field => field.Name).ToHashSet().SetEquals(["model", "echo_load_config"]),
-                "YOLO lifecycle sends native defaults without context/GPU/KV overrides");
-            loaded[body.RootElement.GetProperty("model").GetString()!] = true;
-            loads++;
+            var key = body.RootElement.GetProperty("model").GetString()!;
+            if (key == "native-model")
+                Check(body.RootElement.EnumerateObject().Select(field => field.Name).ToHashSet().SetEquals(["model", "echo_load_config"]),
+                    "YOLO lifecycle sends native defaults without context/GPU/KV overrides");
+            loaded[key] = true;
+            if (key == "native-model") loads++;
             return Results.Json(new { status = "loaded" });
         });
         fixture.MapPost("/api/v1/models/unload", async (HttpContext context) =>
@@ -52,6 +56,7 @@ internal static class YoloChecks
             using var body = await JsonDocument.ParseAsync(context.Request.Body);
             var id = body.RootElement.GetProperty("instance_id").GetString()!;
             loaded[id.Replace("-instance", "")] = false;
+            if (id == "native-model-instance" && pressureFromNative) pressure = false;
             return Results.Json(new { status = "unloaded" });
         });
         fixture.MapPost("/v1/chat/completions", async (HttpContext context) =>
@@ -61,6 +66,11 @@ internal static class YoloChecks
             {
                 context.Response.ContentType = "text/event-stream";
                 await context.Response.WriteAsync("data: {\"timings\":{\"predicted_per_second\":25}}\n\ndata: [DONE]\n\n");
+                return;
+            }
+            if (body.RootElement.GetProperty("model").GetString() == "ordinary-model-instance")
+            {
+                await context.Response.WriteAsJsonAsync(new { result = "protected" });
                 return;
             }
             Check(body.RootElement.GetProperty("model").GetString() == "native-model-instance" &&
@@ -75,7 +85,6 @@ internal static class YoloChecks
         await fixture.StartAsync();
         var settings = new SnapshotFile<LocalSettings>(Path.Combine(directory, "local-settings.json"), LocalSettings.Validate);
         await settings.LoadAsync(new LocalSettings { Role = LocalRole.Contributor, BenchmarkPolicy = BenchmarkPolicy.Now });
-        var pressure = false;
         ResourceObservation Sample() => new(DateTimeOffset.UtcNow, 16 * GiB, 12 * GiB,
             0, 0, [new("gpu", "fixture", false, 8 * GiB, pressure ? 8 * GiB : GiB)], "fixture", [], true, null);
         using var resources = new ResourceProtection(directory, settings, (_, _) => Sample(),
@@ -98,16 +107,79 @@ internal static class YoloChecks
             throw new InvalidOperationException("Stale policy update accepted");
         }
         catch (ProviderFailure error) when (error.Status == 409) { }
+        var ordinary = providers.View.Models.Single(item => !item.Yolo);
+        await providers.EditAsync(new(ordinary.Id, null, [], 1024, null, null, null, ordinary.Options.Revision), default);
+        await settings.UpdateAsync(value => value with { BenchmarkPolicy = BenchmarkPolicy.Never });
+        using var swapDeadline = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        await ObserveWhileAsync(providers.ManageAsync(Model().Id, true, swapDeadline.Token));
+        Check(loads == 1 && Model().Context == 1024 && !loaded["ordinary-model"],
+            "a cold YOLO load releases an idle protected model and uses native defaults");
+
+        using var protectedRequest = await ReadRequestAsync("ordinary-model");
+        using var nativeRequest = await ReadRequestAsync("native-model");
+        var nativeWork = providers.TryStart(nativeRequest, Model().Id).Execute!;
+        var protectedPlacement = providers.Placement(protectedRequest.Shape, ordinary.Id)!;
+        var displaced = new List<string>();
+        Task Record(string id) { displaced.Add(id); return Task.CompletedTask; }
+        await WaitForOtherModeAsync(() => providers.PreparePlacementAsync(protectedPlacement, Record, swapDeadline.Token));
+        await FinishAsync(nativeWork);
+
+        pressureFromNative = pressure = true;
+        resources.ApplyObservation(Sample());
+        while (resources.Status.State == ContributionState.Withdrawing)
+        {
+            await resources.AdvanceWithdrawalAsync(providers, swapDeadline.Token);
+            resources.ApplyObservation(Sample());
+            await Task.Delay(20, swapDeadline.Token);
+        }
+        Check(resources.Status.State == ContributionState.Fault &&
+            providers.Placement(protectedRequest.Shape, ordinary.Id) is not null,
+            "a cold protected request can prepare a swap through a memory-only hold");
+        await ObserveWhileAsync(providers.PreparePlacementAsync(protectedPlacement, Record, swapDeadline.Token));
+        Check(displaced.SequenceEqual([Model().Id]) && !loaded["native-model"] && loaded["ordinary-model"] &&
+            resources.Status.State == ContributionState.Contributor,
+            "protected preparation unloads YOLO, samples recovered capacity, and loads the protected model");
+        pressureFromNative = false;
+
+        var protectedWork = providers.TryStart(protectedRequest, ordinary.Id).Execute!;
+        var nativePlacement = providers.Placement(nativeRequest.Shape, Model().Id)!;
+        await WaitForOtherModeAsync(() => providers.PreparePlacementAsync(nativePlacement, Record, swapDeadline.Token));
+        await FinishAsync(protectedWork);
+        Check(!loaded["native-model"], "an evicted model stays unloaded until its next request can run");
+        await ObserveWhileAsync(providers.PreparePlacementAsync(nativePlacement, Record, swapDeadline.Token));
+        Check(displaced.SequenceEqual([Model().Id, ordinary.Id]) && loads == 2 &&
+            loaded["native-model"] && !loaded["ordinary-model"], "a later YOLO request restores its model after protected work settles");
+
+        loaded["ordinary-model"] = true;
+        await providers.RefreshAsync(endpoint.Id, swapDeadline.Token);
+        Check(providers.TryStart(nativeRequest, Model().Id).Status == AdmissionStatus.Wait,
+            "an already loaded model cannot start while the other mode is resident");
+        await ObserveWhileAsync(providers.PreparePlacementAsync(
+            providers.Placement(nativeRequest.Shape, Model().Id)!, Record, swapDeadline.Token));
+        Check(!loaded["ordinary-model"] && loads == 2, "warm preparation evicts the other mode without reloading the target");
+
+        await resources.RetryBenchmarkAsync(ordinary.Id, InferenceOperation.Chat, providers, swapDeadline.Token, sampleOnly: true);
+        while (resources.ForcedBenchmarkHoldsServing)
+        {
+            resources.ApplyObservation(Sample());
+            resources.AdvanceBenchmarks(providers, swapDeadline.Token);
+            await Task.Delay(20, swapDeadline.Token);
+        }
+        var sampled = providers.View.Models.Single(item => item.Id == ordinary.Id);
+        var rate = resources.RouteTiming(sampled, InferenceOperation.Chat).GenerationTokensPerSecond;
+        Check(rate == 25 && !loaded["ordinary-model"] && !loaded["native-model"],
+            $"a protected cold benchmark swaps out YOLO and releases its own slot (rate {rate}, ordinary loaded {loaded["ordinary-model"]}, YOLO loaded {loaded["native-model"]})");
+        await providers.ManageAsync(Model().Id, true, swapDeadline.Token);
+
+        await settings.UpdateAsync(value => value with { BenchmarkPolicy = BenchmarkPolicy.Now });
         model = Model();
-        var lease = resources.TryAdmit(model, endpoint, new(InferenceOperation.Chat, 4096), ResourceWork.Load).Require();
+        var lease = resources.TryAdmit(model, endpoint, new(InferenceOperation.Chat, 4096), ResourceWork.Execute).Require();
         pressure = true;
         resources.ApplyObservation(Sample());
         Check(!lease.Cancellation.IsCancellationRequested && resources.IsAvailable(model, endpoint) &&
             !resources.IsAvailable(providers.View.Models.Single(item => !item.Yolo), endpoint),
             "automatic hard pressure preserves only opted-in models and their work");
         lease.Complete(); lease.Dispose();
-        await providers.ManageAsync(model.Id, true, default);
-        Check(loads == 1 && Model().Context == 1024, "marked model loads and reports real native default context");
         await providers.EditAsync(new(Model().Id, "renamed", [], 4096, null, null, null, Model().Options.Revision), default);
         Check(Model().Yolo, "ordinary model edits preserve the independent local opt-in");
         foreach (var status in new[] { 200, 400, 429, 507, 200 })
@@ -161,7 +233,7 @@ internal static class YoloChecks
                 (operation != InferenceOperation.Chat || resources.RouteTiming(Model(), operation).GenerationTokensPerSecond == 25),
                 "each resident YOLO text workload records valid evidence through native admission without reloading");
         }
-        Check(loads == 1 && loaded["native-model"], "native benchmark retains the loaded instance across samples");
+        Check(loads == 3 && loaded["native-model"], "native benchmark retains the loaded instance across samples");
         nativeKind = "llm";
         await providers.RefreshAsync(endpoint.Id, deadline.Token);
         await providers.SetServingAsync(Model().Id, false, default);
@@ -176,6 +248,40 @@ internal static class YoloChecks
         Check(!loaded["native-model"], "explicit operator release can still unload a marked model");
         await providers.SetYoloAsync(Model().Id, new(false, Model().Options.Revision), default);
         Check(!Model().Yolo && !resources.IsAvailable(Model(), endpoint), "disabling the opt-in restores ordinary safeguards");
+
+        async Task ObserveWhileAsync(Task preparation)
+        {
+            while (!preparation.IsCompleted)
+            {
+                resources.ApplyObservation(Sample());
+                await Task.Delay(20, swapDeadline.Token);
+            }
+            await preparation;
+        }
+
+        async Task<InferenceRequest> ReadRequestAsync(string name)
+        {
+            var request = new DefaultHttpContext();
+            request.Request.ContentType = "application/json";
+            request.Request.Body = new MemoryStream(Encoding.UTF8.GetBytes(name == "ordinary-model"
+                ? """{"model":"ordinary-model","messages":[{"role":"user","content":"synthetic"}],"max_tokens":32}"""
+                : """{"model":"native-model","messages":[{"role":"user","content":"synthetic"}],"unknown_provider_field":{"nested":7}}"""));
+            return await providers.ReadInferenceAsync(InferenceOperation.Chat, request, swapDeadline.Token);
+        }
+
+        async Task FinishAsync(Func<HttpContext, CancellationToken, Task<ExecutionResult>> execute)
+        {
+            var response = new DefaultHttpContext();
+            response.Response.Body = new MemoryStream();
+            Check((await execute(response, swapDeadline.Token)).Settled, "work settles before changing resource mode");
+        }
+
+        static async Task WaitForOtherModeAsync(Func<Task> prepare)
+        {
+            try { await prepare(); }
+            catch (ProviderFailure error) when (error.CapacityWait) { return; }
+            throw new InvalidOperationException("A model swap displaced active work.");
+        }
     }
 
     private static void Check(bool condition, string message)

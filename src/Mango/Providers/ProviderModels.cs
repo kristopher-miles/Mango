@@ -58,7 +58,10 @@ internal sealed record ProviderModel(string Id, string NativeId, string Manageme
     string[] EmbeddingEncodings, long? ArtifactBytes = null, bool Installed = true,
     bool SupportsLoad = true, bool SupportsUnload = true, string? Format = null,
     ModelOrigin? Origin = null, string? SourceDevice = null, bool AmbiguousInstance = false,
-    int? ReportedMediaTokensPerItem = null, int? PreparedContext = null, string? PreparedConfiguration = null);
+    int? ReportedMediaTokensPerItem = null, int? PreparedContext = null, string? PreparedConfiguration = null)
+{
+    [JsonIgnore] public string? LocalLoadPath { get; init; }
+}
 
 internal sealed record ProviderInventory(string? Version, ProviderModel[] Models, bool CanLoad, bool CanUnload,
     bool CanStop, int? OwnedProcessId = null, int? MaxLoadedModels = null, bool LoadsSettled = false);

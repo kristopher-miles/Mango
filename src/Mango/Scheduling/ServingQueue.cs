@@ -528,7 +528,10 @@ internal sealed class ServingQueue : IAsyncDisposable
         }
         catch (OperationCanceledException) { }
         catch (ProviderFailure error) when (error.Status == 409 || error.CapacityWait) { return null; }
-        catch (ProviderFailure error) when (error.Code == "strata_attached_resident") { return Rejected(error.Message); }
+        catch (ProviderFailure error) when (error.Code is "strata_attached_resident" or "mode_switch_lifecycle")
+        {
+            return Rejected(error.Message);
+        }
         catch (Exception error) when (error is ProviderFailure or IOException or HttpRequestException or UnauthorizedAccessException
             or System.ComponentModel.Win32Exception)
         {

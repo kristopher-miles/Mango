@@ -4,7 +4,8 @@ using System.Text.Json.Nodes;
 namespace Mango.Providers;
 
 internal sealed class LmStudioAdapter(HttpClient http, ProviderEndpoint endpoint,
-    Func<Uri, CancellationToken, Task<LmStudioDevices?>>? inspectDevices = null) : ProviderAdapter(http, endpoint)
+    Func<Uri, CancellationToken, Task<LmStudioDevices?>>? inspectDevices = null,
+    Func<Uri, string, string, int?, CancellationToken, Task>? loadLocal = null) : ProviderAdapter(http, endpoint)
 {
     private bool Generic => Endpoint.Profile == ProviderProfile.Generic;
     public override bool TransparentInference => Generic;
@@ -103,7 +104,10 @@ internal sealed class LmStudioAdapter(HttpClient http, ProviderEndpoint endpoint
             var remote = copy.Key is { Length: > 0 };
             var onDevice = loaded.Where(item => devices.Device(item) == copy.Key).ToArray();
             var downloaded = copy.First();
-            var known = onDevice.Where(item => item.Text("identifier") is { } id && identifierCounts[id].Count() == 1)
+            var path = !remote && deviceAwareKeys.Contains(key) && copy.Count() == 1 &&
+                downloaded.Text("path") is { Length: > 0 and <= 4096 } exact && !exact.Any(char.IsControl) ? exact : null;
+            var known = onDevice.Where(item => (path is null || item.Text("path") == path) &&
+                    item.Text("identifier") is { } id && identifierCounts[id].Count() == 1)
                 .SelectMany(item => instances[item.Text("identifier")!].Take(1)).DistinctBy(item => item.Id).ToArray();
             var matching = rows.Where(row => row.ArtifactBytes == downloaded.Long("sizeBytes") && row.Format == downloaded.Text("format"));
             var model = rows.FirstOrDefault(row => row.Instances.Any(item => known.Contains(item))) ?? matching.FirstOrDefault() ?? rows[0];
@@ -112,7 +116,11 @@ internal sealed class LmStudioAdapter(HttpClient http, ProviderEndpoint endpoint
                 Id = DeviceModelId(key, copy.Key),
                 Instances = known, Origin = remote ? ModelOrigin.LmLink : ModelOrigin.Local,
                 SourceDevice = remote ? devices.Name(copy.Key!) : null,
-                SupportsLoad = !remote && rows.Length == 1 && copies.Length == 1 && onDevice.Length == known.Length,
+                LocalLoadPath = path,
+                PreparedConfiguration = path is not null
+                    ? ProviderIdentity.Hash(path, downloaded.Long("sizeBytes")?.ToString(), downloaded.Text("format")) : null,
+                SupportsLoad = !remote && (path is not null || !deviceAwareKeys.Contains(key) && rows.Length == 1 &&
+                    copies.Length == 1 && copy.Count() == 1) && onDevice.Length == known.Length,
                 SupportsUnload = !remote && onDevice.Length == known.Length,
                 AmbiguousInstance = known.Length == 0 && onDevice.Length != 0
             };
@@ -133,11 +141,12 @@ internal sealed class LmStudioAdapter(HttpClient http, ProviderEndpoint endpoint
     public override async Task ConfirmDeploymentAsync(InferenceOperation operation, ProviderModel model, ProviderInstance instance,
         CancellationToken cancellation)
     {
-        if (model.Origin is null || model is { Origin: ModelOrigin.Local, SupportsLoad: true }) return;
+        if (model.Origin is null || model is { Origin: ModelOrigin.Local, SupportsLoad: true, LocalLoadPath: null }) return;
         var current = await CurrentInstancesAsync(cancellation);
         var matches = current?.Loaded.Items().Where(item => item.Text("identifier") == instance.Id).ToArray() ?? [];
         if (matches.Length != 1 || matches[0].Text("modelKey") != model.NativeId ||
-            DeviceModelId(model.NativeId, current!.Device(matches[0])) != model.Id)
+            DeviceModelId(model.NativeId, current!.Device(matches[0])) != model.Id ||
+            model.LocalLoadPath is { } path && matches[0].Text("path") != path)
             throw new ProviderFailure(503, "LM Studio could not confirm the loaded instance on its expected device.");
     }
 
@@ -199,9 +208,16 @@ internal sealed class LmStudioAdapter(HttpClient http, ProviderEndpoint endpoint
 
     public override async Task LoadAsync(ProviderModel model, int? context, CancellationToken cancellation)
     {
-        if (!Managed)
+        if (!Managed || !model.SupportsLoad)
         {
             await base.LoadAsync(model, context, cancellation);
+            return;
+        }
+        if (model.LocalLoadPath is { } localPath)
+        {
+            var instanceId = "mango-" + model.Id.ToLowerInvariant();
+            await (loadLocal ?? LmStudioDevices.LoadLocalAsync)(new Uri(Endpoint.Address), localPath, instanceId, context, cancellation);
+            await ConfirmDeploymentAsync(default, model, new(instanceId, null, null, ""), cancellation);
             return;
         }
         var body = new Dictionary<string, object> { ["model"] = model.ManagementId, ["echo_load_config"] = true };
@@ -226,7 +242,7 @@ internal sealed class LmStudioAdapter(HttpClient http, ProviderEndpoint endpoint
         {
             if (!Generic && !await InstanceStillLoadedAsync(model, instance, cancellation))
                 continue;
-            if (model.Origin == ModelOrigin.Local && !model.SupportsLoad)
+            if (model.Origin == ModelOrigin.Local && (!model.SupportsLoad || model.LocalLoadPath is not null))
             {
                 await ConfirmDeploymentAsync(default, model, instance, cancellation);
                 // Panini embedding instances are exposed in HTTP inventory but require

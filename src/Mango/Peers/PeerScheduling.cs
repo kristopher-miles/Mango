@@ -476,7 +476,8 @@ internal sealed partial class PeerNetwork
         foreach (var catalog in current.Records.Catalogs.Where(item => item.Node != here && !Incompatible(item.Node) && item.SchedulingEpoch is not null && item.Role == LocalRole.Contributor &&
             current.Nodes.TryGetValue(item.Node, out var node) && !node.Removed))
             foreach (var model in catalog.Models)
-                if ((catalog.ResourceState is null or ContributionState.Contributor || model.Yolo) &&
+                if ((catalog.ResourceState is null or ContributionState.Contributor || model.Yolo ||
+                    model is { LocallyAvailable: true, Readiness.State: "modeSwitch" }) &&
                     sharedModels.TryGetValue((catalog.Node, model.Id), out var shared))
                     yield return (catalog.Node, model.ProviderIdentifiers is not null ? model :
                         model with { EffectiveAlias = model.EffectiveAlias ?? shared.Alias }, catalog.SchedulingEpoch!);
@@ -511,6 +512,7 @@ internal sealed partial class PeerNetwork
     {
         var endpoint = view.Endpoints.First(item => item.Id == model.EndpointId);
         var protection = providers.Resources;
+        var modeSwitch = ProviderCatalog.NeedsModeSwitch(view, model);
         var workloads = model.Model.Operations.Select(operation =>
         {
             if (model.Yolo && protection?.IsAvailable(model, endpoint, operation) == true)
@@ -521,7 +523,7 @@ internal sealed partial class PeerNetwork
                     ProviderGenerationRate: nativeTiming.ProviderGenerationRate);
             }
             var budget = protection?.Estimate(model, endpoint, operation);
-            if (budget is null || protection?.IsAvailable(model, endpoint, operation) != true)
+            if (budget is null || protection?.IsAvailable(model, endpoint, operation, modeSwitch) != true)
                 return null;
             var slots = protection.OverlapSlots(model, budget);
             if (slots == 0)
@@ -538,7 +540,7 @@ internal sealed partial class PeerNetwork
             model.Model.Installed && (protection is null ? model.Eligible : workloads.Length != 0), model.Model.ClientTools,
             model.Model.StructuredOutput, model.MediaTokensPerItem, model.Model.EmbeddingEncodings, model.PlacementEpoch,
             protection is null ? null : workloads, EffectiveAlias: model.Alias, Readiness: protection?.Readiness(model, endpoint,
-                exclusiveBlocker: ProviderCatalog.ExclusiveBlocker(view, endpoint)),
+                exclusiveBlocker: ProviderCatalog.ExclusiveBlocker(view, endpoint), modeSwitch: modeSwitch),
             Origin: model.Model.Origin, SourceDevice: SafeDetail(model.Model.SourceDevice, 100),
             ProviderIdentifiers: model.ProviderIdentifiers, Yolo: model.Yolo, Busy: model.Busy || model.Instance?.Busy == true);
     }

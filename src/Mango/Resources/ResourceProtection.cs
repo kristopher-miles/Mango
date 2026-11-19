@@ -10,6 +10,8 @@ internal sealed partial class ResourceProtection : IDisposable
     private static readonly TimeSpan Sustained = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan BenchmarkIdle = TimeSpan.FromMinutes(5);
     private const string DedicatedMemoryPressure = "Dedicated memory pressure on ";
+    private const string HostMemoryPressure = "Host RAM is below the reserve or above its pressure cutoff.";
+    private const string CommitPressure = "Windows commit headroom is too low to keep the Strata runtime loaded.";
     private readonly object sync = new();
     private readonly SnapshotFile<LocalSettings> settings;
     private readonly SnapshotFile<ResourceData> store;
@@ -144,7 +146,7 @@ internal sealed partial class ResourceProtection : IDisposable
             return reservations.Any(item => item.Endpoint == endpoint && item.Running && (includeYolo || !item.Yolo));
     }
 
-    public bool IsAvailable(Deployment model, EndpointStatus endpoint, InferenceOperation? requested = null)
+    public bool IsAvailable(Deployment model, EndpointStatus endpoint, InferenceOperation? requested = null, bool modeSwitch = false)
     {
         lock (sync)
         {
@@ -153,7 +155,9 @@ internal sealed partial class ResourceProtection : IDisposable
                     !model.ServingDisabled && model.Online && model.Model.Installed && !model.Model.AmbiguousInstance &&
                     (model.Eligible || endpoint.Mode == ProviderMode.Managed && endpoint.CanLoad && model.Model.SupportsLoad) &&
                     Operations(model, endpoint).Any(operation => requested is null || operation == requested);
-            if (model.ServingDisabled || !ServingAllowed || !model.Model.Installed ||
+            var switching = modeSwitch && CanPrepareModeSwitch &&
+                (settings.Value.BenchmarkPolicy != BenchmarkPolicy.Now || benchmarksReady);
+            if (model.ServingDisabled || !(ServingAllowed || switching) || !model.Model.Installed ||
                 !model.Eligible && !(endpoint.CanLoad && model.Model.SupportsLoad))
                 return false;
             return Operations(model, endpoint).Any(operation =>
@@ -185,17 +189,19 @@ internal sealed partial class ResourceProtection : IDisposable
 
     // Read-only explanation of the same availability facts; admission still checks live pressure and reserves capacity.
     public ServingReadiness Readiness(Deployment model, EndpointStatus endpoint, InferenceOperation? requested = null,
-        string? exclusiveBlocker = null)
+        string? exclusiveBlocker = null, bool modeSwitch = false)
     {
         lock (sync)
         {
-            var available = IsAvailable(model, endpoint, requested);
+            var available = IsAvailable(model, endpoint, requested, modeSwitch);
             ServingReadiness State(string state, string reason, string? action = null) => new(state, reason, action, available);
             if (model.ServingDisabled) return State("disabled", "Serving is disabled for this model.");
             if (model.Model.AmbiguousInstance) return State("device", "LM Studio did not report a uniquely addressable instance for this device.");
             if (!model.Online) return State("offline", "The provider is unreachable. Check its address, credential, and process.", "provider");
             if (!model.Model.Installed) return State("installation", "Install this model in its provider, then refresh the inventory.", "provider");
             if (settings.Value.Role != LocalRole.Contributor) return State("contribution", "Turn on contribution for this computer to serve network requests.", "contribution");
+            if (modeSwitch && available)
+                return State("modeSwitch", ProviderCatalog.ModeSwitchWait, "provider");
             if (exclusiveBlocker is not null) return State("busy", exclusiveBlocker, "provider");
             if (model.Yolo)
                 return State(model.Instance is null ? "readyToLoad" : "ready",
@@ -238,6 +244,43 @@ internal sealed partial class ResourceProtection : IDisposable
     internal static bool CanUseNativeBenchmark(Deployment model, EndpointStatus endpoint) =>
         endpoint.Mode == ProviderMode.Managed &&
         (endpoint.CanUnload && model.Model.SupportsUnload || endpoint.CanStop || endpoint.Executable is not null);
+
+    internal bool CanPrepareModeSwitch
+    {
+        get
+        {
+            lock (sync)
+                return Volatile.Read(ref stopping) == 0 && settings.Value.Role == LocalRole.Contributor &&
+                    (status.State == ContributionState.Contributor || HasMemoryOnlyHold(settings.Value));
+        }
+    }
+
+    private bool HasMemoryOnlyHold(LocalSettings current) =>
+        status.State == ContributionState.Fault && withdrawalCause == WithdrawalCause.Safety &&
+        (status.Reason is HostMemoryPressure or CommitPressure ||
+            status.Reason?.StartsWith(DedicatedMemoryPressure, StringComparison.Ordinal) == true) &&
+        store.Value.Hold?.Pending is not { Length: > 0 } &&
+        CurrentObservation is { TotalRam: > 0 } latest &&
+        (!current.ActivityMonitoring || latest.WorkerAttribution &&
+            latest.ExternalCpu < current.CpuCutoffPercent && latest.ExternalGpu < current.GpuCutoffPercent);
+
+    internal async Task ObserveModeSwitchAsync(CancellationToken cancellation)
+    {
+        if (!await WaitForObservationAsync(cancellation))
+            return;
+        lock (sync)
+        {
+            var current = settings.Value;
+            if (current.Role == LocalRole.Contributor && HasMemoryOnlyHold(current) &&
+                !reservations.Any(item => !item.Settled) && CurrentObservation is { } latest &&
+                (status.Reason != CommitPressure || latest.FreeCommit >= ConfiguredRamReserve(latest, current)) &&
+                (status.Reason?.StartsWith(DedicatedMemoryPressure, StringComparison.Ordinal) != true ||
+                    latest.Devices.Any(device => device is { TotalBytes: > 0, UsedBytes: >= 0 } &&
+                        status.Reason == $"{DedicatedMemoryPressure}{device.Name}.")) &&
+                Pressure(latest, current) is null)
+                SetStatus(new(ContributionState.Contributor, null, null));
+        }
+    }
 
     // Engine admission can sample through a memory-only hold after native work has settled.
     private bool NativeBenchmarkAllowed(LocalSettings current) =>
@@ -718,12 +761,12 @@ internal sealed partial class ResourceProtection : IDisposable
         if (latest.ExclusiveEndpoint is { } endpoint)
         {
             if (latest.FreeCommit is { } commit && commit < reserve)
-                return "Windows commit headroom is too low to keep the Strata runtime loaded.";
+                return CommitPressure;
             latest.Workers.TryGetValue(endpoint, out exclusive);
         }
         var freeForPressure = Math.Min(latest.TotalRam, latest.FreeRam + (exclusive?.ResidentBytes ?? 0));
         if (latest.TotalRam > 0 && (latest.FreeRam < reserve || (latest.TotalRam - freeForPressure) * 100.0 >= latest.TotalRam * current.RamCutoffPercent))
-            return "Host RAM is below the reserve or above its pressure cutoff.";
+            return HostMemoryPressure;
         foreach (var device in latest.Devices.Where(device => !device.Integrated))
             if (device is { TotalBytes: { } total, UsedBytes: { } used })
             {

@@ -137,6 +137,7 @@ internal static class ProviderChecks
         await CheckGenericInventoryAsync(endpoint);
         await CheckGenericMediaAsync(endpoint);
         await CheckLmStudioUnloadAsync(endpoint);
+        await CheckLmStudioSharedLoadAsync(endpoint);
         await CheckResidentImageAsync(endpoint);
         await CheckTransparentHopsAsync(endpoint);
         Console.WriteLine("Provider fixture checks passed.");
@@ -236,6 +237,88 @@ internal static class ProviderChecks
         var before = unloads;
         await Fails(503, () => adapter.UnloadAsync(model, default));
         Check(unloads == before, "a reused instance identifier cannot unload a different model");
+    }
+
+    private static async Task CheckLmStudioSharedLoadAsync(ProviderEndpoint endpoint)
+    {
+        const string key = "shared";
+        const string localPath = "local/gemma q4.gguf";
+        const string remotePath = "linked/gemma q4.gguf";
+        const string linkedInstance = "linked-instance";
+        endpoint = endpoint with { Profile = ProviderProfile.LmStudio };
+        string? localInstance = null;
+        var loadedDevice = "here";
+        var loadedPath = localPath;
+        var loads = 0;
+        var unloads = 0;
+        using var fixture = new HttpClient(new Handler(async request =>
+        {
+            if (request.RequestUri!.AbsolutePath == "/api/v1/models")
+                return Response(HttpStatusCode.OK, JsonSerializer.Serialize(new { models = new[]
+                {
+                    new { key, type = "llm", format = "gguf", size_bytes = 100, capabilities = new { vision = false },
+                        loaded_instances = localInstance is null ? [] : new[] { new { id = localInstance, config = new { context_length = 8192 } } } },
+                    new { key, type = "llm", format = "gguf", size_bytes = 200, capabilities = new { vision = true },
+                        loaded_instances = new[] { new { id = linkedInstance, config = new { context_length = 4096 } } } }
+                } }));
+            Check(request.RequestUri.AbsolutePath == "/api/v1/models/unload", "a shared identifier never reaches the REST load path");
+            using var body = JsonDocument.Parse(await request.Content!.ReadAsStringAsync());
+            Check(body.RootElement.GetProperty("instance_id").GetString() == localInstance,
+                "shared-key unload addresses only the verified local instance");
+            localInstance = null;
+            unloads++;
+            return Response(HttpStatusCode.OK, "{}");
+        }));
+        Task<LmStudioDevices?> InspectAsync(Uri _, CancellationToken token)
+        {
+            var loaded = new List<object> { new { modelKey = key, path = remotePath, deviceIdentifier = "linked", identifier = linkedInstance } };
+            if (localInstance is not null)
+                loaded.Add(new { modelKey = key, path = loadedPath, deviceIdentifier = loadedDevice, identifier = localInstance });
+            return Task.FromResult<LmStudioDevices?>(new(
+                JsonSerializer.SerializeToElement(new { deviceIdentifier = "here" }),
+                JsonSerializer.SerializeToElement(new[]
+                {
+                    new { modelKey = key, path = localPath, deviceIdentifier = "here", sizeBytes = 100, format = "gguf" },
+                    new { modelKey = key, path = remotePath, deviceIdentifier = "linked", sizeBytes = 200, format = "gguf" }
+                }), JsonSerializer.SerializeToElement(loaded)));
+        }
+        Task LoadAsync(Uri origin, string path, string instance, int? context, CancellationToken token)
+        {
+            Check(origin.IsLoopback && path == localPath && instance != linkedInstance && context == 8192,
+                "Mango passes the exact local indexed path, unique instance identifier, and requested context");
+            Check(LmStudioDevices.LocalLoadArguments(path, instance, context).SequenceEqual(
+                ["load", "--local", "--exact", "--identifier", instance, "--context-length", "8192", "--", path]),
+                "the CLI receives an exact local selector and one argument for the path");
+            localInstance = instance;
+            loads++;
+            return Task.CompletedTask;
+        }
+        var adapter = new LmStudioAdapter(fixture, endpoint, InspectAsync, LoadAsync);
+        var inventory = (await adapter.InspectAsync(default)).Models;
+        var local = inventory.Single(item => item.Origin == ModelOrigin.Local);
+        var remote = inventory.Single(item => item.Origin == ModelOrigin.LmLink);
+        Check(local.SupportsLoad && local.PreparedConfiguration is not null && local.Inputs.SequenceEqual(["text"]) &&
+            !remote.SupportsLoad && remote.Inputs.Contains("image"),
+            "each device retains its own capabilities and an exact local copy is loadable");
+        await Fails(409, () => adapter.LoadAsync(remote, null, default));
+
+        await adapter.LoadAsync(local, 8192, default);
+        inventory = (await adapter.InspectAsync(default)).Models;
+        local = inventory.Single(item => item.Origin == ModelOrigin.Local);
+        var instance = local.Instances.Single();
+        Check(loads == 1 && instance.Id == localInstance &&
+            inventory.Single(item => item.Origin == ModelOrigin.LmLink).Instances.Single().Id == linkedInstance,
+            "the load produces a verified local instance while the linked copy remains resident");
+        loadedDevice = "linked";
+        await Fails(503, () => adapter.ConfirmDeploymentAsync(InferenceOperation.Chat, local, instance, default));
+        loadedDevice = "here";
+        loadedPath = remotePath;
+        await Fails(503, () => adapter.UnloadAsync(local, default));
+        Check(unloads == 0, "an instance with a different file cannot be used or unloaded");
+        loadedPath = localPath;
+        await adapter.UnloadAsync(local, default);
+        Check(unloads == 1 && (await adapter.InspectAsync(default)).Models.Single(item => item.Origin == ModelOrigin.LmLink)
+            .Instances.Single().Id == linkedInstance, "explicit local unload leaves the linked instance alone");
     }
 
     private static async Task CheckGenericInventoryAsync(ProviderEndpoint endpoint)

@@ -50,47 +50,80 @@ internal sealed record LmStudioDevices(JsonElement Link, JsonElement Downloaded,
 
     public static async Task UnloadLocalAsync(string instance, CancellationToken cancellation)
     {
-        var start = new ProcessStartInfo(Cli) { UseShellExecute = false, CreateNoWindow = true,
-            RedirectStandardOutput = true, RedirectStandardError = true };
-        start.ArgumentList.Add("unload");
-        start.ArgumentList.Add(instance);
-        using var process = Process.Start(start) ?? throw new IOException("Could not start the LM Studio CLI.");
+        var result = await RunAsync(["unload", instance], cancellation);
+        if (result.ExitCode != 0) throw new ProviderFailure(503, "LM Studio could not release the verified local instance.");
+    }
+
+    public static async Task LoadLocalAsync(Uri origin, string path, string instance, int? context, CancellationToken cancellation)
+    {
+        using var control = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
+        control.CancelAfter(ProviderLimits.ControlTimeout);
         try
         {
-            var output = process.StandardOutput.ReadToEndAsync(cancellation);
-            var error = process.StandardError.ReadToEndAsync(cancellation);
-            await process.WaitForExitAsync(cancellation);
-            await output;
-            await error;
-            if (process.ExitCode != 0) throw new ProviderFailure(503, "LM Studio could not release the verified local instance.");
+            var server = origin.IsLoopback ? await ReadAsync(["server", "status"], control.Token) : default;
+            if (!server.IsTrue("running") || server.Number("port") != origin.Port)
+                throw new ProviderFailure(409, "LM Studio CLI is not connected to this managed server.", code: "load_rejected");
         }
-        finally
+        catch (Exception error) when (!cancellation.IsCancellationRequested &&
+            error is IOException or UnauthorizedAccessException or Win32Exception or JsonException or OperationCanceledException)
         {
-            if (!process.HasExited)
-                try { process.Kill(); } catch (Exception error) when (error is InvalidOperationException or Win32Exception) { }
+            throw new ProviderFailure(409, "Mango could not verify the local LM Studio server.", code: "load_rejected");
+        }
+
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
+        deadline.CancelAfter(ProviderLimits.LifecycleTimeout);
+        try
+        {
+            var result = await RunAsync(LocalLoadArguments(path, instance, context), deadline.Token);
+            if (result.ExitCode == 1)
+            {
+                var diagnostic = result.Output + result.Error;
+                var message = diagnostic.Contains("unknown option", StringComparison.OrdinalIgnoreCase)
+                    ? "Update the LM Studio CLI to load an exact local copy."
+                    : ProviderAdapter.IsAllocationFailure(diagnostic) || diagnostic.Contains("insufficient system resources", StringComparison.OrdinalIgnoreCase)
+                        ? "LM Studio refused the exact local model load because it reported insufficient memory."
+                        : "LM Studio rejected the exact local model load.";
+                throw new ProviderFailure(409, message, code: "load_rejected");
+            }
+            if (result.ExitCode != 0)
+                throw new ProviderFailure(502, "The LM Studio CLI exited before confirming the exact local model load.");
+        }
+        catch (OperationCanceledException) when (!cancellation.IsCancellationRequested)
+        {
+            throw new ProviderFailure(504, "LM Studio did not confirm the exact local model load in time.");
         }
     }
 
+    internal static string[] LocalLoadArguments(string path, string instance, int? context) =>
+        ["load", "--local", "--exact", "--identifier", instance,
+            .. (context is { } limit ? new[] { "--context-length", limit.ToString(System.Globalization.CultureInfo.InvariantCulture) } : []),
+            "--", path];
+
     private static async Task<JsonElement> ReadAsync(string[] arguments, CancellationToken cancellation)
+    {
+        var result = await RunAsync([.. arguments, "--json"], cancellation);
+        if (result.ExitCode != 0 || result.Output.Length > ProviderLimits.MaxControlBytes) return default;
+        using var document = JsonDocument.Parse(result.Output);
+        return document.RootElement.Clone();
+    }
+
+    private static async Task<(int ExitCode, string Output, string Error)> RunAsync(string[] arguments, CancellationToken cancellation)
     {
         var start = new ProcessStartInfo(Cli)
         {
             UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true,
-            RedirectStandardError = true, StandardOutputEncoding = Encoding.UTF8
+            RedirectStandardError = true, RedirectStandardInput = true, StandardOutputEncoding = Encoding.UTF8
         };
         foreach (var argument in arguments) start.ArgumentList.Add(argument);
-        start.ArgumentList.Add("--json");
+        cancellation.ThrowIfCancellationRequested();
         using var process = Process.Start(start) ?? throw new IOException("Could not start the LM Studio CLI.");
         try
         {
+            process.StandardInput.Close();
             var stdout = process.StandardOutput.ReadToEndAsync(cancellation);
             var stderr = process.StandardError.ReadToEndAsync(cancellation);
             await process.WaitForExitAsync(cancellation);
-            var output = await stdout;
-            await stderr;
-            if (process.ExitCode != 0 || output.Length > ProviderLimits.MaxControlBytes) return default;
-            using var document = JsonDocument.Parse(output);
-            return document.RootElement.Clone();
+            return (process.ExitCode, await stdout, await stderr);
         }
         finally
         {

@@ -92,7 +92,7 @@ Mango automatically measures generation speed for eligible loaded chat models un
 
 Only sustained measured external CPU or GPU use starts the user-activity cooldown. Mango's own requests, model switches, memory pressure and missing observations do not start that timer. Known memory limits, native busy or unsettled work, failed release and manual contribution settings still control readiness. Missing telemetry produces a warning and is reconsidered on the next report.
 
-When Mango can confirm the loopback LM Studio server with the installed `lms` CLI, Serving shows separate cards for local and LM Link copies of the same model key. Mango routes to uniquely identified loaded instances. Choose the desired device in LM Studio for a shared model key that needs loading. LM Link execution runs on the linked device, while Mango's local limits cover the relay on this computer.
+When Mango can confirm the loopback LM Studio server with the installed `lms` CLI, Serving shows separate cards for local and LM Link copies of the same model key. For a managed local copy with one exact indexed file, Mango loads that file on this computer, verifies the device and file, and routes or benchmarks by the loaded instance identifier. LM Link execution runs on the linked device, while Mango's local limits cover the relay on this computer.
 
 ## Set up a private Mango network
 

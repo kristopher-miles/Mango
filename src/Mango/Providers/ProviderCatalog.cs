@@ -431,16 +431,21 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
                 throw new ProviderFailure(409, "The model is already unloaded or its state is unknown.");
             var endpoint = View.Endpoints.First(item => item.Id == model.EndpointId);
             var operationKind = benchmark ?? requested ?? resources?.LoadOperation(model, endpoint);
+            var modeSwitch = load && NeedsModeSwitch(View, model);
+            if (modeSwitch && (endpoint.Mode != ProviderMode.Managed || !endpoint.CanLoad))
+                throw new ProviderFailure(409, "The provider does not authorize loading this deployment.");
+            if (load && resources is not null && !benchmark.HasValue && !model.Yolo &&
+                (modeSwitch || adapter is StrataAdapter))
+            {
+                if (resources.Status is { State: not ContributionState.Contributor } status &&
+                    !(modeSwitch && resources.CanPrepareModeSwitch))
+                    throw new ProviderFailure(503, status.Reason ?? "Turn on contribution before loading the model.");
+                var budget = resources.Estimate(model, endpoint, operationKind!.Value);
+                if (budget is null || budget.Load.RamBytes == 0 && budget.Load.DeviceBytes.Values.All(bytes => bytes == 0))
+                    throw new ProviderFailure(503, "Set a peak memory allowance before loading this model.");
+            }
             if (load && adapter is StrataAdapter)
             {
-                if (resources is not null && !benchmark.HasValue)
-                {
-                    if (resources.Status is { State: not ContributionState.Contributor } status)
-                        throw new ProviderFailure(503, status.Reason ?? "Turn on contribution before loading Strata.");
-                    var budget = resources.Estimate(model, endpoint, operationKind!.Value);
-                    if (budget is null || budget.Load.RamBytes == 0 && budget.Load.DeviceBytes.Values.All(bytes => bytes == 0))
-                        throw new ProviderFailure(503, "Set the prepared Strata model's local memory limits before loading.");
-                }
                 if (!activeModels.IsEmpty)
                     throw new ProviderFailure(503, "Waiting for active work before reserving this computer for Strata.", capacityWait: true);
                 stop = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
@@ -448,7 +453,7 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
                 cancellation = stop.Token;
             }
             if (load)
-                await PrepareExclusiveAsync(model, displaced, cancellation, loading);
+                await PrepareResidencyAsync(model, displaced, cancellation, loading);
             if (WorkInProgress(model.EndpointId, includeUncertain: load))
                 throw new ProviderFailure(409, "Work on this provider must settle before changing model state.");
             if (load && (benchmark.HasValue ? HasUnsettledWork(endpoint) : !uncertainModels.IsEmpty))
@@ -606,6 +611,55 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
 
     private const string AttachedStrataBlocker = "Unload the attached provider's model or let Mango manage that provider before starting Strata.";
 
+    private static bool DifferentLocalMode(Deployment first, Deployment second) =>
+        first.Yolo != second.Yolo && first.Model.Origin != ModelOrigin.LmLink && second.Model.Origin != ModelOrigin.LmLink;
+
+    internal static bool NeedsModeSwitch(CatalogView snapshot, Deployment target) =>
+        snapshot.Models.Any(model => model.Instance is not null && DifferentLocalMode(model, target));
+
+    private bool OtherModeHasWork(CatalogView snapshot, Deployment target) =>
+        snapshot.Models.Any(model => DifferentLocalMode(model, target) && (model.Busy || HasUnsettled(model.Id)));
+
+    internal const string ModeSwitchWait = "Waiting for the other resource mode to release its resident models.";
+
+    private async Task PrepareResidencyAsync(Deployment target, Func<string, Task>? displaced,
+        CancellationToken cancellation, ExclusiveLoad? loading = null)
+    {
+        var snapshot = View;
+        if (OtherModeHasWork(snapshot, target))
+            throw new ProviderFailure(503, ModeSwitchWait, capacityWait: true);
+        var residents = snapshot.Models.Where(model => model.Instance is not null && DifferentLocalMode(model, target)).ToArray();
+        if (residents.Length != 0 && resources is { CanPrepareModeSwitch: false })
+            throw new ProviderFailure(503, ModeSwitchWait, capacityWait: true);
+        foreach (var resident in residents)
+        {
+            var owner = snapshot.Endpoints.First(endpoint => endpoint.Id == resident.EndpointId);
+            if (owner.Mode != ProviderMode.Managed || !owner.CanUnload || !owner.CanLoad ||
+                !resident.Model.SupportsUnload || !resident.Model.SupportsLoad)
+                throw new ProviderFailure(503, $"Mango cannot swap {resident.Model.DisplayName} because its provider cannot unload and reload it.",
+                    code: "mode_switch_lifecycle");
+            if (resident.Busy || resident.Model.Instances.Any(instance => instance.Busy) ||
+                WorkInProgress(owner.Id) || HasUnsettledWork(owner) ||
+                await adapters[owner.Id].CheckIdleAsync(resident.Model, cancellation) == false)
+                throw new ProviderFailure(503, ModeSwitchWait, capacityWait: true);
+        }
+        await PrepareExclusiveAsync(target, displaced, cancellation, loading);
+        if (residents.Length == 0)
+            return;
+        foreach (var resident in residents)
+        {
+            if (!View.Models.Any(model => model.Id == resident.Id && model.Instance is not null))
+                continue;
+            await ManageUnderGateAsync(resident.Id, false, cancellation, switching: true);
+            if (displaced is not null)
+                await displaced(resident.Id);
+        }
+        if (NeedsModeSwitch(View, target))
+            throw new ProviderFailure(503, ModeSwitchWait, capacityWait: true);
+        if (resources is not null)
+            await resources.ObserveModeSwitchAsync(cancellation);
+    }
+
     private async Task PrepareExclusiveAsync(Deployment target, Func<string, Task>? displaced,
         CancellationToken cancellation, ExclusiveLoad? loading = null)
     {
@@ -645,7 +699,7 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
         foreach (var resident in residentsToDrain)
         {
             if (View.Models.Any(model => model.Id == resident.Id && model.Instance is not null))
-                await ManageUnderGateAsync(resident.Id, false, cancellation, scheduled: true, switching: true);
+                await ManageUnderGateAsync(resident.Id, false, cancellation, switching: true);
             if (displaced is not null) await displaced(resident.Id);
         }
         if (others.Any(endpoint => adapters[endpoint.Id].OwnedProcessId.HasValue) ||
@@ -742,23 +796,27 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
             ? resources?.QualifiedUnits(model, endpoint, shape.Operation) : null);
         var budget = resources?.Estimate(model, endpoint, shape.Operation);
         if (resources is not null && ((!model.Yolo && (budget is null || !ResourceProtection.Covers(budget.Workload, workload))) ||
-            !resources.IsAvailable(model, endpoint, shape.Operation)))
+            !resources.IsAvailable(model, endpoint, shape.Operation, NeedsModeSwitch(snapshot, model))))
             return null;
         return new(model, endpoint, budget, workload);
     }
 
-    public bool Conflicts(ServingPlacement a, ServingPlacement b) => a.Endpoint.Id == b.Endpoint.Id ||
+    public bool Conflicts(ServingPlacement a, ServingPlacement b) => DifferentLocalMode(a.Model, b.Model) || a.Endpoint.Id == b.Endpoint.Id ||
         a.Endpoint.ExclusiveHost || b.Endpoint.ExclusiveHost ||
         resources is null || !resources.CanBackfill(a, b);
 
-    public bool NeedsPreparation(ServingPlacement placement) => placement.Model.Instance is null ||
-        View.Endpoints.Any(endpoint => endpoint.Id != placement.Endpoint.Id && endpoint.HostReserved);
+    public bool NeedsPreparation(ServingPlacement placement)
+    {
+        var current = View;
+        return placement.Model.Instance is null || NeedsModeSwitch(current, placement.Model) ||
+            current.Endpoints.Any(endpoint => endpoint.Id != placement.Endpoint.Id && endpoint.HostReserved);
+    }
 
     internal bool WouldDisplace(ServingPlacement placement)
     {
         var current = View;
         var endpoint = placement.Endpoint;
-        if (current.Endpoints.Any(other => other.Id != endpoint.Id && other.HostReserved))
+        if (NeedsModeSwitch(current, placement.Model) || current.Endpoints.Any(other => other.Id != endpoint.Id && other.HostReserved))
             return true;
         if (placement.Model.Instance is not null)
             return false;
@@ -778,7 +836,7 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
         {
             if (!await operation.WaitAsync(0, cancellation))
                 throw new ProviderFailure(409, "A provider operation is in progress.");
-            try { await PrepareExclusiveAsync(target, displaced, cancellation); }
+            try { await PrepareResidencyAsync(Find(target.Id), displaced, cancellation); }
             finally { ReleaseOperation(); }
             return;
         }
@@ -797,7 +855,7 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
                 .OrderByDescending(item => item.EndpointId == target.EndpointId).ThenByDescending(item => item.Model.ArtifactBytes)
                 .ToArray();
             var endpointFull = placement.Endpoint.MaxLoadedModels is { } max && current.Models.Count(item =>
-                item.EndpointId == target.EndpointId && item.Instance is not null) >= max;
+                item.EndpointId == target.EndpointId && item.Instance is not null && !DifferentLocalMode(item, target)) >= max;
             var victim = idle.FirstOrDefault(item => item.EndpointId == target.EndpointId && endpointFull);
             if (endpointFull && victim is null)
                 throw new ProviderFailure(503, "Waiting for a model slot to become idle.", capacityWait: true);
@@ -831,7 +889,10 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
             if (placement is null)
                 return new(AdmissionStatus.Unavailable, "The local deployment cannot serve this request.");
             var model = placement.Model;
-            if (ExclusiveBlocker(View, placement.Endpoint) is { } blocker)
+            var snapshot = View;
+            if (NeedsModeSwitch(snapshot, model) || OtherModeHasWork(snapshot, model))
+                return new(AdmissionStatus.Wait, ModeSwitchWait);
+            if (ExclusiveBlocker(snapshot, placement.Endpoint) is { } blocker)
                 return new(AdmissionStatus.Wait, blocker);
             if (HasUnsettled(id) || !model.Eligible || model.Instance is { Busy: true } || resources is null && !activeModels.IsEmpty)
                 return new(AdmissionStatus.Wait, "The deployment is loading or busy.");
@@ -904,6 +965,9 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
             if (!model.Eligible || model.Instance?.ResourceFingerprint != runtime || model.Busy ||
                 model.Instance?.Busy == true || uncertainModels.ContainsKey(id))
                 throw new ProviderFailure(409, "The benchmark deployment is not settled and ready.");
+            var snapshot = View;
+            if (NeedsModeSwitch(snapshot, model) || OtherModeHasWork(snapshot, model))
+                await PrepareResidencyAsync(model, null, cancellation);
             adapter = adapters[model.EndpointId];
             reservation = resources!.TryAdmit(model, endpoint,
                 workload, ResourceWork.Benchmark, profiling: true, speedSample: pass == BenchmarkProtocol.SpeedPass).Require();
