@@ -1085,9 +1085,17 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
                     }
                     var models = View.Models.Where(item => item.EndpointId == endpoint.Id && item.Instance is not null &&
                         item.Model.Origin != ModelOrigin.LmLink && (includeYolo || !item.Yolo)).ToArray();
+                    var uncertain = uncertainModels.Any(item => item.Value == endpoint.Id && (includeYolo || !IsYolo(item.Key)));
                     if (!owned && !View.Endpoints.Any(item => item.Id == endpoint.Id && item.Online))
+                    {
+                        if (models.Length == 0 && !uncertain && adapter is LlamaAdapter llama &&
+                            (resources?.Observation?.Workers.GetValueOrDefault(endpoint.Id)?.Processes
+                                .All(pid => !WindowsObservation.ProcessExists(pid)) ?? true) &&
+                            await llama.IsLaunchPortFreeAsync(deadline.Token))
+                            continue;
                         return new(released.ToArray(), "Mango could not verify that the managed provider released its models.");
-                    if (models.Length == 0 && !owned && !uncertainModels.Any(item => item.Value == endpoint.Id && (includeYolo || !IsYolo(item.Key))))
+                    }
+                    if (models.Length == 0 && !owned && !uncertain)
                         continue;
                     using var unload = CancellationTokenSource.CreateLinkedTokenSource(deadline.Token);
                     unload.CancelAfter(TimeSpan.FromSeconds(6));

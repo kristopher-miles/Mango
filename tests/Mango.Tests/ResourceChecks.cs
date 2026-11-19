@@ -32,6 +32,7 @@ internal static class ResourceChecks
         Check(visited.SetEquals([3, 4]), "fresh creation identities exclude reused-parent PID ancestry and its subtree while retaining live workers");
         await CheckLoadedLmStudioBenchmarkAsync(root);
         await CheckColdBenchmarkSlotsAsync(root);
+        await CheckOfflineLauncherReleaseAsync(root);
         await CheckTransientReleaseRecoveryAsync(root);
         var directory = Directory.CreateDirectory(Path.Combine(root, "resources")).FullName;
         var settings = new SnapshotFile<LocalSettings>(Path.Combine(directory, "local-settings.json"), LocalSettings.Validate);
@@ -648,6 +649,30 @@ internal static class ResourceChecks
         Check(evidence.GetProperty("measurements").EnumerateArray().Single().GetProperty("pass").GetString() == "cold" &&
             evidence.GetProperty("speed").ValueKind == JsonValueKind.Null && !evidence.GetProperty("complete").GetBoolean(),
             "retry keeps matching cold-load evidence while discarding the previous warm samples");
+    }
+
+    private static async Task CheckOfflineLauncherReleaseAsync(string root)
+    {
+        var directory = Directory.CreateDirectory(Path.Combine(root, "offline-launcher-release")).FullName;
+        var builder = WebApplication.CreateSlimBuilder();
+        builder.Logging.ClearProviders();
+        builder.WebHost.ConfigureKestrel(server => server.Listen(IPAddress.Loopback, 0));
+        await using var fixture = builder.Build();
+        await fixture.StartAsync();
+        await using var providers = new ProviderCatalog(directory);
+        await providers.InitializeAsync();
+        var endpoint = await providers.ConfigureAsync(new(null, ProviderProfile.LlamaSingle, ProviderMode.Managed,
+            fixture.Urls.Single(), null, false, Path.Combine(directory, "llama-server.exe"),
+            Path.Combine(directory, "model.gguf")), default);
+        Check(!endpoint.Online && (await providers.ReleaseManagedAsync(default)).Error is not null,
+            "an unrecognized listener cannot prove that a managed llama-server is cold");
+        await fixture.StopAsync();
+        Check((await providers.ReleaseManagedAsync(default)).Error is null,
+            "a stopped on-demand llama-server with a free port does not block release");
+        providers.RestoreUnsettled(endpoint.Id, providers.View.Models.Single().Id, loading: true);
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(1));
+        Check((await providers.ReleaseManagedAsync(cancellation.Token)).Error is not null,
+            "an interrupted load cannot be cleared by a free port");
     }
 
     private static async Task CheckTransientReleaseRecoveryAsync(string root)

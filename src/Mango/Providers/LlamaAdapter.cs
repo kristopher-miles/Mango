@@ -176,15 +176,10 @@ internal sealed class LlamaAdapter(HttpClient http, ProviderEndpoint endpoint) :
             throw new ProviderFailure(409, "Mango's llama-server is already running.");
         if (!File.Exists(Endpoint.Executable) || !File.Exists(Endpoint.ModelFile))
             throw new ProviderFailure(409, "The authorized executable or GGUF file is missing.");
-        var uri = new Uri(Endpoint.Address);
-        using var socket = new TcpClient();
-        try
-        {
-            await socket.ConnectAsync(uri.Host, uri.Port, cancellation);
+        if (!await IsLaunchPortFreeAsync(cancellation))
             throw new ProviderFailure(409, "A process already occupies the configured llama-server address.");
-        }
-        catch (SocketException error) when (error.SocketErrorCode == SocketError.ConnectionRefused) { }
 
+        var uri = new Uri(Endpoint.Address);
         var start = new ProcessStartInfo(Endpoint.Executable!)
         {
             WorkingDirectory = Path.GetDirectoryName(Endpoint.Executable)!,
@@ -214,6 +209,17 @@ internal sealed class LlamaAdapter(HttpClient http, ProviderEndpoint endpoint) :
                 Volatile.Write(ref allocationFailure, 1);
         };
         owned.BeginErrorReadLine();
+    }
+
+    internal async Task<bool> IsLaunchPortFreeAsync(CancellationToken cancellation)
+    {
+        if (!CanLaunch || OwnedProcessId.HasValue)
+            return false;
+        var uri = new Uri(Endpoint.Address);
+        using var socket = new TcpClient();
+        try { await socket.ConnectAsync(uri.Host, uri.Port, cancellation); }
+        catch (SocketException error) when (error.SocketErrorCode == SocketError.ConnectionRefused) { return true; }
+        return false;
     }
 
     public override async Task UnloadAsync(ProviderModel model, CancellationToken cancellation)
