@@ -38,6 +38,11 @@ try
         Console.WriteLine("Cold route checks passed.");
         return;
     }
+    if (args is ["--scheduling-checks"])
+    {
+        await SchedulingChecks.RunAsync();
+        return;
+    }
     if (args is ["--provider-resource-checks"])
     {
         await ProviderChecks.RunAsync();

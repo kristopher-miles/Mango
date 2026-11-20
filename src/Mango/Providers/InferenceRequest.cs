@@ -257,6 +257,9 @@ internal sealed class InferenceRequest(InferenceOperation operation, string alia
     public async Task<ProviderExecution> ForwardAsync(Deployment deployment, ProviderAdapter adapter,
         HttpContext context, CancellationToken cancellation)
     {
+        // A pre-submission retry replaces the body prepared for the retired instance.
+        outbound?.Dispose();
+        outbound = null;
         if (!deployment.Model.Operations.Contains(operation))
             throw new ProviderFailure(422, "This deployment does not support the requested inference operation.");
         var instance = deployment.Instance ?? throw new ProviderFailure(409, "The selected deployment is not loaded.");

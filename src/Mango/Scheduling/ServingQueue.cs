@@ -565,6 +565,25 @@ internal sealed class ServingQueue : IAsyncDisposable
         try
         {
             var execution = await execute(work.Context, token);
+            if (execution.RetryBeforeSubmission && execution.Settled && !work.Payload.Submitted && !work.Context.Response.HasStarted)
+            {
+                lock (sync)
+                {
+                    if (ReferenceEquals(entry.Work, work) && entry.State.State == AttemptState.Running)
+                    {
+                        entry.State = new(AttemptState.Waiting);
+                        entry.WaitingReason = "Refreshing a retired native instance before inference.";
+                        entry.LastLoadRevision = -1;
+                        waiting++;
+                        waitingBytes += work.Payload.Bytes;
+                        ActivityChanged?.Invoke();
+                        // Keep the attempt, cancellation source and QueueUntil.
+                        // Expiry/draining is checked again by the normal pump.
+                        Wake();
+                        return;
+                    }
+                }
+            }
             awaitingSettlement = !execution.Settled;
             result = execution switch
             {

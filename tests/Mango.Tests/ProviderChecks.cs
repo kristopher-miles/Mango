@@ -129,10 +129,12 @@ internal static class ProviderChecks
                 : Response(HttpStatusCode.OK, "data: {\"error\":{\"message\":\"out of memory\"}}\n\n", "text/event-stream"))));
         var exhausted = await Fails(503, () => Run(InferenceOperation.Chat, ChatBody, chat, new UnslothAdapter(allocation, endpoint)));
         Check(exhausted.AllocationFailure, "provider streaming allocation errors invalidate the local placement");
-        using var unlabeledStream = new HttpClient(new Handler(_ => Task.FromResult(
-            Response(HttpStatusCode.OK, Stream, "application/octet-stream"))));
+        using var unlabeledStream = new HttpClient(new Handler(request => Task.FromResult(
+            request.Method == HttpMethod.Get ? GenericInstanceInventory() :
+                Response(HttpStatusCode.OK, Stream, "application/octet-stream"))));
         var generic = new LmStudioAdapter(unlabeledStream, endpoint with { Profile = ProviderProfile.Generic });
-        var invalidStream = await Fails(502, () => Run(InferenceOperation.Chat, ChatBody, chat, generic));
+        var genericChat = chat with { Model = (await generic.InspectAsync(default)).Models.Single() };
+        var invalidStream = await Fails(502, () => Run(InferenceOperation.Chat, ChatBody, genericChat, generic));
         Check(invalidStream.Message.Contains("event stream"), "unlabeled chat streams are rejected as invalid provider responses");
         await CheckGenericInventoryAsync(endpoint);
         await CheckGenericMediaAsync(endpoint);
@@ -170,6 +172,7 @@ internal static class ProviderChecks
             expected["model"] = "instance-id";
             var calls = 0;
             using var fixture = new HttpClient(new Handler(async request => {
+                if (request.Method == HttpMethod.Get) return GenericInstanceInventory();
                 calls++;
                 var actual = JsonNode.Parse(await request.Content!.ReadAsStringAsync());
                 Check(JsonNode.DeepEquals(actual, expected), "all provider fields survive ingress and peer parsing except model resolution");
@@ -187,7 +190,7 @@ internal static class ProviderChecks
                     "large retained data URLs count as six media items rather than base64 text context");
             var deployment = DeploymentFor(endpoint.Id, operation);
             deployment = deployment with { Model = deployment.Model with { Inputs = ["image", "text"],
-                ReportedMediaTokensPerItem = 1024, Instances = [new("instance-id", 262144, 1, "fixture")] } };
+                ReportedMediaTokensPerItem = 1024, Instances = (await adapter.InspectAsync(default)).Models.Single().Instances } };
             var timing = await peer.ForwardAsync(deployment, adapter, servingContext, default);
             Check(calls == 1 && (operation != InferenceOperation.Chat || timing.PromptTokens < 10240),
                 "otherwise admissible opaque request reaches provider without a tokenizer preflight");
@@ -412,7 +415,18 @@ internal static class ProviderChecks
         Check(transcription.Model.Inputs.SequenceEqual(["audio"]) && transcription.Model.Outputs.SequenceEqual(["text"]),
             "generic transcription publishes audio input and text output");
         using var payload = await InferenceRequest.ReadAsync(InferenceOperation.Transcription, context.Request, default);
+        var retired = transcription with { Model = transcription.Model with {
+            Instances = transcription.Model.Instances.Select(instance => instance with { ConfigurationFingerprint = "retired" }).ToArray() } };
+        await Fails(409, () => payload.ForwardAsync(retired, adapter, context, default));
+        var rejectedBody = (HttpContent)typeof(InferenceRequest).GetField("outbound",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(payload)!;
         await payload.ForwardAsync(transcription, adapter, context, default);
+        try
+        {
+            await rejectedBody.ReadAsByteArrayAsync();
+            throw new InvalidOperationException("The rejected multipart body was not disposed before retry.");
+        }
+        catch (ObjectDisposedException) { }
     }
 
     private static async Task RejectTranscriptionFieldAsync(string name, string value)
@@ -586,6 +600,11 @@ internal static class ProviderChecks
 
     private static HttpResponseMessage Response(HttpStatusCode status, string body, string mime = "application/json") =>
         new(status) { Content = new StringContent(body, Encoding.UTF8, mime) };
+
+    private static HttpResponseMessage GenericInstanceInventory() => Response(HttpStatusCode.OK, """
+        {"models":[{"key":"native-model","type":"llm","input_modalities":["text","image"],"client_tools":true,
+          "loaded_instances":[{"id":"instance-id","busy":false,"config":{"context_size":262144,"parallel":1}}]}]}
+        """);
 
     private static async Task<ProviderFailure> Fails(int status, Func<Task> check)
     {

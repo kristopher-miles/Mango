@@ -22,6 +22,8 @@ internal static class ColdRouteChecks
         var loads = 0;
         var refuseLoad = false;
         var calls = 0;
+        var retiredDispatches = 0;
+        var abortNext = false;
         var builder = WebApplication.CreateSlimBuilder();
         builder.Logging.ClearProviders();
         builder.WebHost.ConfigureKestrel(server => server.Listen(IPAddress.Loopback, 0));
@@ -29,7 +31,7 @@ internal static class ColdRouteChecks
         native.MapGet("/api/v1/models", () => new { models = new[] { new
         {
             key = "qualified-cold", type = "llm", size_bytes = 64 * 1024 * 1024, max_context_length = 1048576,
-            loaded_instances = loaded ? new[] { new { id = "actual-instance", config = new { context_length = 262144, parallel = 1 } } } : []
+            loaded_instances = loaded ? new[] { new { id = "actual-instance-" + loads, config = new { context_length = 262144, parallel = 1 } } } : []
         } } });
         native.MapPost("/api/v1/models/load", async (HttpContext context) =>
         {
@@ -44,9 +46,17 @@ internal static class ColdRouteChecks
         native.MapPost("/v1/chat/completions", async (HttpContext context) =>
         {
             using var body = await JsonDocument.ParseAsync(context.Request.Body);
-            Check(loaded && body.RootElement.GetProperty("model").GetString() == "actual-instance",
+            if (!loaded || body.RootElement.GetProperty("model").GetString() != "actual-instance-" + loads)
+                retiredDispatches++;
+            Check(loaded && body.RootElement.GetProperty("model").GetString() == "actual-instance-" + loads,
                 "qualified cold request reaches the actual loaded provider instance");
             calls++;
+            if (abortNext)
+            {
+                abortNext = false;
+                context.Abort();
+                return Results.Empty;
+            }
             return Results.Json(new { id = "cold-route-pass" });
         });
         await native.StartAsync();
@@ -115,6 +125,23 @@ internal static class ColdRouteChecks
             "real serving queue dispatches once despite incomplete startup attribution");
         Check(request.Response.StatusCode == 200 && loads == 1 && calls == 1 &&
             providers.View.Models.Single().Context == 262144, "saved 262144 qualification routes through ingress and serving cold admission");
+        loaded = false; // Genuine provider idle expiry, without refreshing Mango.
+        Check(providers.View.Models.Single().Instance?.Id == "actual-instance-1",
+            "the fake provider retired its instance while Mango still caches it");
+        var afterIdle = Request();
+        await network.RouteAsync(InferenceOperation.Chat, afterIdle, deadline.Token);
+        Check(afterIdle.Response.StatusCode == 200 && loads == 2 && calls == 2 && retiredDispatches == 0 &&
+            providers.View.Models.Single().Instance?.Id == "actual-instance-2",
+            "the first request after real idle refreshes, reloads and dispatches exactly once");
+        abortNext = true;
+        try
+        {
+            await network.RouteAsync(InferenceOperation.Chat, Request(), deadline.Token);
+            throw new InvalidOperationException("Expected the submitted connection failure.");
+        }
+        catch (ProviderFailure error) when (error.Status is 502 or 503) { }
+        Check(calls == 3 && loads == 2 && retiredDispatches == 0,
+            "a connection lost after submission is never replayed as a stale-instance retry");
         loaded = false;
         await providers.RefreshAsync(endpoint.Id, default);
         await providers.SetServingAsync(model.Id, false, default);
@@ -123,7 +150,7 @@ internal static class ColdRouteChecks
         pressure = true;
         resources.ApplyObservation(Sample());
         await Reject(503);
-        Check(loads == 1 && calls == 1, "manual disable and ordinary host pressure still prevent cold dispatch");
+        Check(loads == 2 && calls == 3, "manual disable and ordinary host pressure still prevent cold dispatch");
     }
 
     private static void Check(bool condition, string description)

@@ -141,6 +141,15 @@ internal sealed class LmStudioAdapter(HttpClient http, ProviderEndpoint endpoint
     public override async Task ConfirmDeploymentAsync(InferenceOperation operation, ProviderModel model, ProviderInstance instance,
         CancellationToken cancellation)
     {
+        if (Generic)
+        {
+            var inventory = await InspectAsync(cancellation);
+            if (!inventory.Models.Any(item => item.NativeId == model.NativeId && item.Instances.Any(live =>
+                    live.Id == instance.Id && live.ResourceFingerprint == instance.ResourceFingerprint)))
+                throw new ProviderFailure(409, "The native provider retired or replaced the loaded instance.",
+                    code: "generic_instance_retired");
+            return;
+        }
         if (model.Origin is null || model is { Origin: ModelOrigin.Local, SupportsLoad: true, LocalLoadPath: null }) return;
         var current = await CurrentInstancesAsync(cancellation);
         var matches = current?.Loaded.Items().Where(item => item.Text("identifier") == instance.Id).ToArray() ?? [];

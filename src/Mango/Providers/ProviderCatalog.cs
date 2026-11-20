@@ -26,7 +26,8 @@ internal sealed record ProviderLifecycle(string DeploymentId, bool Loading, Time
 internal sealed record ReleasedEndpoint(Guid Id, int? StoppedProcess);
 internal sealed record ReleaseResult(ReleasedEndpoint[] Released, string? Error = null, bool AwaitingStop = false);
 internal sealed record ServingPlacement(Deployment Model, EndpointStatus Endpoint, ResourceBudget? Budget, Workload Workload);
-internal sealed record ExecutionResult(bool Settled, ProviderFailure? Failure, ProviderExecution? Timing);
+internal sealed record ExecutionResult(bool Settled, ProviderFailure? Failure, ProviderExecution? Timing,
+    bool RetryBeforeSubmission = false);
 internal sealed record StartExecution(AdmissionStatus Status, string? Reason,
     Func<HttpContext, CancellationToken, Task<ExecutionResult>>? Execute = null, string? Epoch = null);
 
@@ -946,7 +947,16 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
         {
             settled = await FinishExecutionAsync(model, adapter, reservation, !payload.Submitted || payload.Settled);
         }
-        return new(settled, failure, execution);
+        var retry = settled && !payload.Submitted && !context.Response.HasStarted &&
+            failure?.Code == "generic_instance_retired";
+        if (retry)
+        {
+            // Release the old reservation before replacing its inventory. Nothing
+            // was submitted to inference; the queue retains its original deadline.
+            try { await RefreshAsync(model.EndpointId, cancellation); }
+            catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { }
+        }
+        return new(settled, failure, execution, RetryBeforeSubmission: retry);
     }
 
     internal async Task<BenchmarkResult> BenchmarkAsync(string id, Workload workload, string pass, string runtime,

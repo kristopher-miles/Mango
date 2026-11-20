@@ -23,7 +23,22 @@ internal static class SchedulingChecks
         await ChangedScarcityAsync(changeCatalog: false);
         await CancellationAsync();
         await MaintenanceDrainAsync();
+        await RetiredInstanceDeadlineAsync();
         Console.WriteLine("Scheduling, queue ownership and cancellation checks passed.");
+    }
+
+    private static async Task RetiredInstanceDeadlineAsync()
+    {
+        var backend = new Backend { RetryBeforeSubmission = true };
+        await using var queue = new ServingQueue(backend);
+        var work = await Work("retired past deadline", "small", expires: DateTimeOffset.UtcNow.AddMilliseconds(150));
+        var pending = queue.SubmitAsync(work, default);
+        await backend.Started("retired past deadline");
+        await Task.Delay(250);
+        backend.Release("retired past deadline");
+        var result = await pending.WaitAsync(Timeout);
+        Check(result.Status == 504 && backend.Releases("retired past deadline") == 1 && !work.Payload.Submitted,
+            "retired instance retry preserves the original admission deadline and never submits expired work");
     }
 
     private static async Task MaintenanceDrainAsync()
@@ -238,6 +253,7 @@ internal static class SchedulingChecks
         private readonly ConcurrentDictionary<string, TaskCompletionSource> releases = new();
         private readonly ConcurrentDictionary<string, int> releaseCount = new();
         public ResourceProtection? Resources => null;
+        public bool RetryBeforeSubmission { get; init; }
         public event Action? Changed { add { } remove { } }
         public event Action? AdmissionChanged;
 
@@ -269,7 +285,7 @@ internal static class SchedulingChecks
                 try
                 {
                     await Gate(releases, name).Task.WaitAsync(token);
-                    return new(true, null, null);
+                    return new(true, null, null, RetryBeforeSubmission);
                 }
                 catch (OperationCanceledException) when (token.IsCancellationRequested)
                 {
