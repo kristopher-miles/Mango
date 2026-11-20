@@ -1,10 +1,11 @@
 <!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Mango · Local settings</title><link rel="icon" href="/mango.svg" type="image/svg+xml"><link rel="stylesheet" href="/mango.css">
+<title>Mango · Local settings</title><link rel="icon" href="/mango.svg" type="image/svg+xml"><script src="/theme.js"></script><link rel="stylesheet" href="/mango.css">
 <script src="/preferences.js" defer></script>
 <script src="/shell.js" defer></script>
 <script src="/mango.js" defer></script>
+<script src="/model-inventory.js" defer></script>
 <script src="/network-catalog.js" defer></script>
 <script src="/enrollment.js" defer></script>
 <script src="/network.js" defer></script>
@@ -13,29 +14,30 @@
 <script src="/logs.js" defer></script>
 </head><body>
 <a class="skip-link" href="#main-content">Skip to content</a>
-<aside class="app-sidebar" aria-label="Mango workspace">
+<header class="app-sidebar" aria-label="Mango workspace">
 <a class="brand" aria-label="Mango home" href="#/overview"><img src="/mango.svg" alt="" width="30" height="30"><span>Mango</span></a>
 <div class="host-identity"><strong id="sidebar-node">This computer</strong><span id="sidebar-network" class="muted">Local workspace</span></div>
 <nav id="primary-nav" class="primary-nav" aria-label="Main navigation"><a href="#/overview" aria-label="Overview"><svg class="glyph" aria-hidden="true"><use href="/glyphs.svg#overview"></use></svg><span>Overview</span></a><a href="#/serving" aria-label="Serving"><svg class="glyph" aria-hidden="true"><use href="/glyphs.svg#provider"></use></svg><span>Serving</span></a><a href="#/activity/live" aria-label="Activity"><svg class="glyph" aria-hidden="true"><use href="/glyphs.svg#activity"></use></svg><span>Activity</span></a><a href="#/network/nodes" aria-label="Network"><svg class="glyph" aria-hidden="true"><use href="/glyphs.svg#network"></use></svg><span>Network</span></a><a href="#/protection/activity" aria-label="Protection"><svg class="glyph" aria-hidden="true"><use href="/glyphs.svg#protection"></use></svg><span>Protection</span></a><a href="#/system/startup" aria-label="System"><svg class="glyph" aria-hidden="true"><use href="/glyphs.svg#system"></use></svg><span>System</span></a></nav>
-<div class="rail-status"><div class="contribution-status"><span class="muted">This computer</span><strong id="rail-contribution">Checking…</strong></div><div class="administration-actions"><button id="admin-control" class="admin-control" type="button"><svg class="glyph" aria-hidden="true"><use href="/glyphs.svg#lock"></use></svg><span id="admin-label">Not joined</span></button><button id="admin-lock" class="quiet" type="button" hidden>Lock</button></div><button id="pending-edits" class="quiet" type="button" hidden>Unfinished changes</button></div>
-</aside>
+<div class="rail-status"><div class="contribution-status"><span class="muted">This computer</span><strong id="rail-contribution">Checking…</strong></div><div class="administration-actions"><button id="theme-toggle" type="button" class="quiet icon-control" aria-label="Switch to light mode" title="Switch to light mode"><svg class="glyph" aria-hidden="true"><use href="/glyphs.svg#sun"></use></svg></button><button id="admin-control" class="admin-control" type="button"><svg class="glyph" aria-hidden="true"><use href="/glyphs.svg#lock"></use></svg><span id="admin-label" class="sr-only">Not joined</span></button></div><button id="pending-edits" class="quiet" type="button" hidden>Unfinished changes</button></div>
+</header>
+<div id="admin-toast" class="lock-toast" hidden><span role="status"></span> <button type="button" class="quiet" id="toast-unlock">Unlock</button></div>
 <main id="main-content" tabindex="-1"><div class="page-heading"><div><h1 id="page-title" tabindex="-1">Overview</h1><p id="page-description" class="muted"></p></div><p id="status" role="status">Opening local session…</p></div>
 <nav id="page-tabs" class="page-tabs" aria-label="Page views"></nav><div id="workspace" hidden>
-<section data-page="overview" class="page " hidden><div class="overview-grid"><div><section class="panel resource-chart"><div class="panel-heading"><h2>Local resources</h2><span id="chart-freshness" class="muted">Waiting for observations</span></div><div id="resource-metrics" class="metric-grid"></div><label id="chart-device-label" class="compact" hidden>GPU memory device<select id="chart-device"></select></label><svg id="resource-chart" viewBox="0 0 800 220" role="img" aria-labelledby="chart-title chart-description"><title id="chart-title">Local resource usage over the last ten minutes</title><desc id="chart-description">No observations yet.</desc></svg><p id="chart-summary" class="muted">History starts when this view opens.</p><p id="chart-limitation" class="muted"></p></section><section class="panel"><div class="panel-heading"><h2>Recent work</h2><a href="#/activity/live">View activity</a></div><ul id="overview-activity" class="work-list"><li>No recent work.</li></ul></section></div><aside>
+<section data-page="overview" class="page " hidden><div class="overview-grid"><div><section class="panel resource-chart"><div class="panel-heading"><h2>Local resources</h2><span id="chart-freshness" class="muted">Waiting for observations</span></div><div id="resource-metrics" class="metric-grid"></div><label id="chart-device-label" class="compact" hidden>GPU memory device<select id="chart-device"></select></label><svg id="resource-chart" viewBox="0 0 800 220" role="img" aria-labelledby="chart-title chart-description"><title id="chart-title">Local resource usage over the last ten minutes</title><desc id="chart-description">No observations yet.</desc></svg><p id="chart-summary" class="muted">History starts when this view opens.</p><p id="chart-limitation" class="muted"></p></section><section class="panel"><div class="panel-heading"><h2>Recent work</h2><a href="#/activity/live" class="icon-control" aria-label="View activity" title="View activity"><svg class="glyph" aria-hidden="true"><use href="/glyphs.svg#chevron"></use></svg></a></div><ul id="overview-activity" class="work-list"><li>No recent work.</li></ul></section></div><aside>
 <section class="panel computer-panel">
   <div class="panel-heading"><h2>This computer</h2><span class="contribution-current" role="img" aria-label="Contribution setting up to date" title="Contribution setting up to date"><svg class="glyph" aria-hidden="true"><use href="/glyphs.svg#check"></use></svg></span></div>
   <p id="resource-state" class="state-line">Checking contribution…</p>
   <label class="switch">Contribute this computer<input type="checkbox" data-setting="role" data-role-switch></label>
   <p class="field-status" data-setting-status="role" role="status"></p>
   <div id="overview-inference" hidden>
-    <div class="inference-heading"><span>Inference API</span><a href="#/network/keys">Keys</a></div>
+    <div class="inference-heading"><span>Inference API</span><a href="#/network/keys" class="icon-control" aria-label="Inference keys" title="Inference keys"><svg class="glyph" aria-hidden="true"><use href="/glyphs.svg#key"></use></svg></a></div>
     <button id="overview-url-copy" type="button" class="quiet" title="Copy URL · Double-click to open Keys"><span class="sr-only">Copy inference URL: </span><span id="overview-url"></span><svg class="glyph" aria-hidden="true"><use href="/glyphs.svg#copy"></use></svg></button>
     <p id="overview-url-offline" class="muted" hidden>Listener offline</p>
     <p id="overview-url-feedback" class="muted" role="status"></p>
   </div>
   <div class="request-counts"><span><strong id="overview-running">0</strong> running</span><span><strong id="overview-waiting">0</strong> waiting</span><a id="overview-protection" href="#/protection/activity" aria-label="Activity protection" title="Activity protection"><svg class="glyph" aria-hidden="true"><use href="/glyphs.svg#protection"></use></svg></a></div>
 </section><section class="panel"><h2>Needs attention</h2><ul id="overview-attention" class="attention-list"></ul></section></aside></div></section>
-<section data-page="serving" class="page " hidden><div class="serving-toolbar"><label>Computer<select id="serving-node"></select></label><label>Provider<select id="serving-provider"></select></label><button id="provider-add" type="button" class="secondary"><svg class="glyph" aria-hidden="true"><use href="/glyphs.svg#add"></use></svg>Add provider</button></div><p id="serving-scope" class="muted"></p><section class="panel provider-panel"><div class="panel-heading"><h2 id="provider-heading">Connect a provider</h2><span id="provider-connection" class="badge"></span></div><p id="providers-recovery" class="warning" hidden></p><form id="provider-form" aria-labelledby="provider-form-title">
+<section data-page="serving" class="page " hidden><div class="serving-toolbar"><label>Computer<select id="serving-node"></select></label><label>Provider<select id="serving-provider"></select></label><div class="tools"><span id="provider-connection" class="badge"></span><button id="provider-toggle" type="button" class="quiet icon-control" aria-label="Provider settings" title="Provider settings" aria-expanded="true" aria-controls="provider-fields"><svg class="glyph" aria-hidden="true"><use href="/glyphs.svg#system"></use></svg></button><button id="provider-refresh" type="button" class="quiet icon-control" aria-label="Refresh catalog" title="Refresh catalog"><svg class="glyph" aria-hidden="true"><use href="/glyphs.svg#refresh"></use></svg></button></div><button id="provider-add" type="button" class="secondary icon-control" aria-label="Add provider" title="Add provider"><svg class="glyph" aria-hidden="true"><use href="/glyphs.svg#add"></use></svg></button></div><p id="serving-scope" class="muted"></p><section class="panel provider-panel"><div class="panel-heading"><h2 id="provider-heading">Connect a provider</h2></div><p id="providers-recovery" class="warning" hidden></p><div id="provider-fields"><form id="provider-form" aria-labelledby="provider-form-title">
           <fieldset>
             <legend id="provider-form-title">Register a provider</legend>
             <div class="inputs">
@@ -73,40 +75,40 @@
             </div>
             <p id="provider-help" class="muted">Enter an address for a generic endpoint. Other profiles have local defaults. Mango saves provider tokens for the current Windows user.</p>
           </fieldset>
-          <div class="actions">
-
-
-            <button type="button" id="provider-refresh" class="secondary">Refresh catalog</button>
-          </div>
-        </form><div id="provider-extra-actions" class="actions"></div><p id="provider-status" role="status" class="field-status"></p><p id="provider-applied" class="muted"></p><div class="serving-quick"><label class="switch">Contribute this computer<input type="checkbox" data-setting="role" data-role-switch></label><span class="field-status" data-setting-status="role"></span><label>Benchmark policy<select data-setting="benchmarkPolicy"><option value="never">Never</option><option value="now">Now · before serving</option><option value="whenConvenient">When convenient</option></select></label></div></section><div class="serving-grid"><section><div class="model-toolbar"><h2>Models and readiness</h2><label class="sr-only" for="model-search">Find a model</label><input id="model-search" type="search" placeholder="Find a model…"></div>
-<div id="model-serving-actions" class="actions" role="group" aria-label="Serving controls for the selected provider" hidden><button type="button" id="model-serve-all" class="quiet">Serve all models</button><button type="button" id="model-serve-none" class="quiet">Serve no models</button></div>
+          <div class="actions"></div>
+        </form><div id="provider-extra-actions" class="actions"></div><div id="model-serving-actions" class="actions" role="group" aria-label="Serving controls for the selected provider" hidden><button type="button" id="model-serve-all" class="quiet">Serve all models</button><button type="button" id="model-serve-none" class="quiet">Serve no models</button></div>
 <div id="local-placement" class="panel" hidden><label>Local model preference<select id="local-selection" name="id" aria-describedby="selection-help"><option value="">Automatic placement</option></select></label><p id="selection-help" class="muted">Favors this model when it is eligible and other placements are comparable.</p><p id="selection-status" class="field-status" role="status"></p></div>
-<p id="catalog-status" class="field-status" role="status"></p><div id="model-categories" class="page-tabs model-tabs" role="tablist" aria-label="Model categories"></div><div id="deployment-list" role="tabpanel" tabindex="0"></div><div class="pagination"><span id="model-count" class="muted"></span><button id="model-previous" type="button" class="quiet">Previous</button><button id="model-next" type="button" class="quiet">Next</button></div></section><aside class="panel qualification"><h2 id="qualification-title">Model qualification</h2><p id="qualification-scope" class="muted">Select a model to inspect its local limits.</p><p id="resource-feedback" class="field-status" role="status"></p><form id="resource-form" hidden>
-          <fieldset>
-            <legend>Local deployment limits</legend>
-            <label>Deployment and operation<select name="target" required></select></label>
-            <p id="resource-units" class="muted"></p>
-            <div class="inputs">
-              <label>Workload units<input name="units" type="number" min="1" max="67108864" required></label>
-              <label>Items per request<input name="items" type="number" min="1" max="128" required></label>
-              <label>Inline media items<input name="mediaItems" type="number" min="0" max="128" required></label>
-              <label>Load RAM peak (MiB)<input name="loadRamMiB" type="number" min="0" max="1048576" required></label>
-              <label>Additional execution RAM peak (MiB)<input name="executeRamMiB" type="number" min="0" max="1048576" required></label>
-            </div>
-            <div id="resource-gpus" class="inputs"></div>
-            <label id="resource-attached" class="checkbox" hidden>
-              <input name="allowAttached" type="checkbox"> Allow this attached provider. Mango can stop forwarding requests, and its model may remain resident.
-            </label>
-            <label class="checkbox"><input name="allowOverlap" type="checkbox"> I qualified these memory limits for overlapping executions</label>
-            <label>Qualified executions on this deployment<input name="parallelSlots" type="number" min="1" max="64" value="1" required></label>
-            <p id="resource-profile" class="muted"></p>
-
-            <div class="actions">
-
-              <button id="resource-retry" type="button" class="secondary">Force benchmark</button>
-            </div>
-          </fieldset>
-        </form><p id="qualification-empty" class="muted">Models appear after the provider reports its inventory.</p></aside></div></section>
+<p id="provider-applied" class="muted"></p><div class="serving-quick"><label class="switch">Contribute this computer<input type="checkbox" data-setting="role" data-role-switch></label><span class="field-status" data-setting-status="role"></span><label>Benchmark policy<select data-setting="benchmarkPolicy"><option value="never">Never</option><option value="now">Now · before serving</option><option value="whenConvenient">When convenient</option></select></label></div></div><p id="provider-status" role="status" class="field-status"></p></section><p id="catalog-status" class="field-status" role="status"></p>
+<div class="serving-grid">
+<section class="panel inventory" aria-labelledby="inventory-title">
+  <div class="panel-heading"><h2 id="inventory-title">Model inventory</h2><div class="tools"><span id="model-count" class="muted"></span><button id="inventory-expand" type="button" class="quiet icon-control" aria-label="Expand inventory" title="Expand inventory" aria-pressed="false"><svg class="glyph" aria-hidden="true"><use href="/glyphs.svg#expand"></use></svg></button></div></div>
+  <div class="inventory-search"><label class="sr-only" for="model-search">Find a model by name, alias or provider ID</label><input id="model-search" type="search" placeholder="Find a model…"><label class="sr-only" for="model-residency">Residency</label><select id="model-residency"><option value="">Any residency</option><option value="loaded">Loaded</option><option value="busy">Busy</option><option value="unloaded">Unloaded</option><option value="unknown">Unobserved</option></select></div>
+  <div class="filter-tools"><div id="model-categories" role="group" aria-label="Filter by capabilities (match all selected)"></div><button id="inventory-help" type="button" class="quiet icon-control" aria-label="Inventory glyph guide" title="Inventory glyph guide" aria-expanded="false" aria-controls="glyph-guide"><svg class="glyph" aria-hidden="true"><use href="/glyphs.svg#help"></use></svg></button></div>
+  <div id="glyph-guide" hidden></div>
+  <div id="deployment-list" aria-label="Model inventory"></div>
+</section>
+<section class="panel qualification" aria-labelledby="qualification-title">
+  <div class="panel-heading"><h2 id="qualification-title">Model qualification</h2></div><p id="qualification-scope" class="muted"></p>
+  <p id="selected-readiness" class="muted"></p><div class="inspector-views" role="group" aria-label="Selected model view"><button type="button" class="quiet" data-inspect="limits" aria-pressed="true">Limits</button><button type="button" class="quiet" data-inspect="settings" aria-pressed="false">Model settings</button><button type="button" class="quiet" data-inspect="measurements" aria-pressed="false">Measurements</button></div>
+  <div id="selected-settings" hidden></div>
+  <label id="selected-operation" class="compact" hidden>Operation<select name="target" form="resource-form" required></select></label>
+  <div id="selected-measurements" hidden></div>
+  <div id="selected-limits"><p id="resource-feedback" class="field-status" role="status"></p><form id="resource-form" hidden>
+    <fieldset><legend>Request size</legend>
+      <div class="inputs workload">
+        <label><span id="resource-unit-label">Units per item</span><input name="units" type="number" min="1" max="67108864" required></label>
+        <label><span id="resource-item-label">Items per request</span><input name="items" type="number" min="1" max="128" required></label>
+        <label>Inline media items<input name="mediaItems" type="number" min="0" max="128" required></label>
+      </div>
+    </fieldset>
+    <fieldset><legend>Peak memory <span class="muted">(MiB)</span></legend>
+      <table class="memory-matrix"><thead><tr><th scope="col">Resource</th><th scope="col">Load peak</th><th scope="col">Additional execution peak</th></tr></thead>
+        <tbody><tr><th scope="row">Host RAM</th><td><input aria-label="Host RAM load peak in MiB" name="loadRamMiB" type="number" min="0" max="1048576" required></td><td><input aria-label="Host RAM additional execution peak in MiB" name="executeRamMiB" type="number" min="0" max="1048576" required></td></tr></tbody><tbody id="resource-gpus"></tbody></table>
+    </fieldset>
+    <fieldset><legend>Execution</legend>
+      <div class="execution-fields"><label class="checkbox"><input name="allowOverlap" type="checkbox"> Qualified for overlapping executions</label><label>Parallel slots<input name="parallelSlots" type="number" min="1" max="64" value="1" required></label></div>
+      <label id="resource-attached" class="checkbox" hidden><input name="allowAttached" type="checkbox"> Allow this attached provider. Its model may remain resident when Mango stops forwarding requests.</label>
+    </fieldset></form><p id="qualification-empty" class="muted">Models appear after the provider reports its inventory.</p></div></section></div></section>
 <section data-page="serving/aliases" class="page " hidden><section class="panel settings-panel"><h2>Alias capability ratings</h2><p id="alias-scope" class="muted">Changes affect every deployment with the selected alias.</p><form id="alias-rating-form">
           <fieldset>
             <legend>Set a capability rating for an alias</legend>
@@ -118,7 +120,7 @@
           </fieldset>
 
         </form><p id="alias-feedback" class="field-status" role="status"></p></section></section>
-<section data-page="serving/measurements" class="page " hidden><section class="panel"><h2 id="measurement-title">Benchmark measurements</h2><p id="resource-benchmark" class="muted"></p><div class="actions"><button id="resource-benchmark-missing" type="button" class="secondary" disabled title="Force benchmarks for models without a valid sample on this host. Active local work will be interrupted.">Benchmark missing</button></div><p id="resource-missing-feedback" class="field-status" role="status"></p><ul id="resource-passes" class="work-list"></ul><a href="#/serving">Back to Serving</a></section></section>
+<section data-page="serving/measurements" class="page " hidden><section class="panel"><h2 id="measurement-title">Benchmark measurements</h2><p id="resource-benchmark" class="muted"></p><div class="actions"><button id="resource-benchmark-missing" type="button" class="secondary" disabled title="Force benchmarks for models without a valid sample on this host. Active local work will be interrupted.">Benchmark missing on this computer</button><span class="muted">Interrupts active local work.</span></div><p id="resource-missing-feedback" class="field-status" role="status"></p><div id="measurements-home"><div id="measurement-detail"><p id="measure-feedback" class="field-status" role="status"></p><p id="resource-profile" class="muted"></p><ul id="resource-passes" class="work-list"></ul><div class="actions" id="measurement-controls"><span class="muted">Forcing a benchmark interrupts active local work.</span><button id="resource-retry" type="button" class="secondary">Force benchmark</button></div></div></div><a href="#/serving">Back to Serving</a></section></section>
 <section data-page="activity/live" class="page " hidden><section class="panel"><div class="panel-heading"><h2>Live activity</h2><p id="requests-status" role="status" class="muted"></p></div><p id="requests-resources" class="muted"></p><div class="activity-columns"><div><h3>Received here</h3><ul id="ingress-activity" class="work-list"></ul></div><div><h3>Serving here</h3><ul id="serving-activity" class="work-list"></ul></div></div></section></section>
 <section data-page="activity/history" class="page " hidden><section class="panel"><form id="logs-query">
           <fieldset>
@@ -131,33 +133,36 @@
             <div class="actions">
 
               <button id="logs-collect" type="button" class="secondary">Collect from network</button>
-              <button id="logs-export" type="button" class="secondary">Download day</button>
+              <button id="logs-export" type="button" class="quiet icon-control" aria-label="Download day" title="Download day"><svg class="glyph" aria-hidden="true"><use href="/glyphs.svg#download"></use></svg></button>
             </div>
           </fieldset>
-        </form><p id="logs-feedback" class="field-status" role="status"></p><p id="logs-coverage-note" class="muted"></p>
-        <ul id="logs-coverage" class="activity-list"></ul>
-        <p id="logs-storage" class="muted"></p>
-        <div class="inputs">
-          <div><h3>Usage by key name</h3><ul id="logs-keys" class="activity-list"></ul></div>
-          <div><h3>Usage by client address</h3><ul id="logs-sources" class="activity-list"></ul></div>
-        </div>
-        <p id="logs-count"></p>
+        </form><p id="logs-feedback" class="field-status" role="status"></p><p id="logs-count"></p>
         <div class="log-table" tabindex="0" role="region" aria-label="Request and operation details">
           <table>
             <thead><tr><th scope="col">Time</th><th scope="col">Work</th><th scope="col">Destination and outcome</th><th scope="col">Timing</th></tr></thead>
             <tbody id="logs-entries"></tbody>
           </table>
         </div>
-        <div class="pagination"><span id="logs-page" class="muted"></span><button id="logs-previous" class="quiet" type="button">Previous</button><button id="logs-next" class="quiet" type="button">Next</button></div></section></section>
-<section data-page="network/nodes" class="page " hidden><section class="panel"><div class="panel-heading"><h2>Network computers</h2><button id="network-refresh" class="secondary" type="button">Refresh network</button></div><p id="network-tailnet" class="muted"></p><p id="network-local" class="muted"></p><p id="network-addresses" class="muted path"></p><p id="network-recovery" class="warning" hidden></p><p id="network-status" class="field-status" role="status"></p><div id="network-models"></div><a id="network-setup-link" href="#/network/setup">Create or join a network</a></section></section>
-<section data-page="network/queue" class="page " hidden><section class="panel settings-panel"><h2>Inference queue</h2><p class="scope-label">Network</p><form id="network-queue">
+        <div class="pagination"><span id="logs-page" class="muted"></span><button id="logs-previous" class="quiet" type="button">Previous</button><button id="logs-next" class="quiet" type="button">Next</button></div><button type="button" class="quiet" data-reveal="log-diagnostics" aria-expanded="false" aria-controls="log-diagnostics">Usage and coverage</button><div id="log-diagnostics" hidden><p id="logs-coverage-note" class="muted"></p>
+        <ul id="logs-coverage" class="activity-list"></ul>
+        <p id="logs-storage" class="muted"></p>
+        <div class="inputs">
+          <div><h3>Usage by key name</h3><ul id="logs-keys" class="activity-list"></ul></div>
+          <div><h3>Usage by client address</h3><ul id="logs-sources" class="activity-list"></ul></div>
+        </div>
+        </div></section></section>
+<div class="settings-layout" data-group-page="network/nodes" hidden>
+<section data-page="network/nodes" class="page " hidden><section class="panel"><div class="panel-heading"><h2>Network computers</h2><button id="network-refresh" type="button" class="quiet icon-control" aria-label="Refresh network" title="Refresh network"><svg class="glyph" aria-hidden="true"><use href="/glyphs.svg#refresh"></use></svg></button></div><p id="network-tailnet" class="muted"></p><p id="network-local" class="muted"></p><p id="network-addresses" class="muted path"></p><p id="network-recovery" class="warning" hidden></p><p id="network-status" class="field-status" role="status"></p><div id="network-models"></div><a id="network-setup-link" href="#/network/setup">Create or join a network</a></section></section>
+<section data-page="network/queue" class="page " hidden><section class="panel settings-panel"><h2>Inference queue</h2><p class="scope-label">Network</p><form id="network-queue"><button type="button" class="quiet inline-unlock" data-admin-unlock hidden>Unlock network administration</button>
             <fieldset>
               <legend>Inference queue</legend>
               <label>Maximum wait in seconds<input name="waitSeconds" type="number" min="1" max="3600" required></label>
 
             </fieldset>
           </form><p id="queue-feedback" class="field-status" role="status"></p></section></section>
-<section data-page="network/keys" class="page " hidden><section class="panel"><h2>Inference keys</h2><p id="network-key-policy" class="muted"></p><ul id="network-keys" class="work-list"></ul><form id="network-issue">
+</div>
+<div class="settings-layout" data-group-page="network/keys" hidden>
+<section data-page="network/keys" class="page " hidden><section class="panel"><h2>Inference keys</h2><p id="network-key-policy" class="muted"></p><ul id="network-keys" class="work-list"></ul><button type="button" class="quiet" data-reveal="network-issue" aria-controls="network-issue" aria-expanded="false">Issue a key</button><form id="network-issue" hidden><button type="button" class="quiet inline-unlock" data-admin-unlock hidden>Unlock network administration</button>
             <fieldset>
               <legend>Issue a key</legend>
               <div class="inputs">
@@ -174,26 +179,28 @@
           <fieldset>
             <legend>Local public ingress</legend>
             <label class="checkbox"><input name="enabled" type="checkbox"> Enable the inference-only upstream</label>
-            <div class="inputs">
+            <button type="button" class="quiet" data-reveal="public-connection-fields" aria-controls="public-connection-fields" aria-expanded="false">Connection settings</button>
+            <div id="public-connection-fields" hidden><div class="inputs">
               <label>Loopback upstream port<input name="port" type="number" min="1024" max="65535" required></label>
               <label>HTTPS origin for a reachability check<input name="httpsOrigin" type="url" maxlength="512" placeholder="https://mango.example.com"></label>
               <label>Trusted proxy IPv4 address, optional<input name="trustedProxy" type="text" maxlength="45" aria-describedby="proxy-source-hint" placeholder="127.0.0.1"></label>
             </div>
-            <p id="proxy-source-hint" class="muted">Use this field only when the proxy overwrites X-Forwarded-For with a single observed client IP. Leave it blank for Funnel.</p>
+            <p id="proxy-source-hint" class="muted">Use this field only when the proxy overwrites X-Forwarded-For with a single observed client IP. Leave it blank for Funnel.</p></div>
             <div class="actions">
               <button id="public-check" type="button" class="secondary" disabled>Check HTTPS from this node</button></div>
           </fieldset>
         </form><p id="public-feedback" class="field-status" role="status"></p></section></section>
-<section data-page="network/recovery" class="page " hidden><section class="panel settings-panel"><h2>Change master password</h2><form id="network-password">
-              <p class="muted">Unlock administration in the sidebar to change the password. Existing computers, inference keys, and the recovery record stay valid.</p>
+</div>
+<section data-page="network/recovery" class="page " hidden><section class="panel settings-panel"><h2>Change master password</h2><form id="network-password"><button type="button" class="quiet inline-unlock" data-admin-unlock hidden>Unlock network administration</button>
+              <p class="muted">Unlock administration in the top bar to change the password. Existing computers, inference keys, and the recovery record stay valid.</p>
               <fieldset disabled><label>New master password<input name="newPassword" type="password" minlength="12" maxlength="256" autocomplete="new-password" required></label>
               <button type="submit">Change master password</button></fieldset>
-            </form></section><section class="panel settings-panel"><h2>Recover a forgotten password</h2><form id="network-recover">
+            </form></section><section class="panel settings-panel"><h2>Recover a forgotten password</h2><button type="button" class="quiet" data-reveal="network-recover" aria-controls="network-recover" aria-expanded="false">Recover password</button><form id="network-recover" hidden>
               <p class="muted">Recovery keeps existing keys and configuration. A recovery record cannot recreate data missing from every peer.</p>
               <label>Recovery record<input name="recoveryRecord" type="password" maxlength="112" autocomplete="off" required></label>
               <label>New master password<input name="newPassword" type="password" minlength="12" maxlength="256" autocomplete="new-password" required></label>
               <button type="submit">Replace master password</button>
-            </form></section><section id="network-reset-panel" class="panel settings-panel danger-panel"><h2>Full network reset</h2><form id="network-reset">
+            </form></section><section id="network-reset-panel" class="panel settings-panel danger-panel"><h2>Full network reset</h2><button type="button" class="quiet" data-reveal="network-reset" aria-controls="network-reset" aria-expanded="false">Reset options</button><form id="network-reset" hidden><button type="button" class="quiet inline-unlock" data-admin-unlock hidden>Unlock network administration</button>
               <p class="muted">Full reset clears keys and private request state. Peers must enroll again. Model settings and benchmarks are preserved.</p>
               <label>New master password<input name="newPassword" type="password" minlength="12" maxlength="256" autocomplete="new-password" required></label>
               <label class="checkbox"><input name="confirm" type="checkbox" required> Confirm full reset</label>
@@ -250,6 +257,7 @@
           </form>
           </section>
         </div><p id="setup-feedback" class="field-status" role="status"></p></section></section>
+<div class="settings-layout" data-group-page="protection/activity" hidden>
 <section data-page="protection/activity" class="page " hidden><section class="panel settings-panel"><h2>Activity protection</h2><p class="scope-label">This computer</p><form id="settings-activity"><fieldset>
           <legend>Activity protection</legend>
           <label class="checkbox"><input type="checkbox" name="activityMonitoring"> Monitor local activity</label>
@@ -261,7 +269,7 @@
             <label>RAM pressure cutoff (%)<input name="ramCutoffPercent" type="number" min="1" max="100" required></label>
             <label>VRAM pressure cutoff (%)<input name="vramCutoffPercent" type="number" min="1" max="100" required></label>
           </div>
-        </fieldset></form><p id="resource-observation" class="muted"></p><p id="protection-feedback" class="field-status" role="status"></p><button id="resource-refresh" type="button" class="secondary">Refresh observations</button><button id="resource-release" type="button" class="secondary" hidden>Verify release again</button></section></section>
+        </fieldset></form><p id="resource-observation" class="muted"></p><p id="protection-feedback" class="field-status" role="status"></p><button id="resource-refresh" type="button" class="quiet icon-control" aria-label="Refresh observations" title="Refresh observations"><svg class="glyph" aria-hidden="true"><use href="/glyphs.svg#refresh"></use></svg></button><button id="resource-release" type="button" class="secondary" hidden>Verify release again</button></section></section>
 <section data-page="protection/memory" class="page " hidden><section class="panel settings-panel"><h2>Memory reserves</h2><p class="scope-label">This computer</p><form id="settings-memory"><fieldset>
           <legend>Memory reserves</legend>
           <p id="reserve-hint" class="muted">Leave a reserve blank to use the default.</p>
@@ -292,6 +300,8 @@
             </select>
           </label>
         </fieldset></form><p id="benchmark-feedback" class="field-status" role="status"></p><a href="#/serving/measurements">View measurements for the selected model</a></section></section>
+</div>
+<div class="settings-layout" data-group-page="system/startup" hidden>
 <section data-page="system/startup" class="page " hidden><section class="panel settings-panel"><form id="startup"  aria-labelledby="startup-title">
         <h2 id="startup-title">Windows startup</h2>
         <label class="checkbox"><input name="enabled" type="checkbox"> Start Mango when I sign in</label>
@@ -313,7 +323,9 @@
 
           <p id="maintenance-status" class="action-status" role="status"></p>
         </form><div class="actions"><button id="update-check" class="secondary" type="button">Check for updates</button><button id="update-share" class="secondary" type="button">Queue update on peers</button></div><label id="update-partial-label" class="checkbox" hidden><input id="update-partial" type="checkbox"> Proceed with verified peers only</label><p id="update-action" role="status" class="field-status"></p></section></section>
-<section data-page="system/logging" class="page " hidden><section class="panel settings-panel"><h2>Logging policy</h2><form id="logs-settings">
+</div>
+<div class="settings-layout" data-group-page="system/logging" hidden>
+<section data-page="system/logging" class="page " hidden><section class="panel settings-panel"><h2>Logging policy</h2><form id="logs-settings"><button type="button" class="quiet inline-unlock" data-admin-unlock hidden>Unlock network administration</button>
           <fieldset>
             <legend>Retention policy</legend>
             <p id="logs-policy-help" class="muted"></p>
@@ -336,7 +348,7 @@
 
           </fieldset>
         </form><p id="logging-feedback" class="field-status" role="status"></p></section></section>
-<section data-page="system/data" class="page " hidden><section class="panel settings-panel"><h2>Local data</h2><p id="data-directory" class="path"></p><p id="recovery" class="warning" hidden></p><p class="muted">Model settings and configuration are stored for the current Windows user.</p></section><section class="panel settings-panel danger-panel"><form id="logs-clear">
+<section data-page="system/data" class="page " hidden><section class="panel settings-panel"><h2>Local data</h2><p id="data-directory" class="path"></p><p id="recovery" class="warning" hidden></p><p class="muted">Model settings and configuration are stored for the current Windows user.</p></section><section class="panel settings-panel danger-panel"><form id="logs-clear"><button type="button" class="quiet inline-unlock" data-admin-unlock hidden>Unlock network administration</button>
           <fieldset>
             <legend>Clear retained logs</legend>
             <p id="logs-clear-status" class="muted"></p>
@@ -344,14 +356,15 @@
             <button type="submit" class="secondary">Clear logs</button>
           </fieldset>
         </form><p id="clear-feedback" class="field-status" role="status"></p></section></section>
+</div>
 </div></main>
-<dialog id="admin-dialog" aria-labelledby="admin-dialog-title"><div class="dialog-heading"><h2 id="admin-dialog-title">Unlock administration</h2><button type="button" data-close-dialog class="quiet">Close</button></div><p class="muted">Manage shared network settings for ten minutes. This computer's local protection remains under your control.</p><form id="network-unlock">
+<dialog id="admin-dialog" aria-labelledby="admin-dialog-title"><div class="dialog-heading"><h2 id="admin-dialog-title">Unlock administration</h2><button type="button" data-close-dialog class="quiet icon-control" aria-label="Close" title="Close"><svg class="glyph" aria-hidden="true"><use href="/glyphs.svg#close"></use></svg></button></div><p class="muted">Manage shared network settings for ten minutes. This computer's local protection remains under your control.</p><form id="network-unlock">
             <fieldset>
               <legend>Unlock network administration</legend>
               <label>Master password<input name="password" type="password" maxlength="256" autocomplete="off" required></label>
               <button type="submit">Unlock for 10 minutes</button>
             </fieldset>
-          </form><p id="admin-feedback" class="field-status" role="status"></p></dialog>
-<dialog id="network-secret" aria-labelledby="network-secret-label"><div class="dialog-heading"><h2 id="network-secret-title">Keep this secret</h2><button id="network-hide-secret" type="button" class="quiet">Close</button></div><label id="network-secret-label" for="network-secret-value"></label><textarea id="network-secret-value" rows="3" readonly></textarea><div class="actions"><button id="network-copy-secret" type="button">Copy</button><button id="network-download" type="button" class="secondary">Download recovery record</button></div><p id="secret-feedback" role="status"></p></dialog>
-<dialog id="pending-dialog" aria-labelledby="pending-title"><div class="dialog-heading"><h2 id="pending-title">Unfinished changes</h2><button type="button" data-close-dialog class="quiet">Close</button></div><div id="pending-list"></div></dialog>
+          </form><button id="admin-lock" class="quiet" type="button" hidden>Lock</button><p id="admin-feedback" class="field-status" role="status"></p></dialog>
+<dialog id="network-secret" aria-labelledby="network-secret-label"><div class="dialog-heading"><h2 id="network-secret-title">Keep this secret</h2><button id="network-hide-secret" type="button" class="quiet">Close</button></div><label id="network-secret-label" for="network-secret-value"></label><textarea id="network-secret-value" rows="3" readonly></textarea><div class="actions"><button id="network-copy-secret" type="button" class="quiet icon-control" aria-label="Copy" title="Copy"><svg class="glyph" aria-hidden="true"><use href="/glyphs.svg#copy"></use></svg></button><button id="network-download" type="button" class="secondary">Download recovery record</button></div><p id="secret-feedback" role="status"></p></dialog>
+<dialog id="pending-dialog" aria-labelledby="pending-title"><div class="dialog-heading"><h2 id="pending-title">Unfinished changes</h2><button type="button" data-close-dialog class="quiet icon-control" aria-label="Close" title="Close"><svg class="glyph" aria-hidden="true"><use href="/glyphs.svg#close"></use></svg></button></div><div id="pending-list"></div></dialog>
 </body></html>

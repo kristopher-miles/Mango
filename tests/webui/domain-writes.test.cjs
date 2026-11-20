@@ -86,3 +86,28 @@ test('changing to a provider without models clears the previous qualification an
   assert.equal(get('#resource-feedback').dataset.feedback, undefined);
   assert.equal(oldWriter.bindings.length, 0);
 });
+
+test('a peer deployment sharing a local ID shows its advertised limits and never binds the local budget', () => {
+  const nodes = new Map();
+  const get = selector => {
+    if (!nodes.has(selector)) nodes.set(selector, { dataset: {}, textContent: '', addEventListener() {},
+      append(node) { this.textContent += node.textContent; }, replaceChildren() {} });
+    return nodes.get(selector);
+  };
+  get('#resource-form').elements = { target: { addEventListener() {} } };
+  const item = { id: 'same', observed: { displayName: 'Peer model', workloads: [
+    { limit: { operation: 'images', units: 1024, items: 2, mediaItems: 0 }, slots: 1 }
+  ] } };
+  const context = { document: { querySelector: get, addEventListener() {} }, ResourceHistory: class {},
+    servingNode: 'peer', servingModel: item.id, localOwner: () => false, servingModels: () => [item],
+    inventoryName: value => value.observed.displayName, networkView: { nodes: [{ id: 'peer', name: 'Peer host' }] },
+    operationNames: { images: 'Images' }, element: (_, textContent) => ({ textContent }) };
+  vm.createContext(context);
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '../../src/Mango/wwwroot/resources.js'), 'utf8'), context);
+  vm.runInContext('resourceView = { models: [{ id: "same", identifier: "Local model" }] }; renderQualification();', context);
+  assert.equal(get('#qualification-title').textContent, 'Peer model');
+  assert.match(get('#qualification-empty').textContent, /Managed on Peer host/);
+  assert.match(get('#qualification-empty').textContent, /1024 pixels per image/);
+  assert.equal(get('#resource-form').hidden, true);
+  assert.equal(get('#resource-retry').disabled, true);
+});

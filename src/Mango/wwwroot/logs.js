@@ -57,7 +57,7 @@ function logRender(view) {
   logClear.querySelector("fieldset").disabled = !view.canManage;
   document.querySelector("#logs-policy-help").textContent = view.canManage
     ? "Retention and logging mode are applied by each enrolled node."
-    : "Use Unlock in the sidebar to change the network policy.";
+    : "Use Unlock in the top bar to change the network policy.";
   document.querySelector("#logs-clear-status").textContent = !view.clear.generation
     ? "Each node clears its own retained logs when it receives the deletion."
     : !view.clear.localApplied ? "Local deletion is pending."

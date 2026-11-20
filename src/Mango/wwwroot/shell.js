@@ -10,25 +10,24 @@
     "activity/history": ["History", "Explore retained work and network coverage."],
     "network/nodes": ["Network", "Your computers and their last observed state."],
     "network/queue": ["Queue", "How long a request may wait for capacity."],
-    "network/keys": ["Inference keys", "Give clients scoped access to inference."],
+    "network/keys": ["Access", "Client inference keys and this computer’s public endpoint."],
     "network/public": ["Public access", "Configure the inference-only upstream on this computer."],
     "network/recovery": ["Recovery", "Recover access or explicitly reset network authority."],
     "network/setup": ["Connect this computer", "Join a network or create your own."],
-    "protection/activity": ["Activity protection", "Keep this computer responsive to you."],
+    "protection/activity": ["Protection", "Activity thresholds, memory reserves and benchmark policy on this computer."],
     "protection/memory": ["Memory reserves", "Leave room for your operating system and other work."],
     "protection/benchmarks": ["Benchmarks", "Choose when Mango may qualify local models."],
-    "system/startup": ["Windows startup", "Choose how Mango starts on this computer."],
+    "system/startup": ["Host settings", "Windows startup, connectivity and updates on this computer."],
     "system/ports": ["Node port", "Choose the port clients use to reach this computer."],
     "system/updates": ["Updates", "Release availability and local maintenance preferences."],
-    "system/logging": ["Logging policy", "Choose what is retained, for how long, and where day boundaries fall."],
+    "system/logging": ["Logging and storage", "Retention policy, disk usage and clearing records."],
     "system/data": ["Data", "Local storage and retained-record clearing."]
   };
   const tabs = {
     serving: [["serving", "Models and readiness"], ["serving/aliases", "Aliases"], ["serving/measurements", "Measurements"]],
     activity: [["activity/live", "Live"], ["activity/history", "History"]],
-    network: ["nodes", "queue", "keys", "public", "recovery", "setup"].map(x => [`network/${x}`, { nodes: "Computers", queue: "Queue", keys: "Keys", public: "Public access", recovery: "Recovery", setup: "Setup" }[x]]),
-    protection: [["protection/activity", "Activity"], ["protection/memory", "Memory"], ["protection/benchmarks", "Benchmarks"]],
-    system: [["system/startup", "Startup"], ["system/ports", "Node port"], ["system/updates", "Updates"], ["system/logging", "Logging policy"], ["system/data", "Data"]]
+    network: [["network/nodes", "Computers and queue"], ["network/keys", "Access"], ["network/recovery", "Recovery"], ["network/setup", "Setup"]],
+    system: [["system/startup", "Host settings"], ["system/logging", "Logging and storage"]]
   };
   const aliases = { "private-network": "network/nodes", providers: "serving", models: "serving",
     "live-requests": "activity/live", "public-inference": "network/public", logging: "activity/history", settings: "protection/activity",
@@ -58,12 +57,18 @@
     const main = document.querySelector("#main-content");
     scroll.set(previous.page, main.scrollTop);
     globalThis.route = current;
-    document.title = `Mango · ${pages[current.page][0]}`;
-    document.querySelector("#page-title").textContent = pages[current.page][0];
-    document.querySelector("#page-description").textContent = pages[current.page][1];
+    const currentSection = document.querySelector('section[data-page="' + current.page + '"]');
+    const groupPanel = currentSection.closest("[data-group-page]");
+    const displayPage = groupPanel?.dataset.groupPage || current.page;
+    document.title = "Mango · " + pages[displayPage][0];
+    document.querySelector("#page-title").textContent = pages[displayPage][0];
+    document.querySelector("#page-description").textContent = pages[displayPage][1];
+    for (const group of document.querySelectorAll("[data-group-page]")) group.hidden = group !== groupPanel;
     document.querySelectorAll("section.page[data-page]").forEach(section => {
-      section.id = `page-${section.dataset.page.replaceAll("/", "-")}`;
-      section.hidden = section.dataset.page !== current.page;
+      const group = section.closest("[data-group-page]");
+      section.id = "page-" + section.dataset.page.replaceAll("/", "-");
+      if (group) group.id = "group-" + group.dataset.groupPage.replaceAll("/", "-");
+      section.hidden = group ? group !== groupPanel : section !== currentSection;
     });
     document.querySelectorAll("#primary-nav a").forEach(link => {
       if (parseRoute(link.hash).group === current.group) link.setAttribute("aria-current", "page");
@@ -86,7 +91,10 @@
       }));
     }
     for (const button of tabList.children) {
-      const selected = button.dataset.page === current.page;
+      const grouped = document.querySelector('[data-group-page="' + button.dataset.page + '"]');
+      if (grouped) button.setAttribute("aria-controls", grouped.id);
+      if (button.dataset.page === "network/setup") button.hidden = !!globalThis.mangoEnrolled && current.page !== "network/setup";
+      const selected = button.dataset.page === displayPage;
       button.setAttribute("aria-selected", String(selected));
       button.tabIndex = selected ? 0 : -1;
       const panel = document.getElementById(button.getAttribute("aria-controls"));
@@ -95,16 +103,21 @@
     }
     if (!initial && previous.group !== current.group) document.querySelector("#page-title").focus({ preventScroll: true });
     if (previous.page !== current.page) main.scrollTop = scroll.get(current.page) || 0;
+    if (groupPanel && current.page !== displayPage) currentSection.scrollIntoView({ block: "nearest" });
     document.dispatchEvent(new CustomEvent("mango:route", { detail: current }));
   }
 
   document.addEventListener("DOMContentLoaded", () => {
     renderRoute(true);
+    for (const button of document.querySelectorAll("[data-reveal]")) button.addEventListener("click", () => {
+      const panel = document.getElementById(button.dataset.reveal);
+      panel.hidden = !panel.hidden; button.setAttribute("aria-expanded", String(!panel.hidden));
+    });
     document.querySelector(".skip-link").addEventListener("click", event => {
       event.preventDefault(); document.querySelector("#main-content").focus();
     });
     document.querySelector("#page-tabs").addEventListener("keydown", event => {
-      const buttons = [...event.currentTarget.children];
+      const buttons = [...event.currentTarget.children].filter(button => !button.hidden);
       const current = buttons.indexOf(document.activeElement);
       if (current < 0) return;
       let next;

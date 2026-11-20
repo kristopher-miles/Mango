@@ -1,13 +1,14 @@
 "use strict";
 
 let catalogView, catalogLoading = false;
-let servingNode = null, servingProvider = null, servingModel = null, modelPage = 0, addingProvider = false;
-let modelCategory = "all";
+let servingNode = null, servingProvider = null, servingModel = null, addingProvider = false;
+const capabilityFilters = new Set();
+const inventoryRows = new Map();
+let inspectorView = "limits";
 let currentProviderWriter, selectionWriter;
 const modelCards = new Map();
 const providerFields = ["profile", "mode", "address", "executable", "modelFile", "strataControl", "strataModels"];
 const modelFields = ["alias", ...servingFields];
-const modelPageSize = 5;
 const modelCategories = document.querySelector("#model-categories");
 const lmLinkWarning = "For best resource management, run Mango separately on the device hosting LM Link models. Mango may behave in unexpected ways when remote resources are incorrectly served as local.";
 
@@ -123,6 +124,11 @@ function renderProvider() {
   const key = newRegistration ? `new:${servingNode}:${approval ? endpoint.id : ""}` : `provider:${local ? "local" : servingNode}:${endpoint.id}`;
   if (providerForm.dataset.record !== key) {
     providerForm.dataset.record = key;
+    const fieldsPanel = document.querySelector("#provider-fields");
+    fieldsPanel.hidden = !newRegistration;
+    const toggle = document.querySelector("#provider-toggle");
+    toggle.hidden = newRegistration;
+    toggle.setAttribute("aria-expanded", String(!fieldsPanel.hidden));
     currentProviderWriter?.bindings.splice(0);
     currentProviderWriter = null;
     providerForm.reset();
@@ -138,6 +144,7 @@ function renderProvider() {
       : endpoint.hostReserved ? "Computer reserved for Strata" : endpoint.online ? "Connected" : "Unreachable"
     : observed?.reachable ? "Reached at last observation" : "Unconfirmed";
   connection.className = `badge ${!newRegistration && (local ? endpoint.online : observed?.reachable) ? "good" : "warn"}`;
+  connection.title = endpoint?.error || connection.textContent;
   document.querySelector("#provider-applied").textContent = newRegistration ? local ? "Credentials and process permissions stay on this computer." : "This requests a connection on the selected computer. Credentials and lifecycle permission are configured there."
     : local ? [endpoint.error, endpoint.exclusiveHost ? "Private loopback credential" : endpoint.credentialReference ? "Credential stored for this Windows user" : "No stored credential", desired ? `${intentLabel(desired, observed?.intent)} · Requested ${profileNames[desired.profile]} at ${desired.address}${desired.enabled ? "" : " · Disabled"}` : ""].filter(Boolean).join(" · ")
       : `${intentLabel(endpoint, observed?.intent)} · Applied address ${observed?.address || "unobserved"} · Observed ${timeLabel(observed?.observedAt)}`;
@@ -219,7 +226,6 @@ function modelRecord(desired, local) {
   if (desired) return { alias: desired.alias ?? "", ratings: desired.ratings, ...Object.fromEntries(servingFields.map(key => [key, desired.serving?.[key] ?? null])), revision: desired.revision };
   return { alias: local.alias ?? "", ratings: local.options.ratings, ...Object.fromEntries(servingFields.map(key => [key, local.options[key] ?? null])), revision: local.options.revision };
 }
-function providerIdentifiers(item) { return item.local?.providerIdentifiers ?? item.observed?.providerIdentifiers ?? []; }
 function isLmLinkModel(item) { return (item.local?.model.origin ?? item.observed?.origin) === "lmLink"; }
 function servingModels() {
   if (!catalogView) return [];
@@ -256,7 +262,7 @@ function modelWriter(item) {
 }
 function ratingEditor(writer) {
   const fieldset = element("fieldset"), rows = element("div");
-  fieldset.append(element("legend", "Capability ratings"), rows);
+  fieldset.append(element("legend", "Capability ratings · this deployment"), rows);
   const changed = () => {
     const entries = [...rows.children].map(row => [...row.querySelectorAll("input")]);
     const valid = entries.every(([label, rating]) => label.validity.valid && rating.validity.valid) && new Set(entries.map(([label]) => label.value.trim())).size === entries.length;
@@ -267,7 +273,9 @@ function ratingEditor(writer) {
     const node = element("div", null, "rating-row");
     const name = labeledInput("Capability", "capability", "text", label), rating = labeledInput("Rating · 0–5", "rating", "number", value);
     Object.assign(name.lastElementChild, { maxLength: 100, required: true }); Object.assign(rating.lastElementChild, { min: 0, max: 5 });
-    node.append(name, rating, action("Remove", () => { node.remove(); changed(); writer.flush(); }));
+    const remove = action("", () => { node.remove(); changed(); writer.flush(); });
+    remove.title = "Remove rating"; remove.setAttribute("aria-label", remove.title); remove.append(glyph("close"));
+    node.append(name, rating, remove);
     node.addEventListener("input", event => { if (!event.isComposing) changed(); }); node.addEventListener("compositionend", changed);
     node.addEventListener("focusout", () => writer.flush()); return node;
   }
@@ -300,9 +308,7 @@ function renderModelCard(item) {
     card = element("article", null, "model-card"); card.dataset.model = item.id;
     const heading = element("div", null, "model-heading"), title = element("h3"), badge = element("span", null, "badge");
     const meta = element("div", null, "model-heading-meta"), link = element("span", null, "model-link-mark");
-    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg"), use = document.createElementNS(svg.namespaceURI, "use");
-    svg.setAttribute("class", "glyph"); svg.setAttribute("aria-hidden", "true"); use.setAttribute("href", "/glyphs.svg#lm-link");
-    svg.append(use); link.append(svg); link.tabIndex = 0; link.title = lmLinkWarning;
+    link.append(glyph("lm-link")); link.tabIndex = 0; link.title = lmLinkWarning;
     link.setAttribute("role", "img"); link.setAttribute("aria-label", `LM Link. ${lmLinkWarning}`);
     meta.append(link, badge); heading.append(title, meta);
     card.append(heading, element("p", "", "model-facts muted"), element("p", "", "model-readiness"), element("div", "", "readiness-action"), element("p", "", "model-applied muted"));
@@ -327,7 +333,7 @@ function renderModelCard(item) {
   for (const input of card.querySelectorAll("[name^=embedding]")) input.closest("label").hidden = !facts?.operations?.includes("embeddings") && !writer.dirty.has(input.name);
   card.querySelector("[name=mediaTokensPerItem]").closest("label").hidden = !facts?.inputs?.some(value => ["image", "audio"].includes(value)) && !writer.dirty.has("mediaTokensPerItem");
   const identifiers = providerIdentifiers(item);
-  card.querySelector("h3").textContent = facts?.displayName || identifiers[0] || writer.value.alias || "Model";
+  card.querySelector("h3").textContent = "Deployment settings";
   card.querySelector(".model-link-mark").hidden = !isLmLinkModel(item);
   card.querySelector(".badge").textContent = local ? item.local.instance ? item.local.busy || item.local.instance.busy ? "Busy" : "Loaded" : "Unloaded" : "Remote";
   const origin = facts?.origin === "local" ? "Local to LM Studio" : facts?.origin === "lmLink" ? `LM Link${facts.sourceDevice ? ` · ${facts.sourceDevice}` : ""}` : "";
@@ -340,19 +346,25 @@ function renderModelCard(item) {
     rate == null ? "" : `${rate.toFixed(1)} tokens/s (${timing.providerGenerationRate === true
       ? "provider reported" : timing.providerGenerationRate === false ? "stream estimate" : "source unrecorded"})`,
     facts?.inputs?.length ? `${facts.inputs.join(", ")} → ${(facts.outputs || []).join(", ")}` : "Capabilities unobserved",
-    facts?.tools ? "Function tools" : "", facts?.structuredOutput ? "Structured output" : "", `Context ${item.local?.context ?? item.observed?.context ?? "unconfirmed"}`].filter(Boolean).join(" · ");
+    (facts?.tools || facts?.clientTools) ? "Function tools" : "", facts?.structuredOutput ? "Structured output" : "", `Context ${item.local?.context ?? item.observed?.context ?? "unconfirmed"}`].filter(Boolean).join(" · ");
   card.querySelector(".model-readiness").textContent = readinessText(item);
   const next = modelReadiness(item)?.action, nextAction = card.querySelector(".readiness-action");
-  if (nextAction.dataset.action !== next) {
+  if (nextAction.dataset.action !== (next || "")) {
     nextAction.dataset.action = next || ""; nextAction.replaceChildren();
     if (local && next) {
       const labels = { qualification: "Set local limits", contribution: "Contribution control", provider: "Provider settings", model: "Model limits", protection: "Review protection", observations: "Refresh observations" };
       if (labels[next]) nextAction.append(action(labels[next], () => {
         if (next === "protection") navigate("protection/activity");
         else if (next === "observations") loadResources().catch(error => resourceFeedback.textContent = error.message);
-        else if (next === "qualification") { servingModel = item.id; renderServingModels(); renderQualification(); resourceTarget.focus(); }
-        else if (next === "contribution") document.querySelector(".serving-quick [data-setting=role]").focus();
-        else if (next === "provider") providerForm.elements.address.focus();
+        else if (next === "qualification") { inspectorView = "limits"; renderServingModels(); renderQualification(); resourceTarget.focus(); }
+        else if (next === "contribution") {
+          if (document.querySelector("#provider-fields").hidden) document.querySelector("#provider-toggle").click();
+          document.querySelector(".serving-quick [data-setting=role]").focus();
+        }
+        else if (next === "provider") {
+          if (document.querySelector("#provider-fields").hidden) document.querySelector("#provider-toggle").click();
+          providerForm.elements.address.focus();
+        }
         else card.querySelector("[name=servedContext]").focus();
       }));
     }
@@ -365,25 +377,25 @@ function renderModelCard(item) {
   const actionKey = `${local}:${item.local?.instance?.id}:${item.local?.eligible}:${disabled}:${item.local?.options?.revision}:${item.local?.yolo}:${catalogView.selected}:${servingModel}:${endpoint?.canLoad}:${endpoint?.canUnload}`;
   if (actions.dataset.key !== actionKey) {
     actions.dataset.key = actionKey; actions.replaceChildren();
-    actions.append(action(servingModel === item.id ? "Limits selected" : "View limits", () => {
-      servingModel = item.id; renderServingModels(); renderQualification();
-    }));
     if (local) {
       const yolo = item.local.yolo === true;
-      const capacity = action(yolo ? "Disable YOLO" : "Enable YOLO", event => providerAction(event.currentTarget,
+      const capacity = action("Provider-managed capacity (YOLO)", event => providerAction(event.currentTarget,
         "Updating provider capacity policy…",
         () => api(`providers/models/${item.id}/yolo`, { enabled: !yolo, revision: item.local.options.revision }),
         yolo ? "Mango resource protection restored." : "YOLO enabled: native provider owns capacity."));
+      capacity.setAttribute("aria-pressed", String(yolo));
       capacity.title = "YOLO uses native provider capacity checks alongside other YOLO models. Mango swaps idle models when demand changes resource mode.";
       if (!endpoint.exclusiveHost) actions.append(capacity);
-      actions.append(action(disabled ? "Enable serving" : "Disable serving", event => providerAction(event.currentTarget,
+      const serve = action("Serving enabled", event => providerAction(event.currentTarget,
         disabled ? "Enabling serving…" : "Disabling serving…",
         () => api(`providers/models/${item.id}/serving`, { enabled: disabled }),
-        disabled ? "Serving enabled." : "Serving disabled.")));
+        disabled ? "Serving enabled." : "Serving disabled."));
+      serve.setAttribute("aria-pressed", String(!disabled)); actions.append(serve);
       const select = action(item.id === catalogView.selected ? "Preferred model" : "Use locally", event => providerAction(event.currentTarget, "Selecting model…", async () => {
         await selectionWriter.change("id", item.id, { immediate: true });
         if (selectionWriter.pending) throw new Error(selectionWriter.state.message);
       }, "Preferred model updated."));
+      select.setAttribute("aria-pressed", String(item.id === catalogView.selected));
       select.disabled = !item.local.eligible || item.id === catalogView.selected; actions.append(select);
       if (!item.local.eligible) select.title = "A preferred local deployment must be loaded and eligible. Automatic placement can load qualified models on demand.";
       const load = !item.local.instance;
@@ -393,35 +405,99 @@ function renderModelCard(item) {
   }
   return card;
 }
-function renderServingModels() {
-  let items = servingModels();
-  document.querySelector("#model-serving-actions").hidden = !localOwner(servingNode) || addingProvider || items.length === 0;
-  const query = document.querySelector("#model-search").value.toLowerCase(), paginated = modelCategory === "all";
-  items = items.filter(item => (!query || [item.local?.model.displayName || item.observed?.displayName,
-    item.desired?.alias || item.local?.alias, ...providerIdentifiers(item)].filter(Boolean).join(" ").toLowerCase().includes(query)) &&
-    (paginated || (item.local?.model.operations || item.observed?.operations || []).includes(modelCategory)));
-  if (!items.some(item => item.id === servingModel)) servingModel = items[0]?.id || null;
-  modelPage = Math.min(modelPage, Math.max(0, Math.ceil(items.length / modelPageSize) - 1));
-  const start = paginated ? modelPage * modelPageSize : 0, end = paginated ? Math.min(items.length, start + modelPageSize) : items.length;
-  const visible = items.slice(start, end).map(renderModelCard);
-  const list = document.querySelector("#deployment-list");
-  list.setAttribute("aria-labelledby", `model-category-${modelCategory}`);
-  for (const tab of modelCategories.children) {
-    const active = tab.dataset.category === modelCategory;
-    tab.setAttribute("aria-selected", String(active)); tab.tabIndex = active ? 0 : -1;
+function inventoryRow(item, keys, state, duplicateName) {
+  let button = inventoryRows.get(item.id);
+  if (!button) {
+    button = action("", () => {
+      servingModel = item.id;
+      const expanded = document.querySelector(".serving-grid").classList.contains("expanded");
+      if (expanded) toggleInventory();
+      renderServingModels(); renderQualification();
+      button.focus({ preventScroll: true });
+    });
+    button.className = "inventory-row"; button.dataset.model = item.id; inventoryRows.set(item.id, button);
   }
-  if (!visible.length) visible.push(element("div", addingProvider ? "Connect a provider to discover its models."
-    : selectedProvider()?.pendingRegistration ? "Approve this connection above to discover its models."
-      : "No matching models. Refresh the provider inventory or adjust the filters.", "panel muted"));
-  if (visible.length !== list.childElementCount || visible.some((card, index) => card !== list.children[index])) list.replaceChildren(...visible);
-  document.querySelector("#model-count").textContent = !items.length ? "No models" : paginated
-    ? `${start + 1}–${end} of ${items.length} models` : `${items.length} ${items.length === 1 ? "model" : "models"}`;
-  const previous = document.querySelector("#model-previous"), next = document.querySelector("#model-next");
-  previous.hidden = next.hidden = !paginated;
-  previous.disabled = start === 0; next.disabled = end === items.length;
+  const name = inventoryName(item), lmLink = isLmLinkModel(item);
+  const identity = [name, item.desired?.alias || item.local?.alias, ...providerIdentifiers(item), item.id].filter(Boolean);
+  const signature = JSON.stringify([identity, keys, state, !!item.local, lmLink, duplicateName]);
+  if (button.dataset.signature !== signature) {
+    button.dataset.signature = signature;
+    const marks = element("span", null, "row-marks");
+    for (const key of keys) marks.append(glyph(...capabilities[key]));
+    const status = residencyNames[state] + (item.local ? "" : " at last host observation");
+    const icon = glyph(state, status); icon.classList.add("res-" + state);
+    if (lmLink) marks.append(glyph("lm-link", lmLinkWarning));
+    const title = element("span", name, "inventory-name");
+    if (duplicateName) title.append(element("small", item.id, "muted"));
+    button.replaceChildren(icon, title, marks);
+    button.title = [...new Set(identity), status, ...keys.map(key => capabilities[key][1]), lmLink ? "LM Link" : ""].filter(Boolean).join(" · ");
+    button.setAttribute("aria-label", button.title);
+  }
+  const active = item.id === servingModel;
+  button.setAttribute("aria-pressed", String(active)); button.tabIndex = active ? 0 : -1;
+  return button;
+}
+function toggleInventory() {
+  const expanded = document.querySelector(".serving-grid").classList.toggle("expanded");
+  const button = document.querySelector("#inventory-expand");
+  button.setAttribute("aria-pressed", String(expanded));
+  button.title = expanded ? "Show model inspector" : "Expand inventory";
+  button.setAttribute("aria-label", button.title);
+  button.querySelector("use").setAttribute("href", "/glyphs.svg#" + (expanded ? "collapse" : "expand"));
+}
+function renderServingModels() {
+  if (route.node && !networkView) return;
+  const all = servingModels();
+  document.querySelector("#model-serving-actions").hidden = !localOwner(servingNode) || addingProvider || all.length === 0;
+  const query = document.querySelector("#model-search").value.trim().toLowerCase(), mode = document.querySelector("#model-residency").value;
+  const matching = matchingModels(all, query, mode, capabilityFilters);
+  if (!matching.some(({ item }) => item.id === servingModel)) servingModel = matching[0]?.item.id ?? null;
+  const selected = matching.find(({ item }) => item.id === servingModel)?.item;
+  const list = document.querySelector("#deployment-list");
+  const counts = new Map();
+  for (const item of all) {
+    const name = inventoryName(item); counts.set(name, (counts.get(name) || 0) + 1);
+  }
+  const rows = matching.map(({ item, keys, state }) => inventoryRow(item, keys, state, counts.get(inventoryName(item)) > 1));
+  if (!rows.length) {
+    const empty = list.querySelector(".inventory-empty") || element("p", "", "inventory-empty muted");
+    empty.textContent = all.length ? "No models match these filters." : selectedProvider()?.pendingRegistration ? "Approve the connection to see its inventory." :
+      selectedProvider() ? "This provider has reported no models." : "Connect a provider to see its inventory.";
+    rows.push(empty);
+  }
+  if (rows.length !== list.childElementCount || rows.some((row, i) => list.children[i] !== row)) {
+    const hadFocus = list.contains(document.activeElement);
+    list.replaceChildren(...rows);
+    const active = list.querySelector("[aria-pressed=true]");
+    if (hadFocus) (active || document.querySelector("#model-search")).focus({ preventScroll: true });
+    if (active && !list.closest("[hidden]")) {
+      const box = list.getBoundingClientRect(), row = active.getBoundingClientRect();
+      if (row.top < box.top) list.scrollTop += row.top - box.top;
+      else if (row.bottom > box.bottom) list.scrollTop += row.bottom - box.bottom;
+    }
+  }
+  for (const button of modelCategories.children) button.setAttribute("aria-pressed", String(capabilityFilters.has(button.dataset.category)));
+  document.querySelector("#model-count").textContent = matching.length === all.length ? String(all.length) : matching.length + " / " + all.length;
+  const ids = new Set(all.map(item => item.id));
+  for (const id of inventoryRows.keys()) if (!ids.has(id)) inventoryRows.delete(id);
+  const settings = document.querySelector("#selected-settings");
+  const card = selected && inspectorView === "settings" ? renderModelCard(selected) : null;
+  if (card && settings.firstElementChild !== card) settings.replaceChildren(card);
+  else if (!selected) settings.replaceChildren();
+  settings.hidden = inspectorView !== "settings";
+  document.querySelector("#selected-limits").hidden = inspectorView !== "limits";
+  document.querySelector("#selected-measurements").hidden = inspectorView !== "measurements";
+  document.querySelector("#selected-readiness").textContent = selected ? readinessText(selected) : "";
+  const measurement = document.querySelector("#measurement-detail");
+  const container = document.querySelector(route.page === "serving" && inspectorView === "measurements" ? "#selected-measurements" : "#measurements-home");
+  if (measurement.parentElement !== container) container.append(measurement);
+  for (const button of document.querySelectorAll("[data-inspect]")) {
+    button.setAttribute("aria-pressed", String(button.dataset.inspect === inspectorView));
+    button.disabled = !selected;
+  }
 }
 function renderServing() {
-  if (!catalogView) return;
+  if (!catalogView || (route.node && !networkView)) return;
   const owners = networkView?.localNode ? [networkView.localNode, ...networkView.nodes] : [{ id: "local", name: "This computer" }];
   if (!owners.some(node => node.id === servingNode)) servingNode = owners[0].id;
   const local = localOwner(servingNode);
@@ -455,23 +531,40 @@ async function loadProviders(force = false) {
 }
 document.querySelector("#provider-add").addEventListener("click", () => { addingProvider = true; renderProvider(); providerForm.elements.profile.focus(); });
 document.querySelector("#provider-refresh").addEventListener("click", event => providerAction(event.currentTarget, "Refreshing catalog…", () => api("providers/refresh", { id: servingProvider }), "Catalog refreshed."));
-document.querySelector("#serving-node").addEventListener("change", event => { servingNode = event.target.value; servingProvider = null; servingModel = null; addingProvider = false; modelPage = 0; renderServing(); });
-document.querySelector("#serving-provider").addEventListener("change", event => { servingProvider = event.target.value; addingProvider = false; servingModel = null; modelPage = 0; renderServing(); });
-document.querySelector("#model-search").addEventListener("input", () => { modelPage = 0; renderServingModels(); renderQualification(); });
-for (const [key, label] of [["all", "All"], ...Object.entries(operationNames)]) {
-  const tab = element("button", label);
-  tab.type = "button"; tab.id = `model-category-${key}`; tab.dataset.category = key;
-  tab.setAttribute("role", "tab"); tab.setAttribute("aria-controls", "deployment-list");
-  tab.addEventListener("click", () => { modelCategory = key; modelPage = 0; renderServingModels(); renderQualification(); });
-  modelCategories.append(tab);
+document.querySelector("#serving-node").addEventListener("change", event => { servingNode = event.target.value; servingProvider = null; servingModel = null; addingProvider = false; renderServing(); });
+document.querySelector("#serving-provider").addEventListener("change", event => { servingProvider = event.target.value; addingProvider = false; servingModel = null; renderServing(); });
+document.querySelector("#model-search").addEventListener("input", () => { renderServingModels(); renderQualification(); });
+document.querySelector("#model-residency").addEventListener("change", () => { renderServingModels(); renderQualification(); });
+document.querySelector("#inventory-expand").addEventListener("click", toggleInventory);
+document.querySelector("#provider-toggle").addEventListener("click", event => {
+  const panel = document.querySelector("#provider-fields");
+  panel.hidden = !panel.hidden; event.currentTarget.setAttribute("aria-expanded", String(!panel.hidden));
+});
+for (const [key, [icon, label]] of Object.entries(capabilities)) {
+  const button = action("", () => {
+    if (capabilityFilters.has(key)) capabilityFilters.delete(key); else capabilityFilters.add(key);
+    renderServingModels(); renderQualification();
+  });
+  button.className = "quiet icon-control"; button.title = label; button.setAttribute("aria-label", label);
+  button.dataset.category = key; button.append(glyph(icon)); modelCategories.append(button);
 }
-modelCategories.addEventListener("keydown", event => {
-  const tabs = [...modelCategories.children], index = tabs.indexOf(event.target);
-  if (index < 0 || !["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+const guide = document.querySelector("#glyph-guide");
+for (const [icon, label] of [...Object.values(capabilities), ...Object.entries(residencyNames), ["lm-link", "LM Link"]]) {
+  const entry = element("span"); entry.append(glyph(icon), label); guide.append(entry);
+}
+document.querySelector("#inventory-help").addEventListener("click", event => {
+  guide.hidden = !guide.hidden; event.currentTarget.setAttribute("aria-expanded", String(!guide.hidden));
+});
+document.querySelector("#deployment-list").addEventListener("keydown", event => {
+  const buttons = [...event.currentTarget.querySelectorAll("button")], i = buttons.indexOf(event.target);
+  if (i < 0 || !["ArrowDown", "ArrowUp", "ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
   event.preventDefault();
-  const next = event.key === "Home" ? 0 : event.key === "End" ? tabs.length - 1
-    : (index + (event.key === "ArrowLeft" ? -1 : 1) + tabs.length) % tabs.length;
-  tabs[next].focus(); tabs[next].click();
+  const next = event.key === "Home" ? 0 : event.key === "End" ? buttons.length - 1 :
+    Math.min(buttons.length - 1, Math.max(0, i + (["ArrowDown", "ArrowRight"].includes(event.key) ? 1 : -1)));
+  buttons[next].focus();
+});
+for (const button of document.querySelectorAll("[data-inspect]")) button.addEventListener("click", () => {
+  inspectorView = button.dataset.inspect; renderServingModels(); renderQualification();
 });
 for (const [id, enabled] of [["model-serve-all", true], ["model-serve-none", false]]) {
   document.querySelector(`#${id}`).addEventListener("click", event => perform(event.currentTarget, document.querySelector("#catalog-status"), async () => {
@@ -480,16 +573,17 @@ for (const [id, enabled] of [["model-serve-all", true], ["model-serve-none", fal
     return enabled ? "Serving enabled for all models on this provider." : "Serving disabled for all models on this provider.";
   }));
 }
-document.querySelector("#model-previous").addEventListener("click", () => { modelPage--; renderServingModels(); });
-document.querySelector("#model-next").addEventListener("click", () => { modelPage++; renderServingModels(); });
 document.addEventListener("mango:route", event => {
   if (event.detail.page !== "serving") providerForm.elements.token.value = "";
   if (event.detail.group !== "serving") return;
   if (event.detail.node) { servingNode = event.detail.node; servingProvider = event.detail.provider; addingProvider = false; }
   if (event.detail.model) {
     servingModel = event.detail.model;
-    document.querySelector("#model-search").value = ""; modelCategory = "all";
-    modelPage = Math.max(0, Math.floor(servingModels().findIndex(item => item.id === servingModel) / modelPageSize));
+    document.querySelector("#model-search").value = ""; capabilityFilters.clear();
+    document.querySelector("#model-residency").value = "";
+    inspectorView = event.detail.operation ? "limits" : "settings";
+    if (event.detail.operation) resourceTarget.value = event.detail.model + "/" + event.detail.operation;
+    if (document.querySelector(".serving-grid").classList.contains("expanded")) toggleInventory();
   }
   renderServing();
 });

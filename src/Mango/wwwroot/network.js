@@ -45,6 +45,31 @@ function networkList(id, rows) {
   if (focused) [...list.querySelectorAll("[data-action]")].find(node => node.dataset.action === focused)?.focus({ preventScroll: true });
 }
 
+let lockNoticeTimer;
+function showLockedEdit() {
+  const control = document.querySelector("#admin-control"), toast = document.querySelector("#admin-toast");
+  if (control.dataset.locked !== "true") return;
+  control.classList.add("attention");
+  toast.hidden = false;
+  toast.querySelector("[role=status]").textContent = "Network administration is locked.";
+  clearTimeout(lockNoticeTimer);
+  lockNoticeTimer = setTimeout(() => {
+    control.classList.remove("attention");
+    if (!toast.contains(document.activeElement)) toast.hidden = true;
+  }, 4500);
+}
+document.querySelector("#toast-unlock").addEventListener("click", () => {
+  document.querySelector("#admin-control").focus();
+  document.querySelector("#admin-toast").hidden = true;
+  openAdministration();
+});
+document.querySelector("#admin-toast").addEventListener("focusout", event => {
+  if (!event.currentTarget.contains(event.relatedTarget)) event.currentTarget.hidden = true;
+});
+document.addEventListener("pointerdown", event => {
+  if (event.target.closest("#network-issue, #network-password, #network-reset, #network-queue, #logs-settings, #logs-clear, #network-keys, #network-models") &&
+      event.target.closest("fieldset:disabled, button:disabled")) showLockedEdit();
+}, true);
 function renderAdministration() {
   if (administration.pendingRevocation && Date.parse(administration.pendingRevocation.expiresAt) <= Date.now()) administration.pendingRevocation = null;
   const active = !!networkView?.localNode && !networkView.reenroll;
@@ -52,15 +77,18 @@ function renderAdministration() {
   const label = document.querySelector("#admin-label");
   const minutes = Math.max(1, Math.ceil((Date.parse(administration.expiresAt) - Date.now()) / 60000));
   label.textContent = administration.locking ? "Locking…" : !active ? "Connect network" : unlocked ? `Unlocked · ${minutes} min` : administration.pendingRevocation ? "Locked · Sign-out unconfirmed" : "Locked · Unlock";
+  document.querySelector("#admin-control").title = active ? "Network administration · " + label.textContent : label.textContent;
+  if (unlocked || !active) document.querySelector("#admin-toast").hidden = true;
   document.querySelector("#admin-control").dataset.locked = String(active && !unlocked);
-  document.querySelector("#admin-control use").setAttribute("href", `/glyphs.svg#${unlocked ? "unlock" : "lock"}`);
+  document.querySelector("#admin-control use").setAttribute("href", `/glyphs.svg#${!active ? "network" : unlocked ? "unlock" : "lock"}`);
   document.querySelector("#admin-lock").hidden = !unlocked && !administration.pendingRevocation;
-  document.querySelector("#admin-lock").textContent = administration.pendingRevocation ? "Retry sign-out" : "Lock";
+  document.querySelector("#admin-lock").textContent = administration.pendingRevocation ? "Retry sign-out" : "Lock administration now";
   document.querySelector("#admin-lock").disabled = administration.locking;
   document.querySelector("#admin-control").disabled = administration.locking;
-  for (const form of [networkForms.issue, networkForms.password, networkForms.reset, networkForms.queue]) form.querySelector("fieldset") ? form.querySelector("fieldset").disabled = !unlocked : [...form.elements].forEach(input => input.disabled = !unlocked);
+  for (const form of [networkForms.issue, networkForms.password, networkForms.reset, networkForms.queue]) form.querySelector("fieldset") ? form.querySelector("fieldset").disabled = !unlocked : [...form.elements].filter(input => !input.hasAttribute("data-admin-unlock")).forEach(input => input.disabled = !unlocked);
+  for (const button of document.querySelectorAll("[data-admin-unlock]")) button.hidden = !active || unlocked;
   const feedback = document.querySelector("#queue-feedback");
-  if (!unlocked) { feedback.textContent = "Unlock administration in the sidebar to change the queue."; delete feedback.dataset.feedback; }
+  if (!unlocked) { feedback.textContent = "Unlock administration in the top bar to change the queue."; delete feedback.dataset.feedback; }
   else if (queueWriter) feedbackFor(queueWriter, feedback);
 }
 function setAdministration(session) {
@@ -85,6 +113,7 @@ function openAdministration() {
   document.querySelector("#admin-feedback").textContent = administration.token ? `Administration is unlocked until ${timeLabel(administration.expiresAt)}. Unlock again to extend this session.` : "";
   dialog.showModal(); networkForms.unlock.elements.password.focus();
 }
+for (const button of document.querySelectorAll("[data-admin-unlock]")) button.addEventListener("click", openAdministration);
 document.querySelector("#admin-control").addEventListener("click", openAdministration);
 document.querySelector("#admin-lock").addEventListener("click", async () => {
   const revocation = administration.pendingRevocation || { token: administration.token, expiresAt: administration.expiresAt };
@@ -95,12 +124,13 @@ document.querySelector("#admin-lock").addEventListener("click", async () => {
   try {
     await api("network/lock", {}, "PUT", revocation.token);
     administration.pendingRevocation = null;
+    document.querySelector("#admin-dialog").close();
     setAdministration(null);
     await Promise.allSettled([loadNetwork(), loadLogs()]);
   } catch (error) {
     administration.pendingRevocation = revocation;
     setAdministration(null);
-    showSessionError(new Error(`Local controls are locked; server sign-out is unconfirmed until this session expires. Retry sign-out in the sidebar. ${error.message}`));
+    showSessionError(new Error(`Local controls are locked; server sign-out is unconfirmed until this session expires. Retry sign-out in the top bar. ${error.message}`));
   } finally { administration.locking = false; renderAdministration(); }
 });
 setInterval(renderAdministration, 60000);
@@ -130,6 +160,8 @@ function renderNetworkLists(network) {
     if (node.compatible === false) card.append(element("p", `Incompatible protocol window · This host uses ${network.release.window}`, "warning"));
     const controls = element("div", null, "actions");
     const link = element("a", "Open Serving"); link.href = `#/serving/${encodeURIComponent(node.id)}`; link.dataset.action = `serving:${node.id}`; controls.append(link);
+    link.className = "icon-control"; link.title = "Open Serving on " + node.name;
+    link.setAttribute("aria-label", link.title); link.replaceChildren(glyph("provider"));
     if (!local) {
       const remove = action("Remove computer", event => {
         if (confirm(`Remove ${node.name}? It will need to enroll again.`)) networkAction(event.currentTarget, async () => {
@@ -146,6 +178,10 @@ async function loadNetwork() {
   networkView = network;
   if (!network.unlocked && administration.token && sentAdministration === administration.token && !administration.locking) setAdministration(null);
   const active = network.localNode && !network.reenroll;
+  globalThis.mangoEnrolled = !!active;
+  const setupTab = document.querySelector("#tab-network-setup");
+  if (setupTab) setupTab.hidden = !!active && route.page !== "network/setup";
+  document.querySelector("#network-setup-link").hidden = !!active;
   renderInferenceAddress(network);
   document.querySelector("#setup-membership").hidden = !active;
   document.querySelector("#network-setup").hidden = !!active;
@@ -203,8 +239,8 @@ async function enroll(kind, fields) {
   if (result.recoveryRecord) showNetworkSecret(result.recoveryRecord, true);
   if (interrupted && kind === "create") showSessionError(new Error("The network was created, but its one-time recovery record was lost with the interrupted response. Mango cannot show it again. Keep the master password securely."));
   if (unlockError) {
-    showSessionError(new Error(`Network ${kind === "create" ? "created" : "joined"}. Automatic unlock failed: ${unlockError.message} Use Unlock in the sidebar; setup is already complete.`));
-    return "Connected. Use Unlock in the sidebar to finish administration sign-in.";
+    showSessionError(new Error(`Network ${kind === "create" ? "created" : "joined"}. Automatic unlock failed: ${unlockError.message} Use Unlock in the top bar; setup is already complete.`));
+    return "Connected. Use Unlock in the top bar to finish administration sign-in.";
   }
   return "Connected and unlocked. Configure this computer in Serving.";
 }

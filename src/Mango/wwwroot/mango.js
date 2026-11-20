@@ -6,6 +6,8 @@ if (fragmentToken !== null) {
   if (/^[A-F0-9]{64}$/.test(fragmentToken)) sessionStorage.setItem("mango-session", fragmentToken);
 }
 const token = sessionStorage.getItem("mango-session");
+let localSessionEnded = !token;
+document.documentElement.toggleAttribute("data-session-ended", localSessionEnded);
 addEventListener("hashchange", () => {
   const session = new URLSearchParams(location.hash.slice(1)).get("session");
   if (session === null) return;
@@ -45,9 +47,15 @@ async function api(path, body, method = body == null ? "GET" : "PUT", administra
     const error = Object.assign(new Error(details.error || details.detail || (response.status === 401
       ? "Your local session has ended. Open Mango again." : `Mango returned HTTP ${response.status}.`)),
       { status: response.status, code: details.code });
-    if (error.code === "admin_required" && administration.token === sentAdministration) setAdministration(null);
+    if (error.code === "admin_required" && administration.token === sentAdministration) {
+      setAdministration(null);
+      showLockedEdit();
+    }
     if (error.code === "local_session_required" || response.status === 401 && !details.error && !details.detail) {
       for (const writer of writers.values()) writer.pause("Local session ended · reopen Mango");
+      localSessionEnded = true;
+      document.documentElement.toggleAttribute("data-session-ended", true);
+      workspace.hidden = true;
       showSessionError(error);
     }
     throw error;
@@ -60,6 +68,19 @@ function element(tag, content, className) {
   if (content != null) node.textContent = content;
   if (className) node.className = className;
   return node;
+}
+function glyph(name, label) {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("class", "glyph");
+  if (label) {
+    svg.setAttribute("role", "img");
+    svg.setAttribute("aria-label", label);
+    const title = document.createElementNS(svg.namespaceURI, "title");
+    title.textContent = label; svg.append(title);
+  } else svg.setAttribute("aria-hidden", "true");
+  const use = document.createElementNS(svg.namespaceURI, "use");
+  use.setAttribute("href", "/glyphs.svg#" + name);
+  svg.append(use); return svg;
 }
 function action(label, handler) {
   const button = element("button", label, "secondary");
@@ -118,7 +139,13 @@ function feedbackFor(writer, target) {
   if (target.dataset.feedback === key) return;
   target.dataset.feedback = key;
   target.classList.toggle("error", ["error", "conflict", "incomplete"].includes(writer.state.kind));
-  target.replaceChildren(element("span", writer.state.message));
+  if (writer.state.kind === "current") {
+    target.title = writer.state.message;
+    target.replaceChildren(glyph("check"), element("span", writer.state.message, "sr-only"));
+  } else {
+    target.removeAttribute("title");
+    target.replaceChildren(element("span", writer.state.message));
+  }
   if (writer.conflicts.size) {
     const values = [...writer.conflicts].filter(key => key !== "token").map(key => `${key}: current ${JSON.stringify(writer.baseline[key])}; entered ${JSON.stringify(writer.value[key])}`);
     target.append(element("pre", values.join("\n")), action("Use current values", () => writer.resolve(true)), action("Keep my changes", () => writer.resolve(false)));
@@ -141,6 +168,7 @@ function recordWriter(key, options) {
     return writer;
   }
   const writer = new MangoPreferences.PreferenceWriter({ ...options, write: protectedWrite, changed: current => {
+    if (current.state.kind === "paused" && current.pending && current.requiresAdmin?.() && !administration.token) showLockedEdit();
     current.onChanged?.(current);
     for (const binding of current.bindings || []) {
       for (const input of binding.inputs()) {
@@ -193,7 +221,7 @@ async function perform(button, feedback, work, message = "Working…") {
   feedback.classList.remove("error"); feedback.textContent = message;
   try { feedback.textContent = await work() || "Done."; }
   catch (error) { feedback.classList.add("error"); feedback.textContent = error.message; }
-  finally { button.disabled = false; }
+  finally { delete feedback.dataset.feedback; button.disabled = false; }
 }
 function showSessionError(error) { status.hidden = false; status.classList.add("error"); status.textContent = error.message; }
 
@@ -263,7 +291,7 @@ async function loadSettings() {
   document.querySelector("#recovery").textContent = view.recoveryWarning || "";
   document.querySelector("#recovery").hidden = !view.recoveryWarning;
   syncLocalPreferences();
-  workspace.hidden = false; status.hidden = true;
+  if (!localSessionEnded) { workspace.hidden = false; status.hidden = true; }
 }
 function renderNodePort(state) {
   const warnings = [];
@@ -311,12 +339,12 @@ document.querySelector("#update-share").addEventListener("click", event => perfo
 }));
 
 async function refreshPage() {
-  if (!token || document.hidden) return;
+  if (localSessionEnded || document.hidden) return;
   const jobs = [];
   if (route.page === "overview" || route.group === "protection" || route.group === "serving") jobs.push(loadResources().catch(error => document.querySelector("#resource-feedback").textContent = error.message));
   if (route.group === "serving") jobs.push(loadProviders().catch(error => providerStatus.textContent = error.message));
   if (route.group === "network" || route.group === "serving") jobs.push(loadNetwork().catch(error => document.querySelector("#network-status").textContent = error.message));
-  if (route.page === "system/updates") jobs.push(loadRelease().catch(error => document.querySelector("#release-status").textContent = error.message));
+  if (["system/startup", "system/ports", "system/updates"].includes(route.page)) jobs.push(loadRelease().catch(error => document.querySelector("#release-status").textContent = error.message));
   if (["activity/history", "system/logging", "system/data"].includes(route.page)) jobs.push(loadLogs().catch(logError));
   await Promise.allSettled(jobs);
 }
