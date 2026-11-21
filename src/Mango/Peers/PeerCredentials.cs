@@ -1,4 +1,6 @@
 using System.Security.Cryptography;
+using System.Text;
+using Microsoft.AspNetCore.WebUtilities;
 
 namespace Mango.Peers;
 
@@ -62,5 +64,26 @@ internal static class PeerCredentials
         var value = request.Headers.Authorization;
         return value.Count == 1 && value[0] is { Length: > 7 and <= 128 } header &&
             header.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase) ? header[7..] : null;
+    }
+}
+
+internal sealed record PairingCode(Uri Target, Guid Network, string Secret)
+{
+    public static string Encode(string address, Guid network, string secret) =>
+        $"mango-pair.{WebEncoders.Base64UrlEncode(Encoding.UTF8.GetBytes(address))}.{network:N}.{secret}";
+
+    public static PairingCode? Parse(string? value)
+    {
+        if (value is not { Length: <= 256 } ||
+            value.Split('.') is not ["mango-pair", var address, var id, var secret] ||
+            address.Length == 0 || !Guid.TryParseExact(id, "N", out var network) || network == Guid.Empty ||
+            !PeerCredentials.IsSecret(secret))
+            return null;
+        try
+        {
+            return Tailnet.Address(Encoding.UTF8.GetString(WebEncoders.Base64UrlDecode(address))) is { } target
+                ? new(target, network, secret) : null;
+        }
+        catch (FormatException) { return null; }
     }
 }

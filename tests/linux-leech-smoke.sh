@@ -13,6 +13,9 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# A long TMPDIR must not prevent the host and control command from connecting.
+export TMPDIR="$state/$(printf '%0100d' 0)"
+mkdir "$TMPDIR"
 "$mango" --data-dir "$state/data" --port 0 --peer-port 55381 &
 host=$!
 for (( attempt = 0; attempt < 100; attempt++ )); do
@@ -36,6 +39,10 @@ settings=$(curl -fsS -H "Authorization: Bearer $session" "$origin/api/local/sett
 
 if "$mango" --data-dir "$state/data" --join 100.64.0.10 71823744-3100-4a7d-a610-4fc993d1928b </dev/null; then
     echo 'Joining while the host is running unexpectedly succeeded.' >&2
+    exit 1
+fi
+if "$mango" --data-dir "$state/data" --pair invalid-pairing-code </dev/null; then
+    echo 'An invalid pairing code unexpectedly succeeded.' >&2
     exit 1
 fi
 "$mango" --data-dir "$state/data" --quit

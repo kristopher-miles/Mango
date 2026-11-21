@@ -8,7 +8,8 @@ internal sealed class InstanceControl(string directory)
 {
     private readonly string lockPath = Path.Combine(directory, "host.lock");
     private readonly string pipeName =
-        "Mango-" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(
+        (OperatingSystem.IsLinux() ? "/tmp/CoreFxPipe_Mango-" : "Mango-") +
+        Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(
             OperatingSystem.IsWindows() ? directory.ToUpperInvariant() : directory)));
 
     public FileStream? TryAcquire()

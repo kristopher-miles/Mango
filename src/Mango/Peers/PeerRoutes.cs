@@ -31,6 +31,8 @@ internal static class PeerRoutes
             HandleAsync(context, token => peers.CreateAsync(input, token)));
         network.MapPut("/join", (JoinNetworkRequest input, HttpContext context) =>
             HandleAsync(context, token => peers.JoinAsync(input, token)));
+        network.MapPost("/pairing-code", (HttpRequest request, HttpContext context) =>
+            HandleAsync(context, token => peers.IssuePairingAsync(request, token)));
         network.MapPut("/unlock", (UnlockRequest input, HttpContext context) =>
             HandleAsync(context, token => peers.UnlockAsync(input, context.Connection.RemoteIpAddress!, token)));
         network.MapPut("/lock", (HttpRequest request) =>

@@ -36,6 +36,7 @@ internal static partial class PeerChecks
         try
         {
             await TestTailnetAsync(root, status, address);
+            await TestPairingAsync(root, status, address);
             await TestSharedAliasAsync(root, status, address);
             await TestPhaseSixAsync(root, status, address);
             await TestPhaseSevenAsync(root, status, address);
@@ -43,10 +44,64 @@ internal static partial class PeerChecks
         }
         finally { Console.SetOut(output); }
         Console.WriteLine("Peer checks passed on the live Windows Tailscale interface with two Mango instances.");
+        Console.WriteLine("One-time pairing authorization, expiry, persistence and replay checks passed.");
         Console.WriteLine("Shared alias checks passed for mixed context, vision, and concurrent host use.");
         Console.WriteLine("Shared host intent, local dashboard and TLS public ingress checks passed.");
         Console.WriteLine("Log capture, partial collection, retention and offline deletion checks passed.");
         Console.WriteLine("Release window and host-local maintenance checks passed.");
+    }
+
+    private static async Task TestPairingAsync(string root, TailnetStatus status, IPAddress address)
+    {
+        using var http = new HttpClient(new HttpClientHandler { UseProxy = false }) { Timeout = TimeSpan.FromSeconds(20) };
+        var issuerPath = Path.Combine(root, "pairing-issuer");
+        var clock = new PairingClock();
+        var issuerPort = Port(address);
+        var issuer = await Host.StartAsync(issuerPath, status, issuerPort, time: clock);
+        try
+        {
+            var created = await Local(http, issuer, "network/create", new { name = "Pairing issuer", password = Password });
+            var network = created.GetProperty("identity").GetProperty("id").GetGuid();
+            await Local(http, issuer, "network/pairing-code", method: HttpMethod.Post, expected: 403);
+            async Task<PairingCode> IssuePairing()
+            {
+                var admin = await Unlock(http, issuer, Password);
+                var result = await Local(http, issuer, "network/pairing-code", admin: admin, method: HttpMethod.Post);
+                Check(result.GetProperty("expiresAt").GetDateTimeOffset() == clock.GetUtcNow().AddHours(1), "pairing lasts one hour");
+                var raw = result.GetProperty("code").GetString()!;
+                var pairing = PairingCode.Parse(raw);
+                Check(pairing?.Network == network && pairing.Target == new Uri(issuer.TailAddress), "pairing names its issuer and network");
+                Check(!File.ReadAllText(Path.Combine(issuerPath, "network.json")).Contains(pairing!.Secret, StringComparison.Ordinal),
+                    "issuer persists only the pairing verifier");
+                return pairing;
+            }
+            var expired = await IssuePairing();
+            clock.Now = clock.Now.AddHours(1);
+            await using var joining = await Host.StartAsync(Path.Combine(root, "pairing-join"), status, Port(address));
+            var join = new JoinNetworkRequest("Paired node", issuer.TailAddress, network, null, Role: LocalRole.Leech,
+                PairingSecret: expired.Secret);
+            await Local(http, joining, "network/join", join, expected: 401);
+
+            var fresh = await IssuePairing();
+            await issuer.DisposeAsync();
+            issuer = await Host.StartAsync(issuerPath, status, issuerPort, time: clock);
+            var joined = await Local(http, joining, "network/join", join with { PairingSecret = fresh.Secret });
+            var joinedId = joined.GetProperty("node").GetGuid();
+            Check(issuer.Network.Snapshot.Nodes.ContainsKey(joinedId) && joining.Network.IsMember, "pairing enrolls without a password");
+
+            await issuer.DisposeAsync();
+            issuer = await Host.StartAsync(issuerPath, status, issuerPort, time: clock);
+            await using var replay = await Host.StartAsync(Path.Combine(root, "pairing-replay"), status, Port(address));
+            await Local(http, replay, "network/join", join with { PairingSecret = fresh.Secret }, expected: 401);
+            Check(!replay.Network.IsMember && issuer.Network.Snapshot.Nodes.Count == 2, "a used pairing code stays consumed");
+        }
+        finally { await issuer.DisposeAsync(); }
+    }
+
+    private sealed class PairingClock : TimeProvider
+    {
+        public DateTimeOffset Now { get; set; } = DateTimeOffset.UtcNow;
+        public override DateTimeOffset GetUtcNow() => Now;
     }
 
     private static async Task TestTailnetAsync(string root, TailnetStatus status, IPAddress address)
@@ -546,14 +601,15 @@ internal static partial class PeerChecks
         public string TailAddress { get; } = tailAddress;
         public string Session { get; } = session;
 
-        public static async Task<Host> StartAsync(string directory, TailnetStatus tailnet, int port, MangoRelease? release = null)
+        public static async Task<Host> StartAsync(string directory, TailnetStatus tailnet, int port, MangoRelease? release = null,
+            TimeProvider? time = null)
         {
             Directory.CreateDirectory(directory);
             var settings = new SnapshotFile<LocalSettings>(Path.Combine(directory, "local-settings.json"), LocalSettings.Validate);
             await settings.LoadAsync(new LocalSettings());
             var providers = new ProviderCatalog(directory);
             await providers.InitializeAsync();
-            var peers = new PeerNetwork(directory, port, providers, settings, _ => Task.FromResult(tailnet), build: release);
+            var peers = new PeerNetwork(directory, port, providers, settings, _ => Task.FromResult(tailnet), time, release);
             await peers.InitializeAsync();
             var ingress = new PublicIngress(directory, peers);
             await ingress.InitializeAsync();

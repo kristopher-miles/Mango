@@ -12,7 +12,7 @@ namespace Mango;
 
 internal static class Program
 {
-    private const string Usage = "Mango options: --headless, --background (Windows), --quit, --url, --data-dir <path>, --port <0-65535>, --peer-port <1-65535>, --join <peer-address> <network-id> [--name <node-name>].";
+    private const string Usage = "Mango options: --headless, --background (Windows), --quit, --url, --data-dir <path>, --port <0-65535>, --peer-port <1-65535>, --pair <code> or --join <peer-address> <network-id>, with optional --name <node-name>.";
 
     [STAThread]
     public static int Main(string[] args)
@@ -128,7 +128,9 @@ internal static class Program
             if (options.Join is { } join)
             {
                 peers.RefreshTransportAsync(CancellationToken.None).GetAwaiter().GetResult();
-                var joined = peers.JoinAsync(join with { Password = ReadJoinPassword() }, CancellationToken.None).GetAwaiter().GetResult();
+                if (join.PairingSecret is null)
+                    join = join with { Password = ReadJoinPassword() };
+                var joined = peers.JoinAsync(join, CancellationToken.None).GetAwaiter().GetResult();
                 Console.WriteLine($"Enrolled leech node {joined.Node} in Mango network {joined.Identity.Id}.");
                 return;
             }
@@ -278,6 +280,7 @@ internal static class Program
             string? updateReady = null;
             string? joinAddress = null;
             string? nodeName = null;
+            string? pairingSecret = null;
             var network = Guid.Empty;
             for (var index = 0; index < args.Length; index++)
             {
@@ -306,6 +309,13 @@ internal static class Program
                         joinAddress = target.GetLeftPart(UriPartial.Authority);
                         index += 2;
                         break;
+                    case "--pair" when joinAddress is null && index + 1 < args.Length &&
+                        PairingCode.Parse(args[index + 1]) is { } pairing:
+                        joinAddress = pairing.Target.GetLeftPart(UriPartial.Authority);
+                        network = pairing.Network;
+                        pairingSecret = pairing.Secret;
+                        index++;
+                        break;
                     case "--name" when nodeName is null && index + 1 < args.Length && !args[index + 1].StartsWith("--", StringComparison.Ordinal):
                         nodeName = args[++index];
                         break;
@@ -316,9 +326,10 @@ internal static class Program
             if ((headless ? 1 : 0) + (background ? 1 : 0) + (quit ? 1 : 0) + (printUrl ? 1 : 0) + (joinAddress is not null ? 1 : 0) > 1)
                 throw new ArgumentException("Use only one launch mode at a time.");
             if (nodeName is not null && joinAddress is null)
-                throw new ArgumentException("Use --name with --join.");
+                throw new ArgumentException("Use --name with --pair or --join.");
             var join = joinAddress is null ? null :
-                new JoinNetworkRequest(nodeName ?? Environment.MachineName, joinAddress, network, null, BenchmarkPolicy.Never, LocalRole.Leech);
+                new JoinNetworkRequest(nodeName ?? Environment.MachineName, joinAddress, network, null,
+                    BenchmarkPolicy.Never, LocalRole.Leech, pairingSecret);
             return new LaunchOptions(headless || !OperatingSystem.IsWindows(), background, quit, printUrl, directory, port, peerPort, updateReady, join);
         }
     }

@@ -62,8 +62,12 @@ internal sealed record NodeCatalog(Guid Node, Revision Revision, string Name, Lo
 internal sealed record RetiredNode(string Verifier, Guid Node, Revision Revision);
 internal sealed record LocalMembership(Guid Node, string Device, string? ProtectedSecret,
     Guid? JoiningNetwork = null, string? Issuer = null);
+internal sealed record LocalPairing(string Digest, Revision Generation, DateTimeOffset ExpiresAt)
+{
+    public const int Limit = 16;
+}
 internal sealed record PeerDisk(NetworkRecords Records, LocalMembership? Local, long LastObserved = 0,
-    LogPolicy? LocalLogPolicy = null, Revision? LocalLogDeletion = null)
+    LogPolicy? LocalLogPolicy = null, Revision? LocalLogDeletion = null, LocalPairing[]? Pairings = null)
 {
     public static readonly PeerDisk Empty = new(NetworkRecords.Empty, null);
 }
@@ -328,6 +332,8 @@ internal static class PeerValidation
     public static string? Disk(PeerDisk disk) => Valid(disk.Records) && disk.LastObserved is >= 0 and < 253402300799999 &&
         (disk.LocalLogPolicy is null || disk.LocalLogPolicy.Valid) &&
         (disk.LocalLogDeletion is null || Valid(disk.LocalLogDeletion.Value)) &&
+        (disk.Pairings is null || disk.Pairings.Length <= LocalPairing.Limit &&
+            disk.Pairings.All(code => code is not null && PeerCredentials.IsSecret(code.Digest) && Valid(code.Generation))) &&
         (disk.Local is not { } local || local.Node != Guid.Empty && Text(local.Device, 128) &&
             (local.ProtectedSecret is null || local.ProtectedSecret.Length is > 0 and <= 4096) &&
             (local.JoiningNetwork is null && local.Issuer is null ||

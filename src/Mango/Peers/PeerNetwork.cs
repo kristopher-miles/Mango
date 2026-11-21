@@ -133,6 +133,8 @@ internal sealed partial class PeerNetwork(string directory, int port, ProviderCa
     {
         await store.LoadAsync(PeerDisk.Empty);
         needsPeerConfirmation = store.RecoveryWarning is not null;
+        if (needsPeerConfirmation && store.Value.Pairings is { Length: > 0 })
+            await store.UpdateAsync(disk => disk with { Pairings = null });
         var disk = store.Value;
         string? token = null;
         if (disk.Local?.ProtectedSecret is { } protectedSecret)

@@ -1,7 +1,7 @@
 "use strict";
 
 const networkFeedback = document.querySelector("#network-status");
-const networkForms = Object.fromEntries(["discover", "join", "create", "unlock", "issue", "password", "recover", "reset", "queue"].map(name => [name, document.querySelector(`#network-${name}`)]));
+const networkForms = Object.fromEntries(["discover", "join", "create", "unlock", "issue", "password", "recover", "reset", "queue", "pairing"].map(name => [name, document.querySelector(`#network-${name}`)]));
 const networkScopes = { ...operationNames, imageInput: "Image input", audioInput: "Audio input" };
 const networkSecretPanel = document.querySelector("#network-secret");
 const networkSecret = document.querySelector("#network-secret-value");
@@ -15,10 +15,11 @@ for (const [value, text] of Object.entries(networkScopes)) {
   Object.assign(input, { type: "checkbox", name: "scopes", value });
   label.append(input, text); document.querySelector("#network-scopes").append(label);
 }
-function showNetworkSecret(value, recovery) {
+function showNetworkSecret(value, recovery, pairingExpiry = null) {
   networkSecret.value = value;
-  document.querySelector("#network-secret-title").textContent = recovery ? "Keep your recovery record" : "Your inference key";
-  document.querySelector("#network-secret-label").textContent = recovery ? "Store this recovery record outside the network. Download it to keep or print it." : "Copy this key now. Mango cannot display the secret again.";
+  document.querySelector("#network-secret-title").textContent = pairingExpiry ? "One-time pairing code" : recovery ? "Keep your recovery record" : "Your inference key";
+  document.querySelector("#network-secret-label").textContent = pairingExpiry ? `Run Mango --pair <code> on the computer joining the network. The code expires after one use or at ${timeLabel(pairingExpiry)}.` :
+    recovery ? "Store this recovery record outside the network. Download it to keep or print it." : "Copy this key now. Mango cannot display the secret again.";
   document.querySelector("#secret-feedback").textContent = "";
   networkDownload.hidden = !recovery;
   networkSecretPanel.showModal(); networkSecret.focus(); networkSecret.select();
@@ -86,6 +87,8 @@ function renderAdministration() {
   document.querySelector("#admin-lock").disabled = administration.locking;
   document.querySelector("#admin-control").disabled = administration.locking;
   for (const form of [networkForms.issue, networkForms.password, networkForms.reset, networkForms.queue]) form.querySelector("fieldset") ? form.querySelector("fieldset").disabled = !unlocked : [...form.elements].filter(input => !input.hasAttribute("data-admin-unlock")).forEach(input => input.disabled = !unlocked);
+  networkForms.pairing.hidden = !active;
+  networkForms.pairing.querySelector("fieldset").disabled = !unlocked || !networkView?.ready;
   for (const button of document.querySelectorAll("[data-admin-unlock]")) button.hidden = !active || unlocked;
   const feedback = document.querySelector("#queue-feedback");
   if (!unlocked) { feedback.textContent = "Unlock administration in the top bar to change the queue."; delete feedback.dataset.feedback; }
@@ -261,6 +264,10 @@ networkForm("issue", "key-feedback", async (values, fields) => {
   const result = await api("network/keys", { name: values.name, priority: values.priority, scopes: fields.getAll("scopes"),
     neverExpires: values.expiry === "never", expiresAt: values.expiry === "date" ? new Date(values.expiresAt).toISOString() : null }, "POST");
   showNetworkSecret(result.secret, false); await loadNetwork(); return showDelivery(result.delivery);
+});
+networkForm("pairing", "network-status", async () => {
+  const result = await api("network/pairing-code", null, "POST");
+  showNetworkSecret(result.code, false, result.expiresAt);
 });
 networkForm("password", "recovery-feedback", async fields => {
   const change = { newPassword: fields.newPassword };
