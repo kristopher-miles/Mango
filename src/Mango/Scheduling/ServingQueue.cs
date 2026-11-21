@@ -531,11 +531,11 @@ internal sealed class ServingQueue : IAsyncDisposable
         {
             return Rejected(error.Message);
         }
-        catch (ProviderFailure error) when (error.Code is "strata_attached_resident" or "mode_switch_lifecycle" or "lmstudio_name_conflict")
+        catch (ProviderFailure error) when (error.Status == 409 || error.CapacityWait) { return null; }
+        catch (ProviderFailure error) when (error.Code is "strata_attached_resident" or "mode_switch_lifecycle")
         {
             return Rejected(error.Message);
         }
-        catch (ProviderFailure error) when (error.Status == 409 || error.CapacityWait) { return null; }
         catch (Exception error) when (error is ProviderFailure or IOException or HttpRequestException or UnauthorizedAccessException
             or System.ComponentModel.Win32Exception)
         {

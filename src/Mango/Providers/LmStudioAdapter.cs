@@ -5,7 +5,7 @@ namespace Mango.Providers;
 
 internal sealed class LmStudioAdapter(HttpClient http, ProviderEndpoint endpoint,
     Func<Uri, CancellationToken, Task<LmStudioDevices?>>? inspectDevices = null,
-    Func<Uri, string, string, int?, CancellationToken, Task>? loadLocal = null) : ProviderAdapter(http, endpoint)
+    Func<Uri, string, int?, CancellationToken, Task>? loadLocal = null) : ProviderAdapter(http, endpoint)
 {
     private bool Generic => Endpoint.Profile == ProviderProfile.Generic;
     public override bool TransparentInference => Generic;
@@ -106,9 +106,18 @@ internal sealed class LmStudioAdapter(HttpClient http, ProviderEndpoint endpoint
             var downloaded = copy.First();
             var path = !remote && deviceAwareKeys.Contains(key) && copy.Count() == 1 &&
                 downloaded.Text("path") is { Length: > 0 and <= 4096 } exact && !exact.Any(char.IsControl) ? exact : null;
-            var known = onDevice.Where(item => (path is null || item.Text("path") == path) &&
-                    item.Text("identifier") is { } id && identifierCounts[id].Count() == 1)
-                .SelectMany(item => instances[item.Text("identifier")!].Take(1)).DistinctBy(item => item.Id).ToArray();
+            var known = onDevice.Where(item => path is null || item.Text("path") == path)
+                .SelectMany(item =>
+                {
+                    var id = item.Text("identifier");
+                    if (id is null || !CanAddress(devices, identifierCounts[id], key, path is not null && id == key))
+                        return [];
+                    if (identifierCounts[id].Count() == 1)
+                        return instances[id].Take(1);
+                    // LM Studio addresses the exact local copy by its native name. REST metadata must agree.
+                    var sameName = instances[id].Distinct().Take(2).ToArray();
+                    return sameName.Length == 1 ? sameName : [];
+                }).DistinctBy(item => item.Id).ToArray();
             var matching = rows.Where(row => row.ArtifactBytes == downloaded.Long("sizeBytes") && row.Format == downloaded.Text("format"));
             var model = rows.FirstOrDefault(row => row.Instances.Any(item => known.Contains(item))) ?? matching.FirstOrDefault() ?? rows[0];
             return model with
@@ -121,7 +130,8 @@ internal sealed class LmStudioAdapter(HttpClient http, ProviderEndpoint endpoint
                     ? ProviderIdentity.Hash(path, downloaded.Long("sizeBytes")?.ToString(), downloaded.Text("format")) : null,
                 SupportsLoad = !remote && (path is not null || !deviceAwareKeys.Contains(key) && rows.Length == 1 &&
                     copies.Length == 1 && copy.Count() == 1) && onDevice.Length == known.Length,
-                SupportsUnload = !remote && onDevice.Length == known.Length,
+                SupportsUnload = !remote && onDevice.Length == known.Length &&
+                    onDevice.All(item => identifierCounts[item.Text("identifier")].Count() == 1),
                 AmbiguousInstance = known.Length == 0 && onDevice.Length != 0
             };
         }).ToArray();
@@ -151,13 +161,24 @@ internal sealed class LmStudioAdapter(HttpClient http, ProviderEndpoint endpoint
             return;
         }
         if (model.Origin is null || model is { Origin: ModelOrigin.Local, SupportsLoad: true, LocalLoadPath: null }) return;
-        var current = await CurrentInstancesAsync(cancellation);
-        var matches = current?.Loaded.Items().Where(item => item.Text("identifier") == instance.Id).ToArray() ?? [];
-        if (matches.Length != 1 || matches[0].Text("modelKey") != model.NativeId ||
-            DeviceModelId(model.NativeId, current!.Device(matches[0])) != model.Id ||
-            model.LocalLoadPath is { } path && matches[0].Text("path") != path)
-            throw new ProviderFailure(503, "LM Studio could not confirm the loaded instance on its expected device.");
+        VerifyDevice(await CurrentInstancesAsync(cancellation), model, instance.Id, forUnload: false);
     }
+
+    private void VerifyDevice(LmStudioDevices? current, ProviderModel model, string id, bool forUnload)
+    {
+        var matches = current?.Loaded.Items().Where(item => item.Text("identifier") == id).ToArray() ?? [];
+        var exactLocal = !forUnload && model.LocalLoadPath is not null && id == model.NativeId;
+        if (current is null || !CanAddress(current, matches, model.NativeId, exactLocal) || !matches.Any(item =>
+                item.Text("modelKey") == model.NativeId && DeviceModelId(model.NativeId, current.Device(item)) == model.Id &&
+                (model.LocalLoadPath is null || item.Text("path") == model.LocalLoadPath)))
+            throw new ProviderFailure(503, forUnload
+                ? "LM Studio could not identify the local instance uniquely for unload."
+                : "LM Studio could not confirm the loaded instance on its expected device.");
+    }
+
+    private static bool CanAddress(LmStudioDevices devices, IEnumerable<JsonElement> matches, string key, bool exactLocal) =>
+        matches.Count() == 1 || exactLocal && matches.All(item => item.Text("modelKey") == key) &&
+            matches.Count(item => devices.Device(item) is null) == 1;
 
     public override async Task<bool?> CheckIdleAsync(ProviderModel model, CancellationToken cancellation)
     {
@@ -224,13 +245,13 @@ internal sealed class LmStudioAdapter(HttpClient http, ProviderEndpoint endpoint
         }
         if (model.LocalLoadPath is { } localPath)
         {
-            var instanceId = model.NativeId;
-            if (await CurrentInstancesAsync(cancellation) is not { } current)
-                throw new ProviderFailure(409, "Mango could not verify that the LM Studio model name is available.", code: "load_rejected");
-            if (current.Loaded.Items().Any(item => item.Text("identifier") == instanceId))
-                throw new ProviderFailure(409, "An existing LM Studio instance already uses this model name.", code: "lmstudio_name_conflict");
-            await (loadLocal ?? LmStudioDevices.LoadLocalAsync)(new Uri(Endpoint.Address), localPath, instanceId, context, cancellation);
-            await ConfirmDeploymentAsync(default, model, new(instanceId, null, null, ""), cancellation);
+            await (loadLocal ?? LmStudioDevices.LoadLocalAsync)(new Uri(Endpoint.Address), localPath, context, cancellation);
+            var live = await CurrentInstancesAsync(cancellation);
+            var instances = live?.Loaded.Items().Where(row => live.Device(row) is null && row.Text("modelKey") == model.NativeId &&
+                row.Text("path") == localPath).ToArray() ?? [];
+            if (live is null || instances.Length != 1 || instances[0].Text("identifier") is not { } id)
+                throw new ProviderFailure(503, "LM Studio could not confirm the exact local model load.");
+            VerifyDevice(live, model, id, forUnload: false);
             return;
         }
         var body = new Dictionary<string, object> { ["model"] = model.ManagementId, ["echo_load_config"] = true };
@@ -257,7 +278,7 @@ internal sealed class LmStudioAdapter(HttpClient http, ProviderEndpoint endpoint
                 continue;
             if (model.Origin == ModelOrigin.Local && (!model.SupportsLoad || model.LocalLoadPath is not null))
             {
-                await ConfirmDeploymentAsync(default, model, instance, cancellation);
+                VerifyDevice(await CurrentInstancesAsync(cancellation), model, instance.Id, forUnload: true);
                 // Panini embedding instances are exposed in HTTP inventory but require
                 // the native local lifecycle control to release their allocations.
                 if (!Generic && new Uri(Endpoint.Address).IsLoopback &&

@@ -302,8 +302,10 @@ internal static class ProviderChecks
                 {
                     new { key, type = "llm", format = "gguf", size_bytes = 100, capabilities = new { vision = false },
                         loaded_instances = localInstance is null ? [] : new[] { new { id = localInstance, config = new { context_length = 8192 } } } },
-                    new { key, type = "llm", format = "gguf", size_bytes = 200, capabilities = new { vision = true },
-                        loaded_instances = new[] { new { id = linkedInstance, config = new { context_length = 4096 } } } }
+                    new { key, type = "llm", format = "gguf", size_bytes = linkedInstance == key ? 100 : 200,
+                        capabilities = new { vision = linkedInstance != key },
+                        loaded_instances = new[] { new { id = linkedInstance,
+                            config = new { context_length = linkedInstance == key ? 8192 : 4096 } } } }
                 } }));
             Check(request.RequestUri.AbsolutePath == "/api/v1/models/unload", "a shared identifier never reaches the REST load path");
             using var body = JsonDocument.Parse(await request.Content!.ReadAsStringAsync());
@@ -326,14 +328,14 @@ internal static class ProviderChecks
                     new { modelKey = key, path = remotePath, deviceIdentifier = "linked", sizeBytes = 200, format = "gguf" }
                 }), JsonSerializer.SerializeToElement(loaded)));
         }
-        Task LoadAsync(Uri origin, string path, string instance, int? context, CancellationToken token)
+        Task LoadAsync(Uri origin, string path, int? context, CancellationToken token)
         {
-            Check(origin.IsLoopback && path == localPath && instance == key && context == 8192,
-                "Mango loads the exact local file under the provider model name and requested context");
-            Check(LmStudioDevices.LocalLoadArguments(path, instance, context).SequenceEqual(
-                ["load", "--local", "--exact", "--identifier", instance, "--context-length", "8192", "--", path]),
-                "the CLI receives an exact local selector and one argument for the path");
-            localInstance = instance;
+            Check(origin.IsLoopback && path == localPath && context == 8192,
+                "Mango loads the exact local file and requested context");
+            Check(LmStudioDevices.LocalLoadArguments(path, context).SequenceEqual(
+                ["load", "--local", "--exact", "--context-length", "8192", "--", path]),
+                "the CLI receives the exact local path and uses the provider's chosen name");
+            localInstance = key;
             loads++;
             return Task.CompletedTask;
         }
@@ -345,11 +347,6 @@ internal static class ProviderChecks
             !remote.SupportsLoad && remote.Inputs.Contains("image"),
             "each device retains its own capabilities and an exact local copy is loadable");
         await Fails(409, () => adapter.LoadAsync(remote, null, default));
-        linkedInstance = key;
-        var collision = await Fails(409, () => adapter.LoadAsync(local, 8192, default));
-        Check(collision.Code == "lmstudio_name_conflict" && loads == 0 && unloads == 0,
-            "a linked instance that owns the public name is left alone");
-        linkedInstance = "linked-instance";
 
         await adapter.LoadAsync(local, 8192, default);
         inventory = (await adapter.InspectAsync(default)).Models;
@@ -368,6 +365,19 @@ internal static class ProviderChecks
         await adapter.UnloadAsync(local, default);
         Check(unloads == 1 && (await adapter.InspectAsync(default)).Models.Single(item => item.Origin == ModelOrigin.LmLink)
             .Instances.Single().Id == linkedInstance, "explicit local unload leaves the linked instance alone");
+
+        linkedInstance = key;
+        await adapter.LoadAsync(local, 8192, default);
+        inventory = (await adapter.InspectAsync(default)).Models;
+        local = inventory.Single(item => item.Origin == ModelOrigin.Local);
+        remote = inventory.Single(item => item.Origin == ModelOrigin.LmLink);
+        instance = local.Instances.Single();
+        Check(instance.Id == key && instance.Context == 8192 && !local.SupportsUnload && remote.AmbiguousInstance &&
+            remote.Instances.Length == 0, "the local native name resolves when both devices report the same settings");
+        await adapter.ConfirmDeploymentAsync(InferenceOperation.Chat, local, instance, default);
+        await Fails(503, () => adapter.UnloadAsync(local, default));
+        Check(unloads == 1 && localInstance == key && linkedInstance == key,
+            "an ambiguous unload leaves both the local and linked instances loaded");
     }
 
     private static async Task CheckGenericInventoryAsync(ProviderEndpoint endpoint)

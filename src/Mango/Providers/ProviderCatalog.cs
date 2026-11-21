@@ -517,7 +517,7 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
         {
             if (invoked)
                 LifecycleFailed?.Invoke(id, load, error.Status);
-            if (load && error.Code is "load_rejected" or "lmstudio_name_conflict")
+            if (load && error.Code == "load_rejected")
             {
                 reservation?.ReleaseUnstarted();
                 reservation = null;

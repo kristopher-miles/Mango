@@ -54,7 +54,7 @@ internal sealed record LmStudioDevices(JsonElement Link, JsonElement Downloaded,
         if (result.ExitCode != 0) throw new ProviderFailure(503, "LM Studio could not release the verified local instance.");
     }
 
-    public static async Task LoadLocalAsync(Uri origin, string path, string instance, int? context, CancellationToken cancellation)
+    public static async Task LoadLocalAsync(Uri origin, string path, int? context, CancellationToken cancellation)
     {
         using var control = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
         control.CancelAfter(ProviderLimits.ControlTimeout);
@@ -74,7 +74,7 @@ internal sealed record LmStudioDevices(JsonElement Link, JsonElement Downloaded,
         deadline.CancelAfter(ProviderLimits.LifecycleTimeout);
         try
         {
-            var result = await RunAsync(LocalLoadArguments(path, instance, context), deadline.Token);
+            var result = await RunAsync(LocalLoadArguments(path, context), deadline.Token);
             if (result.ExitCode == 1)
             {
                 var diagnostic = result.Output + result.Error;
@@ -94,8 +94,8 @@ internal sealed record LmStudioDevices(JsonElement Link, JsonElement Downloaded,
         }
     }
 
-    internal static string[] LocalLoadArguments(string path, string instance, int? context) =>
-        ["load", "--local", "--exact", "--identifier", instance,
+    internal static string[] LocalLoadArguments(string path, int? context) =>
+        ["load", "--local", "--exact",
             .. (context is { } limit ? new[] { "--context-length", limit.ToString(System.Globalization.CultureInfo.InvariantCulture) } : []),
             "--", path];
 
