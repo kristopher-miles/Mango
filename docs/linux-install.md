@@ -15,7 +15,7 @@ Copy the entire output directory to the Linux host and run `chmod +x Mango` if t
 ## Join an existing network
 
 1. Connect the host to the same Tailscale network as an existing Mango peer.
-2. On an existing Mango node that supports pairing, unlock administration, open **Network → Computers**, and select **Generate pairing code**.
+2. On an existing Mango node that supports pairing, open **Network → Computers**, unlock administration, and select **Pair a computer** in the panel header.
 3. With Mango stopped on Linux, run the following under the account that will run the service. The issuer must remain reachable over Tailscale. The code expires after one use or one hour.
 
 ```sh

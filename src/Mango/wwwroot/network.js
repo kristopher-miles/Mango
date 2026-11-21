@@ -1,7 +1,8 @@
 "use strict";
 
 const networkFeedback = document.querySelector("#network-status");
-const networkForms = Object.fromEntries(["discover", "join", "create", "unlock", "issue", "password", "recover", "reset", "queue", "pairing"].map(name => [name, document.querySelector(`#network-${name}`)]));
+const networkForms = Object.fromEntries(["discover", "join", "create", "unlock", "issue", "password", "recover", "reset", "queue"].map(name => [name, document.querySelector(`#network-${name}`)]));
+const networkPairing = document.querySelector("#network-pairing");
 const networkScopes = { ...operationNames, imageInput: "Image input", audioInput: "Audio input" };
 const networkSecretPanel = document.querySelector("#network-secret");
 const networkSecret = document.querySelector("#network-secret-value");
@@ -87,8 +88,8 @@ function renderAdministration() {
   document.querySelector("#admin-lock").disabled = administration.locking;
   document.querySelector("#admin-control").disabled = administration.locking;
   for (const form of [networkForms.issue, networkForms.password, networkForms.reset, networkForms.queue]) form.querySelector("fieldset") ? form.querySelector("fieldset").disabled = !unlocked : [...form.elements].filter(input => !input.hasAttribute("data-admin-unlock")).forEach(input => input.disabled = !unlocked);
-  networkForms.pairing.hidden = !active;
-  networkForms.pairing.querySelector("fieldset").disabled = !unlocked || !networkView?.ready;
+  networkPairing.hidden = !active;
+  networkPairing.disabled = administration.locking || !networkView?.ready;
   for (const button of document.querySelectorAll("[data-admin-unlock]")) button.hidden = !active || unlocked;
   const feedback = document.querySelector("#queue-feedback");
   if (!unlocked) { feedback.textContent = "Unlock administration in the top bar to change the queue."; delete feedback.dataset.feedback; }
@@ -265,9 +266,13 @@ networkForm("issue", "key-feedback", async (values, fields) => {
     neverExpires: values.expiry === "never", expiresAt: values.expiry === "date" ? new Date(values.expiresAt).toISOString() : null }, "POST");
   showNetworkSecret(result.secret, false); await loadNetwork(); return showDelivery(result.delivery);
 });
-networkForm("pairing", "network-status", async () => {
-  const result = await api("network/pairing-code", null, "POST");
-  showNetworkSecret(result.code, false, result.expiresAt);
+networkPairing.addEventListener("click", () => {
+  if (!administration.token) { openAdministration(); return; }
+  networkAction(networkPairing, async () => {
+    const result = await api("network/pairing-code", null, "POST");
+    showNetworkSecret(result.code, false, result.expiresAt);
+    return "Pairing code created.";
+  });
 });
 networkForm("password", "recovery-feedback", async fields => {
   const change = { newPassword: fields.newPassword };
