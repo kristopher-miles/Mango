@@ -9,12 +9,13 @@ namespace Mango.Peers;
 internal sealed record CreateNetworkRequest(string? Name, string? Password, BenchmarkPolicy? BenchmarkPolicy = null,
     LocalRole? Role = null);
 internal sealed record JoinNetworkRequest(string? Name, string? Address, Guid Network, string? Password, BenchmarkPolicy? BenchmarkPolicy = null,
-    LocalRole? Role = null, string? PairingSecret = null);
+    LocalRole? Role = null, string? PairingSecret = null, string? PairingNetworkTag = null);
 internal sealed record EnrollmentRequest(Guid Network, Guid Node, string Device, string Name, int Port, string Verifier, string? Password,
     [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
     string? PairingSecret = null);
 internal sealed record NetworkSetup(NetworkIdentity Identity, Guid Node, string? RecoveryRecord);
 internal sealed record IssuedPairing(string Code, DateTimeOffset ExpiresAt);
+internal sealed record AdminUnlock(string Token, DateTimeOffset ExpiresAt);
 internal sealed record UnlockRequest(string? Password);
 internal sealed record RecoverRequest(string? RecoveryRecord, string? NewPassword);
 internal sealed record ChangePasswordRequest(string? NewPassword, bool AllowPending = false);
@@ -82,15 +83,19 @@ internal sealed partial class PeerNetwork
             ValidateEnrollmentPreferences(input.BenchmarkPolicy, input.Role);
             var status = RequireInterface();
             var target = Tailnet.Address(input.Address, port) ?? throw new PeerFailure(400, "Enter the selected peer's Tailscale address.");
-            if (input.Network == Guid.Empty || (input.PairingSecret is null
-                ? input.Password is not { Length: > 0 and <= 256 }
-                : input.Password is not null || !PeerCredentials.IsSecret(input.PairingSecret)))
+            if (input.PairingSecret is null
+                ? input.Network == Guid.Empty || input.PairingNetworkTag is not null || input.Password is not { Length: > 0 and <= 256 }
+                : input.Password is not null || !PairingCode.IsSecret(input.PairingSecret) ||
+                  (input.PairingNetworkTag is null ? input.Network == Guid.Empty :
+                    input.Network != Guid.Empty || input.PairingNetworkTag.Length != 16 || !input.PairingNetworkTag.All(char.IsAsciiHexDigit)))
                 throw new PeerFailure(400, "Enter the selected network ID and a master password or pairing code.");
             if (bound.Any(ip => target == new Uri(Tailnet.Origin(ip, port))))
                 throw new PeerFailure(400, "Select a different Mango peer.");
             var intro = (await GetIntroAsync(target, cancellation, enrollment: true))?.Peer;
-            if (intro is null || intro.Identity.Id != input.Network)
+            if (intro is null || (input.PairingNetworkTag is { } tag
+                ? PairingCode.Tag(intro.Identity.Id) != tag : intro.Identity.Id != input.Network))
                 throw new PeerFailure(409, "The selected address did not identify the expected Mango network.");
+            input = input with { Network = intro.Identity.Id };
 
             var (_, pending) = await ChangeAsync(current =>
             {
@@ -184,7 +189,7 @@ internal sealed partial class PeerNetwork
     public async Task<IssuedPairing> IssuePairingAsync(HttpRequest request, CancellationToken cancellation)
     {
         var admin = AdminHeader(request);
-        var secret = PeerCredentials.Secret();
+        var secret = PeerCredentials.TemporarySecret();
         var digest = PeerCredentials.Digest(secret);
         var expires = clock.GetUtcNow().AddHours(1);
         var address = bound.FirstOrDefault();
@@ -199,7 +204,7 @@ internal sealed partial class PeerNetwork
                 throw new PeerFailure(409, "Wait for an existing pairing code to be used or expire.");
             return current.Disk with { Pairings = [..active, new(digest, current.Records.Identity!.Generation, expires)] };
         }, cancellation);
-        return new(PairingCode.Encode(Tailnet.Origin(address!, port), after.Records.Identity!.Id, secret), expires);
+        return new(PairingCode.Encode(new Uri(Tailnet.Origin(address!, port)), after.Records.Identity!.Id, secret), expires);
     }
 
     private LocalPairing[] ActivePairings(PeerSnapshot snapshot)
@@ -227,7 +232,7 @@ internal sealed partial class PeerNetwork
         string? digest = null;
         if (input.PairingSecret is { } secret)
         {
-            if (input.Password is not null || !PeerCredentials.IsSecret(secret))
+            if (input.Password is not null || !PairingCode.IsSecret(secret))
                 throw new PeerFailure(400, "Invalid pairing credential.");
             if (!passwordBudget.Take(address, clock.GetUtcNow()))
                 throw new PeerFailure(429, "Too many enrollment attempts. Try again shortly.");
@@ -269,25 +274,34 @@ internal sealed partial class PeerNetwork
         return after.Records;
     }
 
-    public async Task<object> UnlockAsync(UnlockRequest input, IPAddress source, CancellationToken cancellation)
+    public async Task<AdminUnlock> UnlockAsync(UnlockRequest input, IPAddress source, CancellationToken cancellation)
     {
         var current = Snapshot;
         RequireMember(current);
         var authority = current.Records.Authority ?? throw new PeerFailure(409, "No local network authority is available.");
         await CheckPasswordAsync(input.Password, authority, source, cancellation);
+        return GrantAdmin(current);
+    }
+
+    internal AdminUnlock GrantAdmin(PeerSnapshot expected)
+    {
         lock (authorization)
         {
             var now = Snapshot;
-            if (now.Records.Identity != current.Records.Identity || now.Records.Authority != authority || !IsMember)
+            if (now.Records.Identity != expected.Records.Identity || now.Records.Authority is null ||
+                now.Records.Authority != expected.Records.Authority || !IsMember)
                 throw new PeerFailure(409, "Network authority changed. Unlock again.");
             var token = PeerCredentials.Secret();
             var expires = clock.GetUtcNow() + PeerLimits.UnlockLifetime;
             if (unlocks.Count >= 16)
                 unlocks.Remove(unlocks.MinBy(entry => entry.Value.Expires).Key);
-            unlocks.Add(PeerCredentials.Digest(token), new(now.Records.Identity!.Generation, authority.Revision, expires));
-            return new { Token = token, ExpiresAt = expires };
+            unlocks.Add(PeerCredentials.Digest(token), new(now.Records.Identity!.Generation, now.Records.Authority.Revision, expires));
+            return new(token, expires);
         }
     }
+
+    internal bool IsAdmin(string token) => HasAdmin(Snapshot, token);
+    internal bool TakeLoginAttempt(IPAddress address) => passwordBudget.Take(address, clock.GetUtcNow());
 
     private async Task CheckPasswordAsync(string? password, AuthorityRecord authority, IPAddress source, CancellationToken cancellation)
     {
@@ -306,7 +320,12 @@ internal sealed partial class PeerNetwork
     public void Lock(HttpRequest request)
     {
         var token = AdminHeader(request);
-        if (string.IsNullOrEmpty(token)) return;
+        if (PeerCredentials.IsSecret(token))
+            RevokeAdmin(token!);
+    }
+
+    internal void RevokeAdmin(string token)
+    {
         lock (authorization)
             unlocks.Remove(PeerCredentials.Digest(token));
     }

@@ -17,6 +17,13 @@ internal static class Program
     [STAThread]
     public static int Main(string[] args)
     {
+        if (args is ["admin", .. var adminArguments])
+            return AdminCli.RunAsync(adminArguments).GetAwaiter().GetResult();
+        if (OperatingSystem.IsMacOS())
+        {
+            Console.Error.WriteLine("This build supports Mango admin commands on macOS.");
+            return 2;
+        }
         if (OperatingSystem.IsWindows() && args.FirstOrDefault() == WindowsJob.StarterArgument)
             return WindowsJob.StartChildAsync(args).GetAwaiter().GetResult();
         if (args is ["--help"])
@@ -114,10 +121,9 @@ internal static class Program
         using var resources = windows ? new ResourceProtection(directory, settings) : null;
         var providers = new ProviderCatalog(directory, resources);
         var peers = new PeerNetwork(directory, nodePort ?? options.PeerPort ?? PeerLimits.DefaultPort, providers, settings);
-        using var updates = windows
-            ? new WindowsUpdates(directory, options.RestartArguments(), settings, peers, options.UpdateReady is not null) : null;
+        using var updates = new ManagedUpdates(directory, options.RestartArguments(), settings, peers, options.UpdateReady is not null);
         peers.Updates = updates;
-        var ingress = windows ? new PublicIngress(directory, peers) : null;
+        var ingress = new PublicIngress(directory, peers);
         var web = new LocalWeb();
         try
         {
@@ -129,7 +135,7 @@ internal static class Program
             {
                 peers.RefreshTransportAsync(CancellationToken.None).GetAwaiter().GetResult();
                 if (join.PairingSecret is null)
-                    join = join with { Password = ReadJoinPassword() };
+                    join = join with { Password = ReadSecret("Mango network master password: ") };
                 var joined = peers.JoinAsync(join, CancellationToken.None).GetAwaiter().GetResult();
                 Console.WriteLine($"Enrolled leech node {joined.Node} in Mango network {joined.Identity.Id}.");
                 return;
@@ -165,13 +171,13 @@ internal static class Program
     }
 
     private static void RunHost(WebApplication app, LaunchOptions options, string directory, InstanceControl instance, string diagnostic,
-        SnapshotFile<LocalSettings> settings, LocalWeb web, ProviderCatalog providers, PeerNetwork peers, WindowsUpdates? updates,
+        SnapshotFile<LocalSettings> settings, LocalWeb web, ProviderCatalog providers, PeerNetwork peers, ManagedUpdates updates,
         int? unavailableLoopbackPort)
     {
         var inventory = providers.Resources is null ? Task.CompletedTask : providers.RunAsync(app.Lifetime.ApplicationStopping);
         var network = peers.RunAsync(app.Lifetime.ApplicationStopping, refreshTransport: false);
         var protection = providers.Resources?.RunAsync(providers, app.Lifetime.ApplicationStopping) ?? Task.CompletedTask;
-        var updateChecks = updates?.RunAsync(app.Lifetime) ?? Task.CompletedTask;
+        var updateChecks = updates.RunAsync(app.Lifetime);
         try
         {
             var url = web.BrowserUrl(app.Urls.Single());
@@ -181,6 +187,8 @@ internal static class Program
                 control.GetAwaiter().GetResult();
             if (options.UpdateReady is { } nonce)
             {
+                if (OperatingSystem.IsLinux() && portUnavailable)
+                    throw new IOException("The updated Mango build could not bind a service port.");
                 var ready = UpdateInstall.ReadyPath(directory, nonce);
                 File.WriteAllText(ready + ".tmp", MangoRelease.Current.Version);
                 File.Move(ready + ".tmp", ready);
@@ -222,11 +230,11 @@ internal static class Program
         }
     }
 
-    private static string? ReadJoinPassword()
+    internal static string? ReadSecret(string label)
     {
         if (Console.IsInputRedirected)
             return Console.ReadLine();
-        Console.Error.Write("Mango network master password: ");
+        Console.Error.Write(label);
         var password = new StringBuilder();
         while (true)
         {
@@ -281,6 +289,7 @@ internal static class Program
             string? joinAddress = null;
             string? nodeName = null;
             string? pairingSecret = null;
+            string? pairingNetworkTag = null;
             var network = Guid.Empty;
             for (var index = 0; index < args.Length; index++)
             {
@@ -290,7 +299,7 @@ internal static class Program
                     case "--background" when OperatingSystem.IsWindows(): background = true; break;
                     case "--quit": quit = true; break;
                     case "--url": printUrl = true; break;
-                    case "--update-ready" when OperatingSystem.IsWindows() && index + 1 < args.Length && Guid.TryParseExact(args[index + 1], "N", out _):
+                    case "--update-ready" when index + 1 < args.Length && Guid.TryParseExact(args[index + 1], "N", out _):
                         updateReady = args[++index];
                         break;
                     case "--data-dir" when index + 1 < args.Length:
@@ -314,6 +323,7 @@ internal static class Program
                         joinAddress = pairing.Target.GetLeftPart(UriPartial.Authority);
                         network = pairing.Network;
                         pairingSecret = pairing.Secret;
+                        pairingNetworkTag = pairing.NetworkTag;
                         index++;
                         break;
                     case "--name" when nodeName is null && index + 1 < args.Length && !args[index + 1].StartsWith("--", StringComparison.Ordinal):
@@ -329,7 +339,7 @@ internal static class Program
                 throw new ArgumentException("Use --name with --pair or --join.");
             var join = joinAddress is null ? null :
                 new JoinNetworkRequest(nodeName ?? Environment.MachineName, joinAddress, network, null,
-                    BenchmarkPolicy.Never, LocalRole.Leech, pairingSecret);
+                    BenchmarkPolicy.Never, LocalRole.Leech, pairingSecret, pairingNetworkTag);
             return new LaunchOptions(headless || !OperatingSystem.IsWindows(), background, quit, printUrl, directory, port, peerPort, updateReady, join);
         }
     }

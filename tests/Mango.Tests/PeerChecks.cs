@@ -21,6 +21,7 @@ internal static partial class PeerChecks
     public static async Task RunAsync(string root)
     {
         TestMerge();
+        TestCompactPairing();
         await TestUpdateAsync(root);
         await TestLogStoreAsync(root);
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(8));
@@ -45,10 +46,31 @@ internal static partial class PeerChecks
         finally { Console.SetOut(output); }
         Console.WriteLine("Peer checks passed on the live Windows Tailscale interface with two Mango instances.");
         Console.WriteLine("One-time pairing authorization, expiry, persistence and replay checks passed.");
+        Console.WriteLine("Node administration password and code login, revocation, and HTTPS isolation checks passed.");
         Console.WriteLine("Shared alias checks passed for mixed context, vision, and concurrent host use.");
         Console.WriteLine("Shared host intent, local dashboard and TLS public ingress checks passed.");
         Console.WriteLine("Log capture, partial collection, retention and offline deletion checks passed.");
         Console.WriteLine("Release window and host-local maintenance checks passed.");
+    }
+
+    private static void TestCompactPairing()
+    {
+        var network = Guid.NewGuid();
+        var secret = PeerCredentials.TemporarySecret();
+        foreach (var (value, length) in new[] { ("100.64.0.9", 40), ("100.127.255.9:55123", 43),
+                     ("[fd7a:115c:a1e0::12]", 50), ("[fd7a:115c:a1e0::12]:55123", 52) })
+        {
+            var target = Tailnet.Address(value)!;
+            var raw = PairingCode.Encode(target, network, secret);
+            var parsed = PairingCode.Parse(raw);
+            Check(raw.Length == length && parsed?.Target == target && parsed.NetworkTag == PairingCode.Tag(network) &&
+                parsed.Secret == secret, $"compact pairing round trips {value} ({raw.Length}, {parsed?.Target})");
+        }
+        var legacyAddress = Microsoft.AspNetCore.WebUtilities.WebEncoders.Base64UrlEncode("http://100.64.0.9:53781"u8.ToArray());
+        var legacySecret = PeerCredentials.Secret();
+        var legacy = PairingCode.Parse($"mango-pair.{legacyAddress}.{network:N}.{legacySecret}");
+        Check(legacy?.Network == network && legacy.Secret == legacySecret &&
+            PairingCode.Parse("mp1_" + new string('%', 36)) is null, "legacy codes still parse and malformed compact codes are rejected");
     }
 
     private static async Task TestPairingAsync(string root, TailnetStatus status, IPAddress address)
@@ -70,7 +92,8 @@ internal static partial class PeerChecks
                 Check(result.GetProperty("expiresAt").GetDateTimeOffset() == clock.GetUtcNow().AddHours(1), "pairing lasts one hour");
                 var raw = result.GetProperty("code").GetString()!;
                 var pairing = PairingCode.Parse(raw);
-                Check(pairing?.Network == network && pairing.Target == new Uri(issuer.TailAddress), "pairing names its issuer and network");
+                Check(pairing?.NetworkTag == PairingCode.Tag(network) && pairing.Target == new Uri(issuer.TailAddress) &&
+                    raw.Length is >= 40 and <= 52, "compact pairing names its issuer and network");
                 Check(!File.ReadAllText(Path.Combine(issuerPath, "network.json")).Contains(pairing!.Secret, StringComparison.Ordinal),
                     "issuer persists only the pairing verifier");
                 return pairing;
@@ -78,8 +101,8 @@ internal static partial class PeerChecks
             var expired = await IssuePairing();
             clock.Now = clock.Now.AddHours(1);
             await using var joining = await Host.StartAsync(Path.Combine(root, "pairing-join"), status, Port(address));
-            var join = new JoinNetworkRequest("Paired node", issuer.TailAddress, network, null, Role: LocalRole.Leech,
-                PairingSecret: expired.Secret);
+            var join = new JoinNetworkRequest("Paired node", issuer.TailAddress, Guid.Empty, null, Role: LocalRole.Leech,
+                PairingSecret: expired.Secret, PairingNetworkTag: expired.NetworkTag);
             await Local(http, joining, "network/join", join, expected: 401);
 
             var fresh = await IssuePairing();
@@ -88,6 +111,7 @@ internal static partial class PeerChecks
             var joined = await Local(http, joining, "network/join", join with { PairingSecret = fresh.Secret });
             var joinedId = joined.GetProperty("node").GetGuid();
             Check(issuer.Network.Snapshot.Nodes.ContainsKey(joinedId) && joining.Network.IsMember, "pairing enrolls without a password");
+            await TestNodeAdminAsync(http, issuer, joining, address, clock);
 
             await issuer.DisposeAsync();
             issuer = await Host.StartAsync(issuerPath, status, issuerPort, time: clock);
@@ -96,6 +120,44 @@ internal static partial class PeerChecks
             Check(!replay.Network.IsMember && issuer.Network.Snapshot.Nodes.Count == 2, "a used pairing code stays consumed");
         }
         finally { await issuer.DisposeAsync(); }
+    }
+
+    private static async Task TestNodeAdminAsync(HttpClient http, Host issuer, Host other, IPAddress ip, PairingClock clock)
+    {
+        var address = issuer.TailAddress + "/peer/admin/";
+        var unauthorized = new AdminInvocation("status", null, null);
+        await Request(http, HttpMethod.Post, address + "run", body: unauthorized, expected: 401);
+        await Request(http, HttpMethod.Post, address + "login", body: new AdminLogin("incorrect password", null), expected: 401);
+        var owner = (await Request(http, HttpMethod.Post, address + "login", body: new AdminLogin(Password, null)))
+            .GetProperty("token").GetString()!;
+        var shortGrant = await Request(http, HttpMethod.Post, address + "codes", body: new AdminCodeRequest(1), nodeAdmin: owner);
+        clock.Now = clock.Now.AddMinutes(1);
+        await Request(http, HttpMethod.Post, address + "login",
+            body: new AdminLogin(null, shortGrant.GetProperty("code").GetString()), expected: 401);
+        var grant = await Request(http, HttpMethod.Post, address + "codes", body: new AdminCodeRequest(), nodeAdmin: owner);
+        var code = grant.GetProperty("code").GetString()!;
+        Check(code.Length == 22, "login code is compact");
+        await Request(http, HttpMethod.Post, other.TailAddress + "/peer/admin/login", body: new AdminLogin(null, code), expected: 401);
+        var helper = (await Request(http, HttpMethod.Post, address + "login", body: new AdminLogin(null, code)))
+            .GetProperty("token").GetString()!;
+        await Request(http, HttpMethod.Post, address + "login", body: new AdminLogin(null, code), expected: 401);
+        var settings = await Request(http, HttpMethod.Post, address + "run", body: new AdminInvocation("settings show", null, null), nodeAdmin: helper);
+        Check(settings.GetProperty("settings").GetProperty("role").GetString() == "leech", "code login has the same node access as password login");
+        await Request(http, HttpMethod.Post, address + "run", body: new AdminInvocation("keys revoke", "../logs", null), nodeAdmin: helper,
+            expected: 400);
+        var proxyPort = Port(IPAddress.Loopback);
+        var publicOrigin = $"http://127.0.0.1:{proxyPort}";
+        await Request(http, HttpMethod.Post, address + "run", body: new AdminInvocation("https set", null,
+            JsonSerializer.SerializeToElement(new { enabled = true, port = proxyPort, httpsOrigin = "https://mango.example.test" })),
+            nodeAdmin: helper, expected: 204);
+        await Request(http, HttpMethod.Get, publicOrigin + "/v1/models", expected: 401);
+        await Request(http, HttpMethod.Post, publicOrigin + "/peer/admin/run", body: unauthorized, nodeAdmin: helper, expected: 404);
+        await Request(http, HttpMethod.Post, address + "run", body: new AdminInvocation("updates policy", null,
+            JsonSerializer.SerializeToElement(new { daily = true })), nodeAdmin: helper, expected: 204);
+        await Request(http, HttpMethod.Delete, address + "codes/" + grant.GetProperty("id").GetGuid(), nodeAdmin: owner, expected: 204);
+        await Request(http, HttpMethod.Post, address + "run", body: unauthorized, nodeAdmin: helper, expected: 401);
+        await Request(http, HttpMethod.Post, address + "logout", nodeAdmin: owner, expected: 204);
+        await Request(http, HttpMethod.Post, address + "run", body: unauthorized, nodeAdmin: owner, expected: 401);
     }
 
     private sealed class PairingClock : TimeProvider
@@ -350,13 +412,17 @@ internal static partial class PeerChecks
             host.Session, body, admin, expected);
 
     private static async Task<JsonElement> Request(HttpClient http, HttpMethod method, string url,
-        string? bearer = null, object? body = null, string? admin = null, int expected = 200)
+        string? bearer = null, object? body = null, string? admin = null, int expected = 200, string? nodeAdmin = null)
     {
         using var request = new HttpRequestMessage(method, url);
         if (bearer is not null)
             request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", bearer);
         if (admin is not null)
             request.Headers.Add(PeerNetwork.AdminSessionHeader, admin);
+        if (request.RequestUri!.AbsolutePath.StartsWith("/peer/admin/", StringComparison.Ordinal))
+            request.Headers.Add(PeerNetwork.ReleaseHeader, MangoRelease.Current.Wire);
+        if (nodeAdmin is not null)
+            request.Headers.Add(RemoteAdmin.SessionHeader, nodeAdmin);
         if (body is not null)
             request.Content = JsonContent.Create(body, options: Json);
         using var response = await http.SendAsync(request);

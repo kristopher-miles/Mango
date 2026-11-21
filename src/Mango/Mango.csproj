@@ -2,7 +2,7 @@
   <PropertyGroup>
     <TargetFramework Condition="'$(MangoLinux)' != 'true'">net10.0-windows</TargetFramework>
     <TargetFramework Condition="'$(MangoLinux)' == 'true'">net10.0</TargetFramework>
-    <OutputType Condition="'$(MangoLinux)' != 'true'">WinExe</OutputType>
+    <OutputType Condition="'$(MangoLinux)' != 'true' and '$(MangoConsole)' != 'true'">WinExe</OutputType>
     <UseWindowsForms Condition="'$(MangoLinux)' != 'true'">true</UseWindowsForms>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>

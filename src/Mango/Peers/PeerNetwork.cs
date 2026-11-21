@@ -59,6 +59,7 @@ internal sealed partial class PeerNetwork(string directory, int port, ProviderCa
     public bool AllowsLocalInference => Snapshot.Self is null || Ready;
     internal bool Draining => serving.Draining;
     internal static JsonSerializerOptions Json => SnapshotFile<PeerDisk>.Json;
+    internal RemoteAdmin? Administration { get; private set; }
 
     internal async Task<bool> DrainForMaintenanceAsync(TimeSpan timeout, CancellationToken cancellation)
     {
@@ -131,6 +132,7 @@ internal sealed partial class PeerNetwork(string directory, int port, ProviderCa
 
     public async Task InitializeAsync()
     {
+        Administration = new(this, clock);
         await store.LoadAsync(PeerDisk.Empty);
         needsPeerConfirmation = store.RecoveryWarning is not null;
         if (needsPeerConfirmation && store.Value.Pairings is { Length: > 0 })
@@ -450,6 +452,7 @@ internal sealed partial class PeerNetwork(string directory, int port, ProviderCa
 
     public async ValueTask DisposeAsync()
     {
+        Administration?.Dispose();
         stopping.Cancel();
         Logs.Applied -= QueueCatalog;
         providers.Changed -= QueueCatalog;

@@ -5,12 +5,23 @@ using System.Text;
 
 namespace Mango.Host;
 
-internal sealed class UpdateInstall(string dataDirectory, string restartArguments)
+internal interface IUpdateInstall
+{
+    string Platform { get; }
+    string Receipt { get; }
+    bool Available { get; }
+    Task<string> StageAsync(UpdateFeed feed, UpdateManifest manifest, CancellationToken cancellation);
+    Task ApplyAsync(string stage, string version, CancellationToken cancellation);
+    void Discard(string stage);
+}
+
+internal sealed class UpdateInstall(string dataDirectory, string restartArguments) : IUpdateInstall
 {
     private const long MaxExpandedBytes = 512L * 1024 * 1024;
     private const string Marker = "Mango.package";
     private readonly string install = Path.TrimEndingDirectorySeparator(AppContext.BaseDirectory);
-    internal string Receipt => Path.Combine(dataDirectory, "update-result.json");
+    public string Platform => "win-x64";
+    public string Receipt => Path.Combine(dataDirectory, "update-result.json");
 
     internal static FileStream? HoldPackage()
     {
@@ -18,7 +29,7 @@ internal sealed class UpdateInstall(string dataDirectory, string restartArgument
         return File.Exists(path) ? File.Open(path, FileMode.Open, FileAccess.Read, FileShare.Read) : null;
     }
 
-    internal bool Available => RuntimeInformation.ProcessArchitecture == Architecture.X64 &&
+    public bool Available => RuntimeInformation.ProcessArchitecture == Architecture.X64 &&
         string.Equals(Environment.ProcessPath, Path.Combine(install, "Mango.exe"), StringComparison.OrdinalIgnoreCase) &&
         File.Exists(Path.Combine(install, Marker)) && File.Exists(Path.Combine(install, "coreclr.dll")) &&
         Path.GetDirectoryName(install) is not null && !InsideInstall(dataDirectory);
@@ -27,7 +38,7 @@ internal sealed class UpdateInstall(string dataDirectory, string restartArgument
         path.Equals(install, StringComparison.OrdinalIgnoreCase) ||
         path.StartsWith(install + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
 
-    internal async Task<string> StageAsync(UpdateFeed feed, UpdateManifest manifest, CancellationToken cancellation)
+    public async Task<string> StageAsync(UpdateFeed feed, UpdateManifest manifest, CancellationToken cancellation)
     {
         var parent = new DirectoryInfo(Path.GetDirectoryName(install)!);
         for (DirectoryInfo? directory = new(install); directory is not null; directory = directory.Parent)
@@ -62,7 +73,7 @@ internal sealed class UpdateInstall(string dataDirectory, string restartArgument
         finally { File.Delete(download); }
     }
 
-    internal void Discard(string stage)
+    public void Discard(string stage)
     {
         if (Path.GetDirectoryName(stage) == Path.GetDirectoryName(install) &&
             stage.StartsWith(install + ".update-", StringComparison.Ordinal) &&
@@ -70,7 +81,7 @@ internal sealed class UpdateInstall(string dataDirectory, string restartArgument
             Directory.Delete(stage, recursive: true);
     }
 
-    internal async Task ApplyAsync(string stage, string version, CancellationToken cancellation)
+    public async Task ApplyAsync(string stage, string version, CancellationToken cancellation)
     {
         using var script = new StreamReader(typeof(UpdateInstall).Assembly.GetManifestResourceStream("Mango.ApplyUpdate")!);
         using var current = Process.GetCurrentProcess();

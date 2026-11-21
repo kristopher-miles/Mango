@@ -5,6 +5,7 @@ Use PowerShell 7, Git, and the .NET SDK pinned in `global.json`. Push the review
 ```powershell
 ./scripts/release-windows.ps1             # v0.0.1, then v0.0.2, etc.
 ./scripts/release-windows.ps1 -BuildOnly  # build to dist without publishing
+./scripts/release-windows.ps1 -WithLinux  # also package and sign Linux x64 and arm64
 ./scripts/release-windows.ps1 -Bump Minor # explicit: e.g. v0.1.0
 ./scripts/release-windows.ps1 -Bump Major # explicit: e.g. v1.0.0
 ```
