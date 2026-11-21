@@ -36,6 +36,8 @@ internal sealed class LocalWeb
         builder.Services.ConfigureHttpJsonOptions(options =>
             options.SerializerOptions.Converters.Add(new JsonStringEnumConverter(JsonNamingPolicy.CamelCase, allowIntegerValues: false)));
         var app = builder.Build();
+        if (peers.Administration is { } administration)
+            app.Lifetime.ApplicationStarted.Register(() => administration.SetLoopback(new Uri(app.Urls.Single()), token));
         app.Use(async (context, next) =>
         {
             if (!IsLocalOrigin(context))
@@ -79,7 +81,8 @@ internal sealed class LocalWeb
         app.UseDefaultFiles();
         app.UseStaticFiles();
 
-        var defaultRamMiB = LocalSettings.DefaultRamReserveMiB(WindowsMemory.PhysicalBytes());
+        var defaultRamMiB = LocalSettings.DefaultRamReserveMiB(OperatingSystem.IsWindows()
+            ? WindowsMemory.PhysicalBytes() : (ulong)GC.GetGCMemoryInfo().TotalAvailableMemoryBytes);
         var local = app.MapGroup("/api/local");
         local.MapGet("/settings", (HttpContext context) =>
         {
@@ -174,9 +177,13 @@ internal sealed class LocalWeb
         });
         local.MapPut("/release/deferral", (MaintenanceUpdate update, HttpContext context) => PeerRoutes.HandleAsync(context, async token =>
         {
+            if (update.Deferred is null && update.Daily is null)
+                throw new PeerFailure(400, "Specify at least one update preference.");
+            if (OperatingSystem.IsLinux() && update.Daily == true && peers.Updates?.Available != true)
+                throw new PeerFailure(409, "Linux automatic updates require the managed systemd launcher.");
             await settings.UpdateAsync(current => current with
             {
-                MaintenanceDeferred = update.Deferred,
+                MaintenanceDeferred = update.Deferred ?? current.MaintenanceDeferred,
                 DailyUpdates = update.Daily ?? current.DailyUpdates
             }, token);
             peers.Updates?.PreferencesChanged();
@@ -190,6 +197,7 @@ internal sealed class LocalWeb
             peers.Updates?.ShareAsync(input.AllowPartial, token) ??
             throw new PeerFailure(409, "Update sharing is unavailable.")));
         PeerRoutes.MapLocal(local, peers);
+        peers.Administration?.Map(local.MapGroup("/admin"));
         ingress?.Map(local);
         ProviderRoutes.Map(app, local, providers, peers);
         return app;
@@ -224,6 +232,6 @@ internal sealed class LocalWeb
     private sealed record SettingsUpdate(LocalSettings? Settings, bool AcceptReducedReserve);
     private sealed record StartupUpdate([property: JsonRequired] bool Enabled);
     private sealed record NodePortUpdate([property: JsonRequired] int Port);
-    private sealed record MaintenanceUpdate([property: JsonRequired] bool Deferred, bool? Daily);
+    private sealed record MaintenanceUpdate(bool? Deferred, bool? Daily);
     private sealed record ShareUpdate(bool AllowPartial);
 }

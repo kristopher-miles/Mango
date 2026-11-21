@@ -59,6 +59,7 @@ internal sealed partial class PeerNetwork(string directory, int port, ProviderCa
     public bool AllowsLocalInference => Snapshot.Self is null || Ready;
     internal bool Draining => serving.Draining;
     internal static JsonSerializerOptions Json => SnapshotFile<PeerDisk>.Json;
+    internal RemoteAdmin? Administration { get; private set; }
 
     internal async Task<bool> DrainForMaintenanceAsync(TimeSpan timeout, CancellationToken cancellation)
     {
@@ -131,13 +132,16 @@ internal sealed partial class PeerNetwork(string directory, int port, ProviderCa
 
     public async Task InitializeAsync()
     {
+        Administration = new(this, clock);
         await store.LoadAsync(PeerDisk.Empty);
         needsPeerConfirmation = store.RecoveryWarning is not null;
+        if (needsPeerConfirmation && store.Value.Pairings is { Length: > 0 })
+            await store.UpdateAsync(disk => disk with { Pairings = null });
         var disk = store.Value;
         string? token = null;
         if (disk.Local?.ProtectedSecret is { } protectedSecret)
         {
-            try { token = WindowsSecrets.Open(protectedSecret, credentialContext); }
+            try { token = OpenMembershipSecret(protectedSecret); }
             catch (Exception error) when (error is CryptographicException or FormatException) { }
         }
         Volatile.Write(ref snapshot, new(disk, token));
@@ -308,7 +312,7 @@ internal sealed partial class PeerNetwork(string directory, int port, ProviderCa
                 return (before, before);
             disk = disk with { LastObserved = Math.Max(disk.LastObserved, before.Latest) };
             var token = disk.Local?.ProtectedSecret is not { } encrypted ? null :
-                encrypted == before.Local?.ProtectedSecret ? before.Token : WindowsSecrets.Open(encrypted, credentialContext);
+                encrypted == before.Local?.ProtectedSecret ? before.Token : OpenMembershipSecret(encrypted);
             await store.UpdateAsync(_ => disk, cancellation);
             var after = new PeerSnapshot(disk, token);
             ConfigureLogs(before, after);
@@ -325,7 +329,16 @@ internal sealed partial class PeerNetwork(string directory, int port, ProviderCa
     }
 
     private LocalMembership ProtectMembership(Guid node, string device, string token, Guid? network = null, string? issuer = null) =>
-        new(node, device, WindowsSecrets.Protect(token, credentialContext), network, issuer);
+        new(node, device, OperatingSystem.IsLinux() ? "linux:" + token : WindowsSecrets.Protect(token, credentialContext), network, issuer);
+
+    private string OpenMembershipSecret(string value)
+    {
+        if (!OperatingSystem.IsLinux())
+            return WindowsSecrets.Open(value, credentialContext);
+        // shortcut: Linux relies on the private state directory, add a platform key store when one is available on all target hosts.
+        return value.StartsWith("linux:", StringComparison.Ordinal) && PeerCredentials.IsSecret(value[6..])
+            ? value[6..] : throw new CryptographicException("Invalid Linux membership credential.");
+    }
 
     private Revision Next(PeerSnapshot current, Guid node) => current.Next(node, clock.GetUtcNow().ToUnixTimeMilliseconds());
     private bool DeviceChanged(PeerSnapshot current) =>
@@ -439,6 +452,7 @@ internal sealed partial class PeerNetwork(string directory, int port, ProviderCa
 
     public async ValueTask DisposeAsync()
     {
+        Administration?.Dispose();
         stopping.Cancel();
         Logs.Applied -= QueueCatalog;
         providers.Changed -= QueueCatalog;

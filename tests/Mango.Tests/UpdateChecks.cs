@@ -14,6 +14,17 @@ internal static partial class PeerChecks
         var metadata = JsonSerializer.SerializeToUtf8Bytes(manifest, new JsonSerializerOptions(JsonSerializerDefaults.Web));
         var signature = key.SignData(metadata, HashAlgorithmName.SHA256, RSASignaturePadding.Pss);
         Check(UpdateFeed.Verify(metadata, signature, publisher, "0.0.3") == manifest, "publisher signature validates the release");
+        var linux = manifest with { Platform = "linux-x64" };
+        var linuxMetadata = JsonSerializer.SerializeToUtf8Bytes(linux, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        var linuxSignature = key.SignData(linuxMetadata, HashAlgorithmName.SHA256, RSASignaturePadding.Pss);
+        Check(UpdateFeed.Verify(linuxMetadata, linuxSignature, publisher, "0.0.3", "linux-x64") == linux,
+            "Linux release uses the existing publisher trust root");
+        try
+        {
+            UpdateFeed.Verify(linuxMetadata, linuxSignature, publisher, "0.0.3", "linux-arm64");
+            throw new Exception("Signed Linux packages must match the requested architecture.");
+        }
+        catch (InvalidDataException) { }
         Check(manifest.CanInstall(new MangoRelease("0.0.2", 1)) &&
             !manifest.CanInstall(new MangoRelease("0.0.3", 1)) &&
             !manifest.CanInstall(new MangoRelease("0.0.4", 1)) &&

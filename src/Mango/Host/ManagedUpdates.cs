@@ -8,11 +8,11 @@ namespace Mango.Host;
 internal sealed record UpdateOffer(string Version, int? DelaySeconds = null, Guid? After = null);
 internal sealed record UpdateReply(string State);
 
-internal sealed class WindowsUpdates : IDisposable
+internal sealed class ManagedUpdates : IDisposable
 {
     private readonly SnapshotFile<LocalSettings> settings;
     private readonly PeerNetwork peers;
-    private readonly UpdateInstall installer;
+    private readonly IUpdateInstall installer;
     private readonly HttpClient http = new(new SocketsHttpHandler { MaxConnectionsPerServer = 4 })
     {
         Timeout = Timeout.InfiniteTimeSpan,
@@ -29,15 +29,17 @@ internal sealed class WindowsUpdates : IDisposable
     private QueuedUpdate? queued;
     private bool installing;
 
-    public WindowsUpdates(string directory, string restartArguments, SnapshotFile<LocalSettings> settings, PeerNetwork peers, bool restarted)
+    public ManagedUpdates(string directory, string restartArguments, SnapshotFile<LocalSettings> settings, PeerNetwork peers, bool restarted)
     {
         this.settings = settings;
         this.peers = peers;
-        installer = new(directory, restartArguments);
+        installer = OperatingSystem.IsLinux() ? new LinuxUpdateInstall(directory) : new UpdateInstall(directory, restartArguments);
         http.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("Mango", peers.Release.Version));
         http.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/vnd.github+json"));
-        feed = new(http, UpdateFeed.ReadPublisher());
-        status = installer.Available ? "Ready to check GitHub for updates." : "Automatic installation requires an extracted Windows x64 package.";
+        feed = new(http, UpdateFeed.ReadPublisher(), installer.Platform);
+        status = installer.Available ? "Ready to check GitHub for updates." : OperatingSystem.IsLinux()
+            ? "Automatic installation requires the managed systemd launcher."
+            : "Automatic installation requires an extracted Windows x64 package.";
         try
         {
             if (File.Exists(installer.Receipt) && JsonSerializer.Deserialize<Receipt>(File.ReadAllText(installer.Receipt),
@@ -201,7 +203,7 @@ internal sealed class WindowsUpdates : IDisposable
             Volatile.Write(ref status, "Checking GitHub for updates…");
             var candidate = await FindAsync(version, stopping);
             if (candidate is null)
-                Volatile.Write(ref status, "No verified Mango release is available.");
+                Volatile.Write(ref status, $"No verified Mango release is available for {installer.Platform}.");
             else if (UpdateManifest.ParseVersion(candidate.Version) <= UpdateManifest.ParseVersion(peers.Release.Version))
                 Volatile.Write(ref status, "Mango is up to date.");
             else if (!candidate.CanInstall(peers.Release))

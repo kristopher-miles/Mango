@@ -152,7 +152,23 @@
         </div>
         </div></section></section>
 <div class="settings-layout" data-group-page="network/nodes" hidden>
-<section data-page="network/nodes" class="page " hidden><section class="panel"><div class="panel-heading"><h2>Network computers</h2><button id="network-refresh" type="button" class="quiet icon-control" aria-label="Refresh network" title="Refresh network"><svg class="glyph" aria-hidden="true"><use href="/glyphs.svg#refresh"></use></svg></button></div><p id="network-tailnet" class="muted"></p><p id="network-local" class="muted"></p><p id="network-addresses" class="muted path"></p><p id="network-recovery" class="warning" hidden></p><p id="network-status" class="field-status" role="status"></p><div id="network-models"></div><a id="network-setup-link" href="#/network/setup">Create or join a network</a></section></section>
+<section data-page="network/nodes" class="page " hidden><section class="panel">
+  <div class="panel-heading network-computers-heading">
+    <h2>Network computers</h2>
+    <div class="tools">
+      <button id="network-pairing" type="button" class="quiet icon-control" aria-label="Pair a computer" title="Pair a computer" hidden><svg class="glyph" aria-hidden="true"><use href="/glyphs.svg#add"></use></svg><span>Pair a computer</span></button>
+      <button id="network-login-code" type="button" class="quiet icon-control" aria-label="Get login code" title="Get login code" hidden><svg class="glyph" aria-hidden="true"><use href="/glyphs.svg#key"></use></svg><span>Get login code</span></button>
+      <button id="network-refresh" type="button" class="quiet icon-control" aria-label="Refresh network" title="Refresh network"><svg class="glyph" aria-hidden="true"><use href="/glyphs.svg#refresh"></use></svg></button>
+    </div>
+  </div>
+  <p id="network-tailnet" class="muted"></p>
+  <p id="network-local" class="muted"></p>
+  <p id="network-addresses" class="muted path"></p>
+  <p id="network-recovery" class="warning" hidden></p>
+  <p id="network-status" class="field-status" role="status"></p>
+  <div id="network-models"></div>
+  <a id="network-setup-link" href="#/network/setup">Create or join a network</a>
+</section></section>
 <section data-page="network/queue" class="page " hidden><section class="panel settings-panel"><h2>Inference queue</h2><p class="scope-label">Network</p><form id="network-queue"><button type="button" class="quiet inline-unlock" data-admin-unlock hidden>Unlock network administration</button>
             <fieldset>
               <legend>Inference queue</legend>
@@ -365,6 +381,6 @@
               <button type="submit">Unlock for 10 minutes</button>
             </fieldset>
           </form><button id="admin-lock" class="quiet" type="button" hidden>Lock</button><p id="admin-feedback" class="field-status" role="status"></p></dialog>
-<dialog id="network-secret" aria-labelledby="network-secret-label"><div class="dialog-heading"><h2 id="network-secret-title">Keep this secret</h2><button id="network-hide-secret" type="button" class="quiet">Close</button></div><label id="network-secret-label" for="network-secret-value"></label><textarea id="network-secret-value" rows="3" readonly></textarea><div class="actions"><button id="network-copy-secret" type="button" class="quiet icon-control" aria-label="Copy" title="Copy"><svg class="glyph" aria-hidden="true"><use href="/glyphs.svg#copy"></use></svg></button><button id="network-download" type="button" class="secondary">Download recovery record</button></div><p id="secret-feedback" role="status"></p></dialog>
+<dialog id="network-secret" aria-labelledby="network-secret-title"><div class="dialog-heading"><h2 id="network-secret-title">Keep this secret</h2><button id="network-hide-secret" type="button" class="quiet">Close</button></div><label id="network-secret-label" for="network-secret-value"></label><textarea id="network-secret-value" rows="3" readonly></textarea><div class="actions"><button id="network-copy-secret" type="button" class="quiet icon-control" aria-label="Copy" title="Copy"><svg class="glyph" aria-hidden="true"><use href="/glyphs.svg#copy"></use></svg></button><button id="network-download" type="button" class="secondary">Download recovery record</button></div><p id="secret-feedback" role="status"></p></dialog>
 <dialog id="pending-dialog" aria-labelledby="pending-title"><div class="dialog-heading"><h2 id="pending-title">Unfinished changes</h2><button type="button" data-close-dialog class="quiet icon-control" aria-label="Close" title="Close"><svg class="glyph" aria-hidden="true"><use href="/glyphs.svg#close"></use></svg></button></div><div id="pending-list"></div></dialog>
 </body></html>

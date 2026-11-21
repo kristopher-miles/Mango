@@ -18,12 +18,12 @@ internal sealed record UpdateManifest(string Version, int Window, bool Cutoff, s
         ParseVersion(installed.Version) is { } current && ParseVersion(Version) > current;
 }
 
-internal sealed class UpdateFeed(HttpClient http, string publisher)
+internal sealed class UpdateFeed(HttpClient http, string publisher, string platform = "win-x64")
 {
     private const string Repository = "kristopher-miles/Mango";
     internal const string Archive = "Mango-win-x64.zip";
-    private const string Manifest = "mango-update.json";
-    private const string Signature = "mango-update.sig";
+    private string ArchiveName => $"Mango-{platform}.zip";
+    private string MetadataName => platform == "win-x64" ? "mango-update" : $"mango-update-{platform}";
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
     private sealed record Asset(string Name, long Size);
     private sealed record Release(string Tag_Name, bool Draft, bool Prerelease, Asset[] Assets);
@@ -44,38 +44,42 @@ internal sealed class UpdateFeed(HttpClient http, string publisher)
             return null;
         response.EnsureSuccessStatusCode();
         var release = await response.Content.ReadFromJsonAsync<Release>(Json, cancellation);
+        var metadataName = MetadataName + ".json";
+        var signatureName = MetadataName + ".sig";
         if (release is not { Draft: false, Prerelease: false, Tag_Name: { Length: > 1 } tag, Assets: { } assets } ||
             tag[0] != 'v' || UpdateManifest.ParseVersion(tag[1..]) is null || (requested is not null && tag != $"v{requested}") ||
-            !assets.Any(a => a.Name == Archive && a.Size is > 0 and <= UpdateManifest.MaxBytes) ||
-            !assets.Any(a => a.Name == Manifest && a.Size is > 0 and <= 4096) ||
-            !assets.Any(a => a.Name == Signature && a.Size == 384))
+            !assets.Any(a => a.Name == ArchiveName && a.Size is > 0 and <= UpdateManifest.MaxBytes) ||
+            !assets.Any(a => a.Name == metadataName && a.Size is > 0 and <= 4096) ||
+            !assets.Any(a => a.Name == signatureName && a.Size == 384))
             return null;
         var version = tag[1..];
-        var metadata = http.GetByteArrayAsync(Url(version, Manifest), cancellation);
-        var signature = http.GetByteArrayAsync(Url(version, Signature), cancellation);
+        var metadata = http.GetByteArrayAsync(Url(version, metadataName), cancellation);
+        var signature = http.GetByteArrayAsync(Url(version, signatureName), cancellation);
         await Task.WhenAll(metadata, signature);
-        var manifest = Verify(await metadata, await signature, publisher, version);
-        if (!assets.Any(a => a.Name == Archive && a.Size == manifest.Bytes))
+        var manifest = Verify(await metadata, await signature, publisher, version, platform);
+        if (!assets.Any(a => a.Name == ArchiveName && a.Size == manifest.Bytes))
             throw new InvalidDataException("The GitHub ZIP size does not match the signed release.");
         return manifest;
     }
 
-    internal static UpdateManifest Verify(byte[] metadata, byte[] signature, string publisher, string version)
+    internal static UpdateManifest Verify(byte[] metadata, byte[] signature, string publisher, string version, string platform = "win-x64")
     {
         using var rsa = RSA.Create();
         rsa.ImportFromPem(publisher);
         if (metadata.Length is 0 or > 4096 || !rsa.VerifyData(metadata, signature, HashAlgorithmName.SHA256, RSASignaturePadding.Pss))
             throw new InvalidDataException("Mango could not verify the publisher's release signature.");
         var manifest = JsonSerializer.Deserialize<UpdateManifest>(metadata, Json);
-        if (manifest is not { Window: > 0, Platform: "win-x64", Bytes: > 0 and <= UpdateManifest.MaxBytes, Sha256.Length: 64 } ||
-            manifest.Version != version || ParseHash(manifest.Sha256) is null)
+        if (manifest is not { Window: > 0, Bytes: > 0 and <= UpdateManifest.MaxBytes, Sha256.Length: 64 } ||
+            manifest.Platform != platform || manifest.Version != version || ParseHash(manifest.Sha256) is null)
             throw new InvalidDataException("The signed release metadata is invalid.");
         return manifest;
     }
 
     internal async Task DownloadAsync(UpdateManifest manifest, string path, CancellationToken cancellation)
     {
-        using var response = await http.GetAsync(Url(manifest.Version, Archive), HttpCompletionOption.ResponseHeadersRead, cancellation);
+        if (manifest.Platform != platform)
+            throw new InvalidDataException("The signed package is for a different platform.");
+        using var response = await http.GetAsync(Url(manifest.Version, ArchiveName), HttpCompletionOption.ResponseHeadersRead, cancellation);
         response.EnsureSuccessStatusCode();
         if (response.Content.Headers.ContentLength is { } length && length != manifest.Bytes)
             throw new InvalidDataException("The downloaded ZIP has an unexpected size.");

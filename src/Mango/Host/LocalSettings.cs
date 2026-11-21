@@ -37,6 +37,8 @@ internal sealed record LocalSettings
     {
         if (!Enum.IsDefined(settings.Role) || !Enum.IsDefined(settings.BenchmarkPolicy))
             return "Choose a valid local role and benchmark policy.";
+        if (OperatingSystem.IsLinux() && settings.Role != LocalRole.Leech)
+            return "Linux nodes must use the leech role.";
         if (settings.SampleSeconds is < MinimumSampleSeconds or > MaximumSampleSeconds)
             return $"Sampling interval must be between {MinimumSampleSeconds} and {MaximumSampleSeconds} seconds.";
         if (settings.CooldownSeconds is < 1 or > MaximumCooldownSeconds)

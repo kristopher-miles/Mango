@@ -9,9 +9,13 @@ namespace Mango.Peers;
 internal sealed record CreateNetworkRequest(string? Name, string? Password, BenchmarkPolicy? BenchmarkPolicy = null,
     LocalRole? Role = null);
 internal sealed record JoinNetworkRequest(string? Name, string? Address, Guid Network, string? Password, BenchmarkPolicy? BenchmarkPolicy = null,
-    LocalRole? Role = null);
-internal sealed record EnrollmentRequest(Guid Network, Guid Node, string Device, string Name, int Port, string Verifier, string? Password);
+    LocalRole? Role = null, string? PairingSecret = null, string? PairingNetworkTag = null);
+internal sealed record EnrollmentRequest(Guid Network, Guid Node, string Device, string Name, int Port, string Verifier, string? Password,
+    [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    string? PairingSecret = null);
 internal sealed record NetworkSetup(NetworkIdentity Identity, Guid Node, string? RecoveryRecord);
+internal sealed record IssuedPairing(string Code, DateTimeOffset ExpiresAt);
+internal sealed record AdminUnlock(string Token, DateTimeOffset ExpiresAt);
 internal sealed record UnlockRequest(string? Password);
 internal sealed record RecoverRequest(string? RecoveryRecord, string? NewPassword);
 internal sealed record ChangePasswordRequest(string? NewPassword, bool AllowPending = false);
@@ -43,6 +47,7 @@ internal sealed partial class PeerNetwork
     private async Task<NetworkSetup> CreateNetworkAsync(CreateNetworkRequest input, CancellationToken cancellation)
     {
         var name = RequireName(input.Name, "node");
+        ValidateEnrollmentPreferences(input.BenchmarkPolicy, input.Role);
         var status = RequireInterface();
         var recovery = PeerCredentials.Secret();
         var secret = PeerCredentials.Secret();
@@ -75,15 +80,22 @@ internal sealed partial class PeerNetwork
         try
         {
             var name = RequireName(input.Name, "node");
+            ValidateEnrollmentPreferences(input.BenchmarkPolicy, input.Role);
             var status = RequireInterface();
             var target = Tailnet.Address(input.Address, port) ?? throw new PeerFailure(400, "Enter the selected peer's Tailscale address.");
-            if (input.Network == Guid.Empty || input.Password is not { Length: > 0 and <= 256 })
-                throw new PeerFailure(400, "Enter the selected network ID and master password.");
+            if (input.PairingSecret is null
+                ? input.Network == Guid.Empty || input.PairingNetworkTag is not null || input.Password is not { Length: > 0 and <= 256 }
+                : input.Password is not null || !PairingCode.IsSecret(input.PairingSecret) ||
+                  (input.PairingNetworkTag is null ? input.Network == Guid.Empty :
+                    input.Network != Guid.Empty || input.PairingNetworkTag.Length != 16 || !input.PairingNetworkTag.All(char.IsAsciiHexDigit)))
+                throw new PeerFailure(400, "Enter the selected network ID and a master password or pairing code.");
             if (bound.Any(ip => target == new Uri(Tailnet.Origin(ip, port))))
                 throw new PeerFailure(400, "Select a different Mango peer.");
             var intro = (await GetIntroAsync(target, cancellation, enrollment: true))?.Peer;
-            if (intro is null || intro.Identity.Id != input.Network)
+            if (intro is null || (input.PairingNetworkTag is { } tag
+                ? PairingCode.Tag(intro.Identity.Id) != tag : intro.Identity.Id != input.Network))
                 throw new PeerFailure(409, "The selected address did not identify the expected Mango network.");
+            input = input with { Network = intro.Identity.Id };
 
             var (_, pending) = await ChangeAsync(current =>
             {
@@ -106,7 +118,7 @@ internal sealed partial class PeerNetwork
 
             NetworkRecords? enrolled;
             var enrollment = new EnrollmentRequest(input.Network, pending.Local!.Node, status.Device!, name, port,
-                PeerCredentials.Digest(pending.Token!), input.Password);
+                PeerCredentials.Digest(pending.Token!), input.Password, input.PairingSecret);
             try
             {
                 using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellation, stopping.Token);
@@ -121,7 +133,8 @@ internal sealed partial class PeerNetwork
                     MangoRelease.Parse(Header(response, ReleaseHeader))?.Window != Release.Window)
                     throw new PeerFailure(426, "The selected peer has an incompatible Mango protocol window.");
                 if (response.StatusCode == HttpStatusCode.Unauthorized)
-                    throw new PeerFailure(401, "The selected peer rejected the master password.");
+                    throw new PeerFailure(401, input.PairingSecret is null ? "The selected peer rejected the master password."
+                        : "The pairing code is invalid, expired, or already used. Generate a new code on the issuing peer.");
                 if (response.StatusCode == HttpStatusCode.TooManyRequests)
                     throw new PeerFailure(429, "The selected peer is limiting enrollment attempts. Try again shortly.");
                 if (response.StatusCode == HttpStatusCode.Conflict)
@@ -132,7 +145,7 @@ internal sealed partial class PeerNetwork
             }
             catch (Exception error) when (Unavailable(error, cancellation))
             {
-                throw new PeerFailure(502, "The selected peer became unreachable during enrollment. Retry the same enrollment.");
+                throw new PeerFailure(502, "The selected peer became unreachable during enrollment. Retry enrollment.");
             }
             if (!PeerValidation.Valid(enrolled) || enrolled!.Identity != intro.Identity || enrolled.Authority is null ||
                 !enrolled.Nodes.Any(node => node.Id == intro.Node && node.Device == intro.Device && !node.Removed) ||
@@ -156,15 +169,49 @@ internal sealed partial class PeerNetwork
         finally { setup.Release(); }
     }
 
-    private async Task SaveEnrollmentPreferencesAsync(BenchmarkPolicy? choice, LocalRole? role, CancellationToken cancellation)
+    private static void ValidateEnrollmentPreferences(BenchmarkPolicy? choice, LocalRole? role)
     {
         if (choice is { } policy && !Enum.IsDefined(policy) || role is { } preferred && !Enum.IsDefined(preferred))
             throw new PeerFailure(400, "Choose a local role and benchmark policy.");
+        if (OperatingSystem.IsLinux() && role == LocalRole.Contributor)
+            throw new PeerFailure(400, "Linux nodes must use the leech role.");
+    }
+
+    private async Task SaveEnrollmentPreferencesAsync(BenchmarkPolicy? choice, LocalRole? role, CancellationToken cancellation)
+    {
         if (choice is not null || role is not null)
             await settings.UpdateAsync(current => current with
             {
                 BenchmarkPolicy = choice ?? current.BenchmarkPolicy, Role = role ?? current.Role
             }, cancellation);
+    }
+
+    public async Task<IssuedPairing> IssuePairingAsync(HttpRequest request, CancellationToken cancellation)
+    {
+        var admin = AdminHeader(request);
+        var secret = PeerCredentials.TemporarySecret();
+        var digest = PeerCredentials.Digest(secret);
+        var expires = clock.GetUtcNow().AddHours(1);
+        var address = bound.FirstOrDefault();
+        var (_, after) = await ChangeAsync(current =>
+        {
+            RequireMember(current);
+            RequireAdmin(current, admin);
+            if (!Ready || address is null || !bound.Contains(address))
+                throw new PeerFailure(409, "This node must be connected and reconciled to issue pairing codes.");
+            var active = ActivePairings(current);
+            if (active.Length == LocalPairing.Limit)
+                throw new PeerFailure(409, "Wait for an existing pairing code to be used or expire.");
+            return current.Disk with { Pairings = [..active, new(digest, current.Records.Identity!.Generation, expires)] };
+        }, cancellation);
+        return new(PairingCode.Encode(new Uri(Tailnet.Origin(address!, port)), after.Records.Identity!.Id, secret), expires);
+    }
+
+    private LocalPairing[] ActivePairings(PeerSnapshot snapshot)
+    {
+        var now = clock.GetUtcNow();
+        return (snapshot.Disk.Pairings ?? []).Where(code =>
+            code.Generation == snapshot.Records.Identity?.Generation && code.ExpiresAt > now).ToArray();
     }
 
     public async Task<NetworkRecords> AcceptEnrollmentAsync(EnrollmentRequest input, IPAddress address, CancellationToken cancellation)
@@ -182,18 +229,36 @@ internal sealed partial class PeerNetwork
         var self = RequireMember(snapshot);
         if (snapshot.Records.Identity?.Id != input.Network || snapshot.Records.Authority is not { } authority)
             throw new PeerFailure(409, "This peer belongs to a different Mango network.");
-        await CheckPasswordAsync(input.Password, authority, address, cancellation);
+        string? digest = null;
+        if (input.PairingSecret is { } secret)
+        {
+            if (input.Password is not null || !PairingCode.IsSecret(secret))
+                throw new PeerFailure(400, "Invalid pairing credential.");
+            if (!passwordBudget.Take(address, clock.GetUtcNow()))
+                throw new PeerFailure(429, "Too many enrollment attempts. Try again shortly.");
+            digest = PeerCredentials.Digest(secret);
+        }
+        else
+            await CheckPasswordAsync(input.Password, authority, address, cancellation);
         var (before, after) = await ChangeAsync(current =>
         {
             RequireMember(current);
             if (current.Records.Identity != snapshot.Records.Identity || current.Records.Authority != authority)
                 throw new PeerFailure(409, "Network authority changed. Retry enrollment.");
+            var pairings = current.Disk.Pairings;
+            if (digest is not null)
+            {
+                var active = ActivePairings(current);
+                if (!active.Any(code => code.Digest == digest))
+                    throw new PeerFailure(401, "The pairing code is invalid, expired, or already used.");
+                pairings = active.Where(code => code.Digest != digest).ToArray();
+            }
             if (current.Nodes.TryGetValue(input.Node, out var existing))
             {
                 if (existing.Removed || existing.Device != input.Device ||
                     !string.Equals(existing.Verifier, input.Verifier, StringComparison.OrdinalIgnoreCase))
                     throw new PeerFailure(409, "That node identity is already enrolled or retired.");
-                return current.Disk;
+                return digest is null ? current.Disk : current.Disk with { Pairings = pairings };
             }
             if (current.Nodes.Count >= PeerLimits.Nodes || current.Nodes.Values.Any(node => !node.Removed && node.Address == origin))
                 throw new PeerFailure(409, "The network is full or that service address is already enrolled.");
@@ -201,32 +266,42 @@ internal sealed partial class PeerNetwork
             var member = new PeerNode(input.Node, input.Device, name, origin, revision, revision, input.Verifier.ToUpperInvariant());
             return current.Disk with
             {
-                Records = current.Records.Merge(NetworkRecords.Empty with { Identity = current.Records.Identity, Nodes = [member] })
+                Records = current.Records.Merge(NetworkRecords.Empty with { Identity = current.Records.Identity, Nodes = [member] }),
+                Pairings = pairings
             };
         }, cancellation);
         await PushChangesAsync(before, after, stopping.Token, exclude: input.Node);
         return after.Records;
     }
 
-    public async Task<object> UnlockAsync(UnlockRequest input, IPAddress source, CancellationToken cancellation)
+    public async Task<AdminUnlock> UnlockAsync(UnlockRequest input, IPAddress source, CancellationToken cancellation)
     {
         var current = Snapshot;
         RequireMember(current);
         var authority = current.Records.Authority ?? throw new PeerFailure(409, "No local network authority is available.");
         await CheckPasswordAsync(input.Password, authority, source, cancellation);
+        return GrantAdmin(current);
+    }
+
+    internal AdminUnlock GrantAdmin(PeerSnapshot expected)
+    {
         lock (authorization)
         {
             var now = Snapshot;
-            if (now.Records.Identity != current.Records.Identity || now.Records.Authority != authority || !IsMember)
+            if (now.Records.Identity != expected.Records.Identity || now.Records.Authority is null ||
+                now.Records.Authority != expected.Records.Authority || !IsMember)
                 throw new PeerFailure(409, "Network authority changed. Unlock again.");
             var token = PeerCredentials.Secret();
             var expires = clock.GetUtcNow() + PeerLimits.UnlockLifetime;
             if (unlocks.Count >= 16)
                 unlocks.Remove(unlocks.MinBy(entry => entry.Value.Expires).Key);
-            unlocks.Add(PeerCredentials.Digest(token), new(now.Records.Identity!.Generation, authority.Revision, expires));
-            return new { Token = token, ExpiresAt = expires };
+            unlocks.Add(PeerCredentials.Digest(token), new(now.Records.Identity!.Generation, now.Records.Authority.Revision, expires));
+            return new(token, expires);
         }
     }
+
+    internal bool IsAdmin(string token) => HasAdmin(Snapshot, token);
+    internal bool TakeLoginAttempt(IPAddress address) => passwordBudget.Take(address, clock.GetUtcNow());
 
     private async Task CheckPasswordAsync(string? password, AuthorityRecord authority, IPAddress source, CancellationToken cancellation)
     {
@@ -245,7 +320,12 @@ internal sealed partial class PeerNetwork
     public void Lock(HttpRequest request)
     {
         var token = AdminHeader(request);
-        if (string.IsNullOrEmpty(token)) return;
+        if (PeerCredentials.IsSecret(token))
+            RevokeAdmin(token!);
+    }
+
+    internal void RevokeAdmin(string token)
+    {
         lock (authorization)
             unlocks.Remove(PeerCredentials.Digest(token));
     }

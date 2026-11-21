@@ -4,7 +4,7 @@ namespace Mango.Peers;
 
 internal sealed partial class PeerNetwork
 {
-    internal WindowsUpdates? Updates { get; set; }
+    internal ManagedUpdates? Updates { get; set; }
 
     internal async Task<bool> PredecessorUpdatedAsync(Guid id, string version, CancellationToken cancellation)
     {

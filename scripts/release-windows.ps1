@@ -3,6 +3,7 @@
 param(
     [ValidateSet('Patch', 'Minor', 'Major')] [string] $Bump = 'Patch',
     [switch] $Cutoff,
+    [switch] $WithLinux,
     [string] $Dotnet = 'dotnet',
     [string] $Notes = 'Mango for Windows x64. See Install.md in the ZIP.',
     [string] $PublisherKey = (Join-Path $env:LOCALAPPDATA 'Mango.Release/publisher-key.dpapi'),
@@ -47,23 +48,29 @@ try {
     }
 
     $output = Join-Path $PWD "dist/v$version"
+    $platforms = @('win-x64')
+    if ($WithLinux) { $platforms += 'linux-x64', 'linux-arm64' }
     $source = [IO.Directory]::CreateTempSubdirectory('mango-release-').FullName
     try {
         git archive --format=zip --output="$source/source.zip" $commit
         [IO.Compression.ZipFile]::ExtractToDirectory("$source/source.zip", "$source/tree")
-        & "$source/tree/scripts/package-windows.ps1" -Dotnet $Dotnet -OutputDirectory $output -Version "$version"
+        foreach ($platform in $platforms) {
+            & "$source/tree/scripts/package-windows.ps1" -Dotnet $Dotnet -OutputDirectory $output -Version "$version" -Platform $platform
+        }
     }
     finally {
         [IO.Directory]::Delete($source, $true)
     }
-    $asset = 'Mango-win-x64.zip'
-    $hash = (Get-FileHash -LiteralPath (Join-Path $output $asset) -Algorithm SHA256).Hash.ToLowerInvariant()
-    "$hash  $asset" | Set-Content -LiteralPath (Join-Path $output "$asset.sha256") -Encoding ascii
+    $hashes = @{}
+    $uploadNames = @()
+    foreach ($platform in $platforms) {
+        $asset = "Mango-$platform.zip"
+        $hashes[$asset] = (Get-FileHash -LiteralPath (Join-Path $output $asset) -Algorithm SHA256).Hash.ToLowerInvariant()
+        "$($hashes[$asset])  $asset" | Set-Content -LiteralPath (Join-Path $output "$asset.sha256") -Encoding ascii
+        $uploadNames += $asset, "$asset.sha256"
+    }
     if ($BuildOnly) { return }
 
-    $manifest = @{ version = "$version"; window = $window; cutoff = $Cutoff.IsPresent; platform = 'win-x64';
-        bytes = (Get-Item -LiteralPath (Join-Path $output $asset)).Length; sha256 = $hash } | ConvertTo-Json -Compress
-    $manifestBytes = [Text.Encoding]::UTF8.GetBytes($manifest)
     Add-Type -AssemblyName System.Security.Cryptography.ProtectedData
     $rsa = [Security.Cryptography.RSA]::Create()
     try {
@@ -74,12 +81,20 @@ try {
         if ($rsa.ExportSubjectPublicKeyInfoPem().Trim() -ne ($publicKey -join "`n").Trim()) {
             throw 'The publisher key does not match the public key pinned in the release commit.'
         }
-        $signature = $rsa.SignData($manifestBytes, [Security.Cryptography.HashAlgorithmName]::SHA256,
-            [Security.Cryptography.RSASignaturePadding]::Pss)
+        foreach ($platform in $platforms) {
+            $asset = "Mango-$platform.zip"
+            $metadataName = if ($platform -eq 'win-x64') { 'mango-update' } else { "mango-update-$platform" }
+            $manifest = @{ version = "$version"; window = $window; cutoff = $Cutoff.IsPresent; platform = $platform;
+                bytes = (Get-Item -LiteralPath (Join-Path $output $asset)).Length; sha256 = $hashes[$asset] } | ConvertTo-Json -Compress
+            $manifestBytes = [Text.Encoding]::UTF8.GetBytes($manifest)
+            $signature = $rsa.SignData($manifestBytes, [Security.Cryptography.HashAlgorithmName]::SHA256,
+                [Security.Cryptography.RSASignaturePadding]::Pss)
+            [IO.File]::WriteAllBytes((Join-Path $output "$metadataName.json"), $manifestBytes)
+            [IO.File]::WriteAllBytes((Join-Path $output "$metadataName.sig"), $signature)
+            $uploadNames += "$metadataName.json", "$metadataName.sig"
+        }
     }
     finally { $rsa.Dispose() }
-    [IO.File]::WriteAllBytes((Join-Path $output 'mango-update.json'), $manifestBytes)
-    [IO.File]::WriteAllBytes((Join-Path $output 'mango-update.sig'), $signature)
 
     $token = if ($env:GH_TOKEN) { $env:GH_TOKEN } else { $env:GITHUB_TOKEN }
     if (-not $token) {
@@ -93,11 +108,11 @@ try {
     $release = Invoke-RestMethod -Method Post -Uri $endpoint -Headers $headers -ContentType 'application/json' -TimeoutSec 60 -Body (
         @{ tag_name = "v$version"; target_commitish = $commit; name = "Mango $version"; body = $Notes; draft = $true } | ConvertTo-Json -Compress)
     try {
-        foreach ($name in @($asset, "$asset.sha256", 'mango-update.json', 'mango-update.sig')) {
+        foreach ($name in $uploadNames) {
             $upload = $release.upload_url -replace '\{.*$', ''
             $result = Invoke-RestMethod -Method Post -Uri "${upload}?name=$name" -Headers $headers `
                 -ContentType 'application/octet-stream' -InFile (Join-Path $output $name) -TimeoutSec 600
-            if ($result.state -ne 'uploaded' -or ($name -eq $asset -and $result.digest -ne "sha256:$hash")) {
+            if ($result.state -ne 'uploaded' -or ($hashes.ContainsKey($name) -and $result.digest -ne "sha256:$($hashes[$name])")) {
                 throw "GitHub could not verify $name."
             }
         }

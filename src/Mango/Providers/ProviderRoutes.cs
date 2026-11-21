@@ -9,17 +9,20 @@ namespace Mango.Providers;
 
 internal static class ProviderRoutes
 {
-    private static readonly SemaphoreSlim folderDialog = new(1);
-
     public static void Map(WebApplication app, RouteGroupBuilder local, ProviderCatalog providers, PeerNetwork peers)
     {
         local.MapGet("/providers", () => providers.View);
+        MapInference(app, peers);
+        if (OperatingSystem.IsLinux())
+            return;
         local.MapPut("/providers", (EndpointUpdate update, HttpContext context) =>
             HandleAsync(context, async cancellation => await context.Response.WriteAsJsonAsync(
                 await peers.ConfigureLocalProviderAsync(context.Request, update, cancellation), cancellation)));
+#if WINDOWS
         local.MapPost("/providers/strata/folder", (HttpContext context) =>
             HandleAsync(context, async cancellation => await context.Response.WriteAsJsonAsync(
                 new { Folder = await PickStrataFolderAsync(cancellation) }, cancellation)));
+#endif
         local.MapDelete("/providers/{id:guid}", (Guid id, HttpContext context) =>
             CommandAsync(context, cancellation => peers.RemoveLocalProviderAsync(context.Request, id, cancellation)));
         local.MapPut("/providers/{id:guid}/stop", (Guid id, HttpContext context) =>
@@ -58,9 +61,10 @@ internal static class ProviderRoutes
                 return Results.NoContent();
             });
         }
-
-        MapInference(app, peers);
     }
+
+#if WINDOWS
+    private static readonly SemaphoreSlim folderDialog = new(1);
 
     private static async Task<string?> PickStrataFolderAsync(CancellationToken cancellation)
     {
@@ -95,6 +99,7 @@ internal static class ProviderRoutes
         }
         return await selected.Task.WaitAsync(cancellation);
     }
+#endif
 
     public static void MapInference(WebApplication app, PeerNetwork peers)
     {

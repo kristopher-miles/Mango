@@ -31,6 +31,10 @@ internal static class PeerRoutes
             HandleAsync(context, token => peers.CreateAsync(input, token)));
         network.MapPut("/join", (JoinNetworkRequest input, HttpContext context) =>
             HandleAsync(context, token => peers.JoinAsync(input, token)));
+        network.MapPost("/pairing-code", (HttpRequest request, HttpContext context) =>
+            HandleAsync(context, token => peers.IssuePairingAsync(request, token)));
+        network.MapPost("/login-code", (HttpRequest request, HttpContext context) =>
+            HandleAsync(context, _ => Task.FromResult(peers.IssueBrowserLoginCode(request))));
         network.MapPut("/unlock", (UnlockRequest input, HttpContext context) =>
             HandleAsync(context, token => peers.UnlockAsync(input, context.Connection.RemoteIpAddress!, token)));
         network.MapPut("/lock", (HttpRequest request) =>
@@ -93,6 +97,18 @@ internal static class PeerRoutes
                 return;
             }
             context.Response.Headers[PeerNetwork.ReleaseHeader] = peers.Release.Wire;
+            if (request.Path.StartsWithSegments("/peer/admin"))
+            {
+                if (MangoRelease.Parse(request.Headers[PeerNetwork.ReleaseHeader].ToString())?.Window != peers.Release.Window)
+                {
+                    context.Response.StatusCode = 426;
+                    return;
+                }
+                if (context.Features.Get<IHttpMaxRequestBodySizeFeature>() is { IsReadOnly: false } adminLimit)
+                    adminLimit.MaxRequestBodySize = 16 * 1024;
+                await next(context);
+                return;
+            }
             if (request.Path.Equals("/peer/info", StringComparison.OrdinalIgnoreCase) ||
                 request.Path.Equals("/peer/enroll", StringComparison.OrdinalIgnoreCase))
             {
@@ -133,9 +149,14 @@ internal static class PeerRoutes
         });
 
         var peer = app.MapGroup("/peer");
+        peers.Administration?.Map(peer.MapGroup("/admin"));
         peer.MapGet("/info", () => peers.Introduction() is { } info ? Results.Json(info) : Results.NotFound());
         peer.MapPost("/enroll", (EnrollmentRequest input, HttpContext context) =>
             HandleAsync(context, token => peers.AcceptEnrollmentAsync(input, context.Connection.RemoteIpAddress!, token)));
+        peer.MapPost("/login-code/claim", (LoginCodeClaim input, HttpContext context) =>
+            peers.Administration!.Claim(peers.Snapshot, input, ((PeerAuthentication)context.Items[typeof(PeerAuthentication)]!).Node));
+        peer.MapPost("/login-code/check", (LoginCodeCheck input, HttpContext context) =>
+            peers.Administration!.Check(peers.Snapshot, input, ((PeerAuthentication)context.Items[typeof(PeerAuthentication)]!).Node));
         peer.MapGet("/ping", () => Results.NoContent());
         peer.MapGet("/versions", () => new PeerVersions(peers.Snapshot.Versions));
         peer.MapPost("/pull", (PeerVersions known) => PeerNetwork.ValidVersions(known.Records)

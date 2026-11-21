@@ -125,6 +125,8 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
     public async Task InitializeAsync()
     {
         await store.LoadAsync(ProviderSettings.Empty);
+        if (OperatingSystem.IsLinux() && store.Value.Endpoints.Length != 0)
+            throw new InvalidDataException("Linux leech nodes cannot load local providers.");
         foreach (var endpoint in store.Value.Endpoints)
             adapters[endpoint.Id] = CreateAdapter(endpoint);
         Publish();
@@ -179,6 +181,8 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
     public async Task<EndpointStatus> ConfigureAsync(EndpointUpdate input, CancellationToken cancellation, Guid? registration = null,
         bool automatic = false)
     {
+        if (OperatingSystem.IsLinux())
+            throw new ProviderFailure(409, "Linux leech nodes cannot configure local providers.");
         await EnterConfigurationAsync(automatic, cancellation);
         try
         {

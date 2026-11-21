@@ -31,7 +31,8 @@ internal static class Tailnet
         if (input is not { Length: > 0 and <= 128 })
             return null;
         var value = input.Trim();
-        if (IPAddress.TryParse(value, out var address) && Contains(address))
+        if ((!value.StartsWith('[') || value.EndsWith(']')) &&
+            IPAddress.TryParse(value, out var address) && Contains(address))
             return new UriBuilder("http", address.ToString(), defaultPort).Uri;
         if (!value.Contains("://", StringComparison.Ordinal))
             value = "http://" + value;
@@ -53,8 +54,13 @@ internal static class Tailnet
 
     public static async Task<TailnetStatus> ReadAsync(CancellationToken stopping)
     {
-        var executable = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Tailscale", "tailscale.exe");
-        if (!File.Exists(executable))
+        var windows = OperatingSystem.IsWindows();
+        var mac = OperatingSystem.IsMacOS();
+        const string macApp = "/Applications/Tailscale.app/Contents/MacOS/Tailscale";
+        var executable = windows
+            ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Tailscale", "tailscale.exe")
+            : mac && File.Exists(macApp) ? macApp : "tailscale";
+        if (windows && !File.Exists(executable))
             return new(null, [], [], "Tailscale is missing. Install and sign in to the Windows Tailscale client.");
 
         try
@@ -68,6 +74,8 @@ internal static class Tailnet
                 RedirectStandardOutput = true,
                 RedirectStandardError = true
             };
+            if (mac)
+                start.Environment["TAILSCALE_BE_CLI"] = "1";
             start.ArgumentList.Add("status");
             start.ArgumentList.Add("--json");
             using var process = Process.Start(start);
@@ -96,9 +104,12 @@ internal static class Tailnet
             if (!root.TryGetProperty("Self", out var self) || String(self, "ID") is not { Length: > 0 } device)
                 return new(null, [], [], "Tailscale did not report this device's identity.");
             var bound = NetworkInterface.GetAllNetworkInterfaces()
-                .Where(item => item.OperationalStatus == OperationalStatus.Up &&
-                    (item.Name.Equals("Tailscale", StringComparison.OrdinalIgnoreCase) ||
-                     item.Description.Contains("Tailscale", StringComparison.OrdinalIgnoreCase)))
+                .Where(item => windows
+                    ? item.OperationalStatus == OperationalStatus.Up &&
+                        (item.Name.Equals("Tailscale", StringComparison.OrdinalIgnoreCase) ||
+                         item.Description.Contains("Tailscale", StringComparison.OrdinalIgnoreCase))
+                    : (mac ? item.Name.StartsWith("utun", StringComparison.Ordinal) : item.Name == "tailscale0") &&
+                        item.OperationalStatus is OperationalStatus.Up or OperationalStatus.Unknown)
                 .SelectMany(item => item.GetIPProperties().UnicastAddresses.Select(entry => entry.Address))
                 .ToHashSet();
             var local = Addresses(root).Where(bound.Contains).ToArray();

@@ -8,11 +8,11 @@ internal sealed class LoginStartup(string? dataDirectory)
     private const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
     private const string EntryName = "Mango";
 
-    public bool Available => dataDirectory is null;
+    public bool Available => OperatingSystem.IsWindows() && dataDirectory is null;
 
     public bool IsEnabled()
     {
-        if (!Available)
+        if (!OperatingSystem.IsWindows() || !Available)
             return false;
         using var key = Registry.CurrentUser.OpenSubKey(RunKey);
         return key?.GetValue(EntryName) is string;
@@ -20,7 +20,7 @@ internal sealed class LoginStartup(string? dataDirectory)
 
     public void SetEnabled(bool enabled)
     {
-        if (!Available)
+        if (!OperatingSystem.IsWindows() || !Available)
             throw new ArgumentException("Start at login is available for the default Mango data directory.");
 
         using var key = Registry.CurrentUser.CreateSubKey(RunKey);
