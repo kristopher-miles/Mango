@@ -110,6 +110,7 @@ internal static class ProviderChecks
             """, vision, adapter));
 
         await CheckEmbeddingsAsync(endpoint, embedding);
+        await CheckPublicInstanceNamesAsync(endpoint, embedding);
 
         using var upstreamError = new HttpClient(new Handler(_ => Task.FromResult(Response(HttpStatusCode.Unauthorized,
             $"{{\"error\":\"{NativeSecret}\"}}"))));
@@ -242,12 +243,52 @@ internal static class ProviderChecks
         Check(unloads == before, "a reused instance identifier cannot unload a different model");
     }
 
+    private static async Task CheckPublicInstanceNamesAsync(ProviderEndpoint endpoint, Deployment embedding)
+    {
+        var legacy = "mango-" + new string('a', 64);
+        const string name = "hosted-embedding-model";
+        var deployment = embedding with
+        {
+            Model = embedding.Model with { NativeId = name, Instances = [new(legacy, 2048, 1, "legacy")] },
+            Options = embedding.Options with { Yolo = true }
+        };
+        Check(deployment.ProviderIdentifiers.SequenceEqual([name]) && !deployment.AcceptsIdentifier(legacy),
+            "legacy Mango instance identifiers remain available for provider control only");
+        using var fixture = new HttpClient(new Handler(async request =>
+        {
+            using var body = JsonDocument.Parse(await request.Content!.ReadAsStringAsync());
+            Check(body.RootElement.GetProperty("model").GetString() == legacy, "provider receives the verified loaded instance");
+            return Response(HttpStatusCode.OK, JsonSerializer.Serialize(new { model = legacy, data = new[] { 0.125, 0.5 } }));
+        }));
+        var adapter = new LmStudioAdapter(fixture, endpoint with { Profile = ProviderProfile.LmStudio });
+        var context = Context(JsonSerializer.Serialize(new { model = name, input = "embedding fixture" }));
+        using var request = await InferenceRequest.ReadAsync(InferenceOperation.Embeddings, context.Request, default);
+        await request.ForwardAsync(deployment, adapter, context, default);
+        using var result = JsonDocument.Parse(ReadBody(context));
+        Check(result.RootElement.GetProperty("model").GetString() == name &&
+            result.RootElement.GetProperty("data")[0].GetDouble() == 0.125,
+            "public embedding response uses the requested model name and preserves vector data");
+
+        var stream = Encoding.UTF8.GetBytes("data: {\"model\":\"" + legacy + "\",\"detail\":\"" + legacy + "\"}\n\n");
+        var expected = Encoding.UTF8.GetString(stream).Replace(legacy, "public-alias", StringComparison.Ordinal);
+        for (var split = 1; split < stream.Length; split++)
+        {
+            context = Context("{}");
+            context.Response.ContentType = "text/event-stream";
+            var output = new InferenceOutput(context, InferenceOperation.Chat, "public-alias");
+            await output.WriteAsync(stream.AsMemory(0, split), default);
+            await output.WriteAsync(stream.AsMemory(split), default);
+            await output.CompleteAsync(default);
+            Check(ReadBody(context) == expected, "legacy IDs stay private across every SSE transport split");
+        }
+    }
+
     private static async Task CheckLmStudioSharedLoadAsync(ProviderEndpoint endpoint)
     {
         const string key = "shared";
         const string localPath = "local/gemma q4.gguf";
         const string remotePath = "linked/gemma q4.gguf";
-        const string linkedInstance = "linked-instance";
+        var linkedInstance = "linked-instance";
         endpoint = endpoint with { Profile = ProviderProfile.LmStudio };
         string? localInstance = null;
         var loadedDevice = "here";
@@ -287,8 +328,8 @@ internal static class ProviderChecks
         }
         Task LoadAsync(Uri origin, string path, string instance, int? context, CancellationToken token)
         {
-            Check(origin.IsLoopback && path == localPath && instance != linkedInstance && context == 8192,
-                "Mango passes the exact local indexed path, unique instance identifier, and requested context");
+            Check(origin.IsLoopback && path == localPath && instance == key && context == 8192,
+                "Mango loads the exact local file under the provider model name and requested context");
             Check(LmStudioDevices.LocalLoadArguments(path, instance, context).SequenceEqual(
                 ["load", "--local", "--exact", "--identifier", instance, "--context-length", "8192", "--", path]),
                 "the CLI receives an exact local selector and one argument for the path");
@@ -304,6 +345,11 @@ internal static class ProviderChecks
             !remote.SupportsLoad && remote.Inputs.Contains("image"),
             "each device retains its own capabilities and an exact local copy is loadable");
         await Fails(409, () => adapter.LoadAsync(remote, null, default));
+        linkedInstance = key;
+        var collision = await Fails(409, () => adapter.LoadAsync(local, 8192, default));
+        Check(collision.Code == "lmstudio_name_conflict" && loads == 0 && unloads == 0,
+            "a linked instance that owns the public name is left alone");
+        linkedInstance = "linked-instance";
 
         await adapter.LoadAsync(local, 8192, default);
         inventory = (await adapter.InspectAsync(default)).Models;

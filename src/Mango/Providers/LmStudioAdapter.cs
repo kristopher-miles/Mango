@@ -224,7 +224,11 @@ internal sealed class LmStudioAdapter(HttpClient http, ProviderEndpoint endpoint
         }
         if (model.LocalLoadPath is { } localPath)
         {
-            var instanceId = "mango-" + model.Id.ToLowerInvariant();
+            var instanceId = model.NativeId;
+            if (await CurrentInstancesAsync(cancellation) is not { } current)
+                throw new ProviderFailure(409, "Mango could not verify that the LM Studio model name is available.", code: "load_rejected");
+            if (current.Loaded.Items().Any(item => item.Text("identifier") == instanceId))
+                throw new ProviderFailure(409, "An existing LM Studio instance already uses this model name.", code: "lmstudio_name_conflict");
             await (loadLocal ?? LmStudioDevices.LoadLocalAsync)(new Uri(Endpoint.Address), localPath, instanceId, context, cancellation);
             await ConfirmDeploymentAsync(default, model, new(instanceId, null, null, ""), cancellation);
             return;

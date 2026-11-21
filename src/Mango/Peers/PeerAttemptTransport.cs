@@ -245,13 +245,15 @@ internal sealed partial class PeerNetwork
             target.StatusCode = (int)response.StatusCode;
             target.ContentType = response.Content.Headers.ContentType?.ToString() ?? "application/octet-stream";
             target.Headers.CacheControl = "no-store";
+            var output = new InferenceOutput(context, payload.Operation, payload.Alias);
             await using var stream = await response.Content.ReadAsStreamAsync(cancellation);
             var buffer = new byte[16 * 1024];
             int count;
             while ((count = await stream.ReadAsync(buffer, cancellation)) != 0)
             {
-                await InferenceRequest.WriteOutputAsync(context, buffer.AsMemory(0, count), cancellation);
+                await output.WriteAsync(buffer.AsMemory(0, count), cancellation);
             }
+            await output.CompleteAsync(cancellation);
             return new(AttemptState.Completed, 200, Epoch: Header(response, EpochHeader));
         }
         catch (Exception error) when (!body.WritingStarted && error is HttpRequestException or OperationCanceledException)

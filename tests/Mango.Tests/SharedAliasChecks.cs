@@ -21,12 +21,13 @@ internal static partial class PeerChecks
     {
         const string alias = "pooled-chat";
         const string smallId = "fixture-text";
+        var legacyInstance = "mango-" + new string('7', 64);
         const string largeId = "fixture-vision";
         const string imageId = "fixture-draw";
         using var http = new HttpClient(new HttpClientHandler { UseProxy = false }) { Timeout = TimeSpan.FromSeconds(18) };
         var calls = new ConcurrentDictionary<string, TaskCompletionSource<string>>(StringComparer.Ordinal);
         var holds = new ConcurrentDictionary<string, TaskCompletionSource>(StringComparer.Ordinal);
-        await using var smallProvider = await StartAliasProviderAsync(smallId, 200_000, false, imageId, calls, holds);
+        await using var smallProvider = await StartAliasProviderAsync(smallId, 200_000, false, imageId, calls, holds, legacyInstance);
         await using var largeProvider = await StartAliasProviderAsync(largeId, 262_144, true, imageId, calls, holds);
         await using var small = await Host.StartAsync(Path.Combine(root, "alias-small"), status, Port(address));
         await using var large = await Host.StartAsync(Path.Combine(root, "alias-large"), status, Port(address));
@@ -51,7 +52,15 @@ internal static partial class PeerChecks
         var catalogue = await Request(http, HttpMethod.Get, small.LocalAddress + "/v1/models", small.Session);
         var listed = catalogue.GetProperty("data").EnumerateArray().Single(item => item.GetProperty("id").GetString() == alias);
         Check(listed.GetProperty("context_size").GetInt32() == 262_144, "a shared alias advertises the largest observed context");
-        Check(Served(await Chat("ordinary text")) == smallId, "text can use the smaller text-only deployment under the mixed alias");
+        Check(!catalogue.GetProperty("data").EnumerateArray().Any(item => item.GetProperty("id").GetString() == legacyInstance),
+            "the model list hides Mango-generated instance IDs");
+        var ordinary = await Chat("ordinary text", large);
+        Check(Served(ordinary) == smallId && ordinary.GetProperty("model").GetString() == alias,
+            "a forwarded legacy instance returns only the requested public alias");
+        await Request(http, HttpMethod.Post, large.LocalAddress + "/v1/chat/completions", large.Session, new
+        {
+            model = legacyInstance, messages = new[] { new { role = "user", content = "private identifier" } }
+        }, expected: 400);
         var key = (await Issue(http, large, await Unlock(http, large, Password), "fixture-bot")).GetProperty("secret").GetString();
         var toolReply = await Request(http, HttpMethod.Post, large.TailAddress + "/v1/chat/completions", key, new
         {
@@ -158,7 +167,8 @@ internal static partial class PeerChecks
     }
 
     private static async Task<WebApplication> StartAliasProviderAsync(string native, int context, bool vision, string image,
-        ConcurrentDictionary<string, TaskCompletionSource<string>> calls, ConcurrentDictionary<string, TaskCompletionSource> holds)
+        ConcurrentDictionary<string, TaskCompletionSource<string>> calls, ConcurrentDictionary<string, TaskCompletionSource> holds,
+        string? instanceId = null)
     {
         var builder = WebApplication.CreateSlimBuilder();
         builder.Logging.ClearProviders();
@@ -168,7 +178,7 @@ internal static partial class PeerChecks
         {
             key = id, type, input_modalities = modalities, media_tokens_per_item = vision ? 512 : (int?)null,
             client_tools = !vision,
-            loaded_instances = new[] { new { id, config = new { context_length = context, parallel = 1 } } }
+            loaded_instances = new[] { new { id = id == native ? instanceId ?? id : id, config = new { context_length = context, parallel = 1 } } }
         };
         app.MapGet("/api/v1/models", () => new { models = vision
             ? new[] { Row(native, "llm", ["text", "image"]), Row(image, "image", ["text"]) }
@@ -176,7 +186,8 @@ internal static partial class PeerChecks
         app.MapPost("/v1/chat/completions", async (HttpContext web) =>
         {
             using var body = await JsonDocument.ParseAsync(web.Request.Body, cancellationToken: web.RequestAborted);
-            Check(body.RootElement.GetProperty("model").GetString() == native, "shared alias rewrites to the serving model's ID");
+            Check(body.RootElement.GetProperty("model").GetString() == (instanceId ?? native),
+                "shared alias rewrites to the serving model's ID");
             var content = body.RootElement.GetProperty("messages")[0].GetProperty("content");
             var text = content.ValueKind == JsonValueKind.String ? content.GetString()! : "vision";
             Check(vision || content.ValueKind == JsonValueKind.String, "text-only fixture never receives an image");
@@ -188,7 +199,7 @@ internal static partial class PeerChecks
             var tokens = text.StartsWith("compressible ", StringComparison.Ordinal) ? text.Length / 4 : text.Length;
             if (tokens > context || !vision && text == "provider measured overflow")
                 return Results.BadRequest(new { error = new { code = "context_length_exceeded" } });
-            return Results.Json(new { id = native });
+            return Results.Json(new { id = native, model = instanceId ?? native });
         });
         if (vision)
             app.MapPost("/v1/images/generations", async (HttpContext web) =>

@@ -316,6 +316,7 @@ internal sealed class InferenceRequest(InferenceOperation operation, string alia
         target.StatusCode = (int)response.StatusCode;
         target.ContentType = response.Content.Headers.ContentType?.ToString() ?? "application/octet-stream";
         target.Headers.CacheControl = "no-store";
+        var output = new InferenceOutput(context, operation, Alias);
         TimeSpan? firstOutput = null;
         var statistics = context.Items.ContainsKey(typeof(LogConfiguration)) ? new OutputMetrics(operation, send,
             response.Content.Headers.ContentType?.MediaType) : null;
@@ -327,7 +328,7 @@ internal sealed class InferenceRequest(InferenceOperation operation, string alia
             firstOutput = Stopwatch.GetElapsedTime(send);
             statistics?.Add(bytes);
             for (var offset = 0; offset < bytes.Length; offset += 16 * 1024)
-                await WriteOutputAsync(context, bytes.AsMemory(offset, Math.Min(16 * 1024, bytes.Length - offset)), cancellation);
+                await output.WriteAsync(bytes.AsMemory(offset, Math.Min(16 * 1024, bytes.Length - offset)), cancellation);
         }
         else
         {
@@ -340,13 +341,14 @@ internal sealed class InferenceRequest(InferenceOperation operation, string alia
                 firstOutput ??= Stopwatch.GetElapsedTime(send);
                 statistics?.Add(buffer.AsSpan(0, count));
                 events?.Read(buffer.AsSpan(0, count));
-                await WriteOutputAsync(context, buffer.AsMemory(0, count), cancellation);
+                await output.WriteAsync(buffer.AsMemory(0, count), cancellation);
             }
             events?.FinishLine();
             Settled = events?.Completed ?? true;
             if (!Settled)
                 throw new ProviderFailure(502, "The provider stream ended before reporting completion.");
         }
+        await output.CompleteAsync(cancellation);
         var providerElapsed = Stopwatch.GetElapsedTime(send);
         statistics?.Complete(providerElapsed);
         double? inputAudio = null;
@@ -715,7 +717,7 @@ internal sealed class InferenceRequest(InferenceOperation operation, string alia
     private static string? String(JsonNode? node) =>
         node is JsonValue value && value.TryGetValue<string>(out var text) ? text : null;
 
-    private static string RequireIdentifier(string? value) => ProviderIdentity.ValidIdentifier(value) ? value!
+    private static string RequireIdentifier(string? value) => ProviderIdentity.PublicIdentifier(value) ? value!
         : throw new ProviderFailure(400, "Specify a model identifier or a user-set alias.");
 
     private static void RequireFields(JsonObject payload, string[] allowed)

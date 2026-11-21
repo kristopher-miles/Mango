@@ -76,7 +76,7 @@ internal sealed record Deployment(Guid EndpointId, ProviderModel Model, ModelOpt
     public ProviderInstance? Instance => Model.Instances.FirstOrDefault(instance => !instance.Busy)
         ?? Model.Instances.FirstOrDefault();
     public string[] ProviderIdentifiers => new[] { Model.NativeId, Instance?.Id }
-        .OfType<string>().Where(ProviderIdentity.ValidIdentifier).Distinct(StringComparer.Ordinal).ToArray();
+        .OfType<string>().Where(ProviderIdentity.PublicIdentifier).Distinct(StringComparer.Ordinal).ToArray();
     public bool AcceptsIdentifier(string identifier) => ProviderIdentifiers.Contains(identifier, StringComparer.Ordinal) ||
         string.Equals(Alias, identifier, StringComparison.OrdinalIgnoreCase);
     public int? Context => Instance?.Context ?? (Model.PreparedContext is { } prepared && Options.ServedContext is { } configured
@@ -125,6 +125,12 @@ internal sealed class ProviderFailure(int status, string message, bool allocatio
 
 internal static class ProviderIdentity
 {
+    internal const int InternalInstanceLength = 70;
+
+    public static bool PublicIdentifier(string? value) => ValidIdentifier(value) &&
+        !(value!.Length == InternalInstanceLength && value.StartsWith("mango-", StringComparison.OrdinalIgnoreCase) &&
+            value.AsSpan(6).IndexOfAnyExcept("0123456789abcdefABCDEF") < 0);
+
     public static bool ValidIdentifier(string? value) =>
         value is { Length: > 0 and <= 512 } && !string.IsNullOrWhiteSpace(value) && !value.Any(char.IsControl);
 

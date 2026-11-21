@@ -482,13 +482,14 @@ internal sealed partial class PeerNetwork
     }
 
     private static bool HasProviderIdentifier(ObservedDeployment model, string identifier) =>
-        model.ProviderIdentifiers?.Contains(identifier, StringComparer.Ordinal) == true;
+        ProviderIdentity.PublicIdentifier(identifier) && model.ProviderIdentifiers?.Contains(identifier, StringComparer.Ordinal) == true;
 
     private static IEnumerable<string> RoutingNames(ObservedDeployment model, HashSet<string> native)
     {
         foreach (var identifier in model.ProviderIdentifiers ?? [])
-            yield return identifier;
-        if (model.EffectiveAlias is { } alias && !native.Contains(alias))
+            if (ProviderIdentity.PublicIdentifier(identifier))
+                yield return identifier;
+        if (model.EffectiveAlias is { } alias && ProviderIdentity.PublicIdentifier(alias) && !native.Contains(alias))
             yield return alias;
     }
 
