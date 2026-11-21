@@ -60,6 +60,8 @@ internal sealed record ProviderModel(string Id, string NativeId, string Manageme
     ModelOrigin? Origin = null, string? SourceDevice = null, bool AmbiguousInstance = false,
     int? ReportedMediaTokensPerItem = null, int? PreparedContext = null, string? PreparedConfiguration = null)
 {
+    [JsonIgnore] public Mango.Resources.LoadPeak? NativeLoadPeak { get; init; }
+    [JsonIgnore] public int? NativePeakContext { get; init; }
     [JsonIgnore] public string? LocalLoadPath { get; init; }
 }
 
@@ -89,11 +91,8 @@ internal sealed record Deployment(Guid EndpointId, ProviderModel Model, ModelOpt
     public string EmbeddingSpace => Options.EmbeddingFamily is { } family ? $"family:{family}" : Id;
     public bool ServingDisabled => Options.ServingOverride is { } enabled ? !enabled
         : Options.ServingDisabled || Model.Origin == ModelOrigin.LmLink;
-    public bool Eligible => !ServingDisabled && Online && Model.Installed && Instance is not null && Model.Operations.Any(operation => operation switch
-    {
-        InferenceOperation.Chat or InferenceOperation.Embeddings or InferenceOperation.SystemOne => Context is not null,
-        _ => true
-    });
+    public bool Eligible => !ServingDisabled && Online && Model.Installed && !Model.AmbiguousInstance &&
+        Instance is not null && Model.Operations.Length != 0;
     public bool Available => Eligible && !Busy && Instance is { Busy: false };
 }
 

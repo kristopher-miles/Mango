@@ -40,7 +40,6 @@ internal sealed partial class ResourceProtection : IDisposable
     private WithdrawalCause withdrawalCause;
     private Task<ReleaseResult>? release;
     private ResourceObservation? beforeRelease;
-    private long? releaseSample;
     private long? recoverableReleaseSample;
     private DateTimeOffset? recoverableReleaseAt;
     private CancellationTokenSource? benchmarkStop;
@@ -73,6 +72,14 @@ internal sealed partial class ResourceProtection : IDisposable
         unsafePlacements.UnionWith(store.Value.Unsafe);
         policy = settings.Value.BenchmarkPolicy;
         var hold = store.Value.Hold;
+        if (hold is { Cause: WithdrawalCause.Safety } && (hold.Reason is HostMemoryPressure or CommitPressure ||
+            hold.Reason.StartsWith(DedicatedMemoryPressure, StringComparison.Ordinal)))
+        {
+            hold = hold.Pending is { Length: > 0 }
+                ? hold with { State = ContributionState.Withdrawing, Reason = "Verifying unfinished provider work." }
+                : null;
+            await store.UpdateAsync(data => data with { Hold = hold });
+        }
         withdrawalCause = hold?.Cause ?? WithdrawalCause.Safety;
         if (hold is not null)
             status = new(hold.State, hold.Reason, null);
@@ -146,54 +153,20 @@ internal sealed partial class ResourceProtection : IDisposable
             return reservations.Any(item => item.Endpoint == endpoint && item.Running && (includeYolo || !item.Yolo));
     }
 
-    public bool IsAvailable(Deployment model, EndpointStatus endpoint, InferenceOperation? requested = null, bool modeSwitch = false)
+    public bool IsAvailable(Deployment model, EndpointStatus endpoint, InferenceOperation? requested = null)
     {
         lock (sync)
-        {
-            if (model.Yolo)
-                return settings.Value.Role == LocalRole.Contributor && Volatile.Read(ref stopping) == 0 &&
-                    !model.ServingDisabled && model.Online && model.Model.Installed && !model.Model.AmbiguousInstance &&
-                    (model.Eligible || endpoint.Mode == ProviderMode.Managed && endpoint.CanLoad && model.Model.SupportsLoad) &&
-                    Operations(model, endpoint).Any(operation => requested is null || operation == requested);
-            var switching = modeSwitch && CanPrepareModeSwitch &&
-                (settings.Value.BenchmarkPolicy != BenchmarkPolicy.Now || benchmarksReady);
-            if (model.ServingDisabled || !(ServingAllowed || switching) || !model.Model.Installed ||
-                !model.Eligible && !(endpoint.CanLoad && model.Model.SupportsLoad))
-                return false;
-            return Operations(model, endpoint).Any(operation =>
-            {
-                if (requested is not null && requested != operation)
-                    return false;
-                var budget = FindBudget(model, endpoint, operation);
-                return BudgetBlocker(model, endpoint, operation, budget) is null;
-            });
-        }
+            return ServingAllowed && !model.ServingDisabled && !model.Model.AmbiguousInstance && model.Model.Installed &&
+                (model.Eligible || endpoint.Mode == ProviderMode.Managed && endpoint.CanLoad && model.Model.SupportsLoad) &&
+                Operations(model, endpoint).Any(operation => requested is null || operation == requested);
     }
 
-    private (string State, string Reason, string Action)? BudgetBlocker(Deployment model, EndpointStatus endpoint,
-        InferenceOperation operation, ResourceBudget? budget)
-    {
-        if (budget is null)
-            return ("limits", "Set workload and memory limits for this model and operation.", "qualification");
-        if (!AttributionAllows(endpoint, settings.Value, observed, budget.AllowAttached))
-            return endpoint.Mode == ProviderMode.Attached
-                ? ("attached", "Acknowledge the attached provider limitation in local qualification.", "qualification")
-                : ("attribution", "Managed contribution requires a native unload or stop path.", "provider");
-        if (unsafePlacements.Contains(FaultKey(budget)))
-            return ("allocation", "An allocation failed. Correct the local limits or explicitly retry the benchmark.", "qualification");
-        if (operation is InferenceOperation.Chat or InferenceOperation.Embeddings or InferenceOperation.SystemOne &&
-            model.Context is { } context && budget.Workload.Units < context)
-            return ("contextLimit", "The workload limit is smaller than the served context. Qualify the full context.", "qualification");
-        return null;
-    }
-
-    // Read-only explanation of the same availability facts; admission still checks live pressure and reserves capacity.
     public ServingReadiness Readiness(Deployment model, EndpointStatus endpoint, InferenceOperation? requested = null,
         string? exclusiveBlocker = null, bool modeSwitch = false)
     {
         lock (sync)
         {
-            var available = IsAvailable(model, endpoint, requested, modeSwitch);
+            var available = IsAvailable(model, endpoint, requested);
             ServingReadiness State(string state, string reason, string? action = null) => new(state, reason, action, available);
             if (model.ServingDisabled) return State("disabled", "Serving is disabled for this model.");
             if (model.Model.AmbiguousInstance) return State("device", "LM Studio did not report a uniquely addressable instance for this device.");
@@ -203,41 +176,20 @@ internal sealed partial class ResourceProtection : IDisposable
             if (modeSwitch && available)
                 return State("modeSwitch", ProviderCatalog.ModeSwitchWait, "provider");
             if (exclusiveBlocker is not null) return State("busy", exclusiveBlocker, "provider");
-            if (model.Yolo)
-                return State(model.Instance is null ? "readyToLoad" : "ready",
-                    "YOLO: the provider owns native defaults and capacity. Mango automatic resource protection is bypassed for this model.");
             if (status.State != ContributionState.Contributor) return State("protection", status.Reason ?? "Local protection is holding contribution.", "protection");
-            var latest = CurrentObservation;
             var operations = Operations(model, endpoint).Where(operation => requested is null || requested == operation).ToArray();
             if (operations.Length == 0) return State("protocol", "The provider has not reported a supported inference operation.", "provider");
             if (!model.Eligible && !(endpoint.CanLoad && model.Model.SupportsLoad))
             {
                 if (model.Instance is null) return State("load", "Load this model in its provider. This registration has no authorized load action.", "provider");
-                if (model.Context is null) return State("context", "Enter the served context when the provider cannot report it.", "model");
                 return State("protocol", "The provider has not confirmed this model's serving capabilities.", "provider");
             }
-            var candidates = operations.Select(operation => (Operation: operation, Budget: FindBudget(model, endpoint, operation))).ToArray();
-            var qualified = candidates.FirstOrDefault(candidate => BudgetBlocker(model, endpoint, candidate.Operation, candidate.Budget) is null);
-            if (qualified.Budget is null)
-            {
-                var blocker = BudgetBlocker(model, endpoint, candidates[0].Operation, candidates[0].Budget)!.Value;
-                return State(blocker.State, blocker.Reason, blocker.Action);
-            }
-            if (settings.Value.BenchmarkPolicy == BenchmarkPolicy.Now && !benchmarksReady)
-                return State("benchmark", "The selected benchmark policy requires complete local profiles before inference.", "qualification");
-            if (model.Busy || model.Instance?.Busy == true || reservations.Any(item => item.Endpoint == model.EndpointId && !item.Settled))
-                return State("busy", "This provider is busy. New work may wait for capacity.");
-            if (Pressure(latest, settings.Value) is { } pressure) return State("pressure", pressure, "protection");
-            var cost = model.Instance is null ? qualified.Budget.Load : qualified.Budget.Execute;
-            if (model.Instance is null && cost.RamBytes == 0 && cost.DeviceBytes.Values.All(value => value == 0))
-                return State("loadLimit", CanUseNativeBenchmark(model, endpoint)
-                    ? "Benchmark this model to measure its startup memory."
-                    : "Enter a measured peak memory allowance before loading this model.", "qualification");
-            if (!Fits(cost, latest, latest?.TotalRam > 0 ? latest.FreeRam : null, settings.Value,
-                settledExclusive: endpoint.ExclusiveHost && model.Instance is not null))
-                return State("capacity", "The qualified workload does not fit current RAM or dedicated VRAM reserves. Work may wait.", "qualification");
+            if (BenchmarkOccupiesSlot)
+                return State("busy", "The local benchmark is occupying capacity.");
+            if (model.Busy || model.Instance?.Busy == true || reservations.Any(item => item.Deployment == model.Id && !item.Settled))
+                return State("busy", "This deployment has active or settling work.");
             return model.Instance is null ? State("readyToLoad", "Ready for automatic loading when a matching request arrives.")
-                : State("ready", "Ready for matching requests. Admission checks live resources before starting work.");
+                : State("ready", "Ready for matching requests.");
         }
     }
 
@@ -245,259 +197,79 @@ internal sealed partial class ResourceProtection : IDisposable
         endpoint.Mode == ProviderMode.Managed &&
         (endpoint.CanUnload && model.Model.SupportsUnload || endpoint.CanStop || endpoint.Executable is not null);
 
-    internal bool CanPrepareModeSwitch
-    {
-        get
-        {
-            lock (sync)
-                return Volatile.Read(ref stopping) == 0 && settings.Value.Role == LocalRole.Contributor &&
-                    (status.State == ContributionState.Contributor || HasMemoryOnlyHold(settings.Value));
-        }
-    }
-
-    private bool HasMemoryOnlyHold(LocalSettings current) =>
-        status.State == ContributionState.Fault && withdrawalCause == WithdrawalCause.Safety &&
-        (status.Reason is HostMemoryPressure or CommitPressure ||
-            status.Reason?.StartsWith(DedicatedMemoryPressure, StringComparison.Ordinal) == true) &&
-        store.Value.Hold?.Pending is not { Length: > 0 } &&
-        CurrentObservation is { TotalRam: > 0 } latest &&
-        (!current.ActivityMonitoring || latest.WorkerAttribution &&
-            latest.ExternalCpu < current.CpuCutoffPercent && latest.ExternalGpu < current.GpuCutoffPercent);
-
-    internal async Task ObserveModeSwitchAsync(CancellationToken cancellation)
-    {
-        if (!await WaitForObservationAsync(cancellation))
-            return;
-        lock (sync)
-        {
-            var current = settings.Value;
-            if (current.Role == LocalRole.Contributor && HasMemoryOnlyHold(current) &&
-                !reservations.Any(item => !item.Settled) && CurrentObservation is { } latest &&
-                (status.Reason != CommitPressure || latest.FreeCommit >= ConfiguredRamReserve(latest, current)) &&
-                (status.Reason?.StartsWith(DedicatedMemoryPressure, StringComparison.Ordinal) != true ||
-                    latest.Devices.Any(device => device is { TotalBytes: > 0, UsedBytes: >= 0 } &&
-                        status.Reason == $"{DedicatedMemoryPressure}{device.Name}.")) &&
-                Pressure(latest, current) is null)
-                SetStatus(new(ContributionState.Contributor, null, null));
-        }
-    }
-
-    // Engine admission can sample through a memory-only hold after native work has settled.
-    private bool NativeBenchmarkAllowed(LocalSettings current) =>
-        status.State == ContributionState.Contributor ||
-        status.State == ContributionState.Fault && observed is { WorkerAttribution: true } latest &&
-        store.Value.Hold?.Pending is not { Length: > 0 } &&
-        Pressure(latest, current) is { } memoryPressure && status.Reason == memoryPressure &&
-        latest.ExternalCpu < current.CpuCutoffPercent && latest.ExternalGpu < current.GpuCutoffPercent;
-
     public Admission TryAdmit(Deployment model, EndpointStatus endpoint, Workload workload, ResourceWork work,
-        bool profiling = false, long payloadBytes = 0, bool speedSample = false, long? estimatedContextUnits = null)
+        bool profiling = false, bool speedSample = false, bool additionalLoad = false)
     {
-        if (model.Yolo)
-        {
-            lock (sync)
-            {
-                if (!profiling && ForcedBenchmarkHoldsServing)
-                    return new(AdmissionStatus.Wait, ForcedBenchmarkWait, null);
-                if (!profiling && nativeBenchmark)
-                    return new(AdmissionStatus.Wait, "Waiting for the native benchmark to settle.", null);
-                if (!IsAvailable(model, endpoint, workload.Operation) || work == ResourceWork.Benchmark &&
-                    (!speedSample || model.Instance is null || !NativeBenchmarkAllowed(settings.Value) ||
-                        reservations.Any(item => !item.Settled)))
-                    return Refuse("This model is paused, unavailable, or delegates qualification to its provider.");
-                if (work == ResourceWork.Load && (endpoint.Mode != ProviderMode.Managed || !endpoint.CanLoad || !model.Model.SupportsLoad))
-                    return Refuse("The provider does not authorize loading this deployment.");
-                // A zero-cost lease tracks cancellation and uncertain completion, not capacity.
-                var native = new ResourceReservation(this, model.EndpointId, model.Id, work, "yolo:" + model.Id,
-                    MemoryCost.Empty, true, sampleNumber, null, yolo: true);
-                reservations.Add(native);
-                return new(AdmissionStatus.Admitted, null, native);
-            }
-        }
-        var sampled = Observation;
-        var needsFreshGpu = windows is not null && sampled is not null && sampled.Devices.Any(device => !device.Integrated) &&
-            clock.GetUtcNow() - sampled.At > TimeSpan.FromSeconds(LocalSettings.MinimumSampleSeconds);
-        var freshGpu = needsFreshGpu ? windows!.ReadFreshGpuMemory() : null;
         lock (sync)
         {
-            var current = settings.Value;
-            var providerCapacity = profiling && CanUseNativeBenchmark(model, endpoint);
-            if (!(providerCapacity ? NativeBenchmarkAllowed(current) : status.State == ContributionState.Contributor) ||
-                current.Role != LocalRole.Contributor ||
-                Volatile.Read(ref stopping) != 0)
-                return Refuse(status.Reason ?? "This node is in leech mode.");
+            if (!ServingAllowed || model.ServingDisabled)
+                return Refuse(status.Reason ?? "Local serving is paused.");
             if (work == ResourceWork.Load && (endpoint.Mode != ProviderMode.Managed || !endpoint.CanLoad || !model.Model.SupportsLoad))
                 return Refuse("The provider does not authorize loading this deployment.");
-            if (!profiling && ForcedBenchmarkHoldsServing)
-                return new(AdmissionStatus.Wait, ForcedBenchmarkWait, null);
-            if (!profiling && nativeBenchmark)
-                return new(AdmissionStatus.Wait, "Waiting for the native benchmark to settle.", null);
-            if (!profiling && work != ResourceWork.Load && current.BenchmarkPolicy == BenchmarkPolicy.Now && !benchmarksReady)
-                return Refuse("The local benchmark policy requires complete profiles before inference.");
-            var latest = CurrentObservation;
-            if (needsFreshGpu && freshGpu is not null && latest is not null)
-                latest = latest with { Devices = freshGpu };
-            var budget = FindBudget(model, endpoint, workload.Operation, estimatedContextUnits);
-            if (budget is null || !Covers(budget.Workload, workload))
-                return Refuse("Set a local memory and workload limit for this deployment and operation.");
-            if (!AttributionAllows(endpoint, current, latest, budget.AllowAttached))
-                return Refuse(endpoint.Mode == ProviderMode.Attached
-                    ? "Confirm the attached provider limitation in this deployment's local memory limits."
-                    : "Managed contribution requires a native unload or stop path.");
-            var fingerprint = FaultKey(budget);
-            if (unsafePlacements.Contains(fingerprint) && !(providerCapacity && runningForcedBenchmark))
-                return Refuse("An allocation failed for this placement. Update its local limits or retry explicitly.");
-            if (work == ResourceWork.Execute && workload.MediaItems > 0 && budget.Workload.MediaItems == 0)
-                return Refuse("A host media memory qualification is required for this workload.");
-            var cost = providerCapacity ? MemoryCost.Empty : work switch
+            if (model.Yolo && work == ResourceWork.Benchmark && (!speedSample || model.Instance is null))
+                return Refuse("YOLO benchmarks require a loaded instance.");
+            if (!profiling && BenchmarkOccupiesSlot)
+                return new(AdmissionStatus.Wait, "Waiting for the local benchmark to settle.", null);
+            var pending = reservations.Where(item => !item.Settled).ToArray();
+            foreach (var other in pending)
             {
-                ResourceWork.Load => budget.Load,
-                ResourceWork.Benchmark when speedSample && budget.Estimated =>
-                    EstimateBudget(model, workload.Operation, budget.Configuration, budget.Runtime, workload).Execute,
-                _ => ProjectExecutionCost(budget, workload, payloadBytes)
-            };
-            if (work == ResourceWork.Load && !providerCapacity && cost.RamBytes == 0 && cost.DeviceBytes.Values.All(value => value == 0))
-                return Refuse("Set a peak memory allowance before loading this model.");
-            var overlap = !endpoint.ExclusiveHost && AllowsOverlap(budget) &&
-                !profiling && work == ResourceWork.Execute && workload.Items == 1 &&
-                workload.MediaItems <= budget.Workload.MediaItems;
-            var peersOnEndpoint = reservations.Where(item => item.Endpoint == model.EndpointId && !item.Settled).ToArray();
-            var slots = OverlapSlots(model, budget);
-            if (reservations.Any(item => !item.Settled &&
-                !(providerCapacity && !endpoint.ExclusiveHost && item.NativeBenchmark && !item.Running &&
-                    item.Endpoint != endpoint.Id) &&
-                (!overlap || !item.Overlap || !item.Running || (item.Endpoint == model.EndpointId
-                    ? item.Deployment != model.Id : !SeparateWorkers(latest, item.Endpoint, model.EndpointId)))) ||
-                peersOnEndpoint.Length >= slots)
-                return new(AdmissionStatus.Wait, "Local resources are reserved by another provider operation.", null);
-            if (providerCapacity)
-            {
-                var probe = new ResourceReservation(this, model.EndpointId, model.Id, work, fingerprint, cost,
-                    overlap: false, sampleNumber, latest?.Workers.GetValueOrDefault(model.EndpointId), nativeBenchmark: true);
-                reservations.Add(probe);
-                return new(AdmissionStatus.Admitted, null, probe);
+                if (profiling && other.NativeBenchmark && !other.Running && other.Endpoint != endpoint.Id && !endpoint.ExclusiveHost)
+                    continue;
+                if (!other.Running || other.Stop.IsCancellationRequested || profiling || other.Work != ResourceWork.Execute ||
+                    other.Yolo != model.Yolo || endpoint.ExclusiveHost ||
+                    work == ResourceWork.Execute && other.Endpoint == model.EndpointId && other.Deployment != model.Id && !model.Yolo)
+                    return new(AdmissionStatus.Wait, "Waiting for active or settling provider work.", null);
             }
-            long? freeRam = null;
-            var freeCommit = latest?.FreeCommit;
-            try
+            if (work == ResourceWork.Execute && pending.Count(item => item.Deployment == model.Id) >= (model.Instance?.Slots ?? 1))
+                return new(AdmissionStatus.Wait, "Waiting for active or settling provider work.", null);
+
+            var cost = MemoryCost.Empty;
+            if (additionalLoad && !model.Yolo && work == ResourceWork.Load)
             {
-                var memory = endpoint.ExclusiveHost && work == ResourceWork.Load && windows is not null
-                    ? ReadStrataMemory() : ram();
-                freeRam = (long)memory.Available;
-                latest = latest is null
-                    ? new(clock.GetUtcNow(), (long)memory.Total, freeRam.Value, null, null, [], null, [], false, null)
-                    : latest with { TotalRam = (long)memory.Total, FreeRam = freeRam.Value };
+                var peak = CheckedLoadCost(model, workload.Operation);
+                if (peak is null || !FitsAdditionalLoad(peak))
+                    return new(AdmissionStatus.Wait, "Co-residency exceeds measured headroom or lacks comparable evidence.", null, MemoryWait: true);
+                cost = peak;
             }
-            catch (Win32Exception)
-            {
-                if (endpoint.ExclusiveHost && work == ResourceWork.Load)
-                    return Refuse("Mango could not verify Windows memory and commit headroom for Strata.");
-                freeRam = latest?.TotalRam > 0 ? latest.FreeRam : null;
-                WarnTelemetry();
-            }
-            if (Pressure(latest, current) is { } pressure)
-            {
-                BeginWithdrawal(pressure);
-                return Refuse(pressure);
-            }
-            if (endpoint.ExclusiveHost && work == ResourceWork.Load && freeCommit is { } commit &&
-                commit - ConfiguredRamReserve(latest, current) < cost.RamBytes)
-                return new(AdmissionStatus.Wait, "Strata needs more Windows commit headroom before loading.", null, MemoryWait: true);
-            if (!Fits(cost, latest, freeRam, current, settledExclusive: endpoint.ExclusiveHost && work != ResourceWork.Load))
-                return new(AdmissionStatus.Wait, "The request does not fit current RAM or per-device VRAM reserves.", null, MemoryWait: true);
-            var lease = new ResourceReservation(this, model.EndpointId, model.Id, work, fingerprint, cost, overlap,
-                sampleNumber, latest?.Workers.GetValueOrDefault(model.EndpointId));
+            var lease = new ResourceReservation(this, model.EndpointId, model.Id, work,
+                ProviderIdentity.Hash(model.Id, Configuration(model), workload.Operation.ToString()), cost, true,
+                sampleNumber, CurrentObservation?.Workers.GetValueOrDefault(model.EndpointId), model.Yolo, profiling);
             reservations.Add(lease);
             return new(AdmissionStatus.Admitted, null, lease);
-
-            (ulong Total, ulong Available) ReadStrataMemory()
-            {
-                var actual = WindowsMemory.ReadWithCommit();
-                freeCommit = checked((long)actual.AvailableCommit);
-                return (actual.Total, actual.Available);
-            }
         }
     }
 
     private static Admission Refuse(string reason) => new(AdmissionStatus.Unavailable, reason, null);
 
-    private bool AllowsOverlap(ResourceBudget budget) => settings.Value.BenchmarkPolicy != BenchmarkPolicy.Never && budget.AllowOverlap;
-
-    public int OverlapSlots(Deployment model, ResourceBudget budget) => model.Instance?.Slots is <= 0 ? 0 :
-        AllowsOverlap(budget) ? Math.Min(model.Instance?.Slots ?? 1, budget.ParallelSlots) : 1;
-    private static bool SeparateWorkers(ResourceObservation? latest, Guid first, Guid second) =>
-        latest is not null && latest.WorkerAttribution && latest.Workers.TryGetValue(first, out var a) && latest.Workers.TryGetValue(second, out var b) &&
-        !a.Processes.Intersect(b.Processes).Any();
-
-    public bool CanBackfill(ServingPlacement a, ServingPlacement b)
+    internal bool AdditionalLoadFits(Deployment model, InferenceOperation operation)
     {
         lock (sync)
-        {
-            if (settings.Value.BenchmarkPolicy == BenchmarkPolicy.Never || observed is not { } latest ||
-                a.Model.Instance is null || b.Model.Instance is null || a.Workload.Items != 1 || b.Workload.Items != 1 ||
-                a.Budget is not { AllowOverlap: true } first || b.Budget is not { AllowOverlap: true } second ||
-                !SeparateWorkers(latest, a.Endpoint.Id, b.Endpoint.Id) ||
-                first.Execute.DeviceBytes.Keys.Intersect(second.Execute.DeviceBytes.Keys).Any())
-                return false;
-            var combined = new MemoryCost(first.Execute.RamBytes + second.Execute.RamBytes,
-                first.Execute.DeviceBytes.Concat(second.Execute.DeviceBytes).ToDictionary());
-            return Fits(combined, latest, latest.FreeRam, settings.Value);
-        }
-    }
-
-    public bool CanReleaseForLoad(ServingPlacement target, Guid victimEndpoint)
-    {
-        lock (sync)
-            return target.Budget?.Load is { } load && observed?.Workers.GetValueOrDefault(victimEndpoint) is { } worker &&
-                (load.RamBytes > 0 && worker.ResidentBytes > 0 || load.DeviceBytes.Any(pair => pair.Value > 0 &&
-                    worker.DedicatedBytes?.GetValueOrDefault(pair.Key) > 0));
+            return CheckedLoadCost(model, operation) is { } peak && FitsAdditionalLoad(peak);
     }
 
     internal static bool Covers(Workload limit, Workload actual) =>
         limit.Operation == actual.Operation && limit.Units >= actual.Units;
 
-    internal static MemoryCost ProjectExecutionCost(ResourceBudget budget, Workload actual, long payloadBytes = 0)
+    private bool FitsAdditionalLoad(MemoryCost cost)
     {
-        var ratio = Math.Max(1m, (decimal)actual.MediaItems / Math.Max(1, budget.Workload.MediaItems)) *
-            Math.Max(1m, (decimal)actual.Items / Math.Max(1, budget.Workload.Items));
-        long Scale(long value, long extra = 0) => (long)Math.Min(long.MaxValue,
-            decimal.Ceiling(value * ratio + extra));
-        // Account for buffered JSON/string copies separately from provider execution.
-        var bytes = Math.Clamp(payloadBytes, 0, ProviderLimits.MaxRequestBytes) * 4;
-        return new(Scale(budget.Execute.RamBytes, bytes),
-            budget.Execute.DeviceBytes.ToDictionary(item => item.Key, item => Scale(item.Value)));
-    }
-
-    private static bool AttributionAllows(EndpointStatus endpoint, LocalSettings settings, ResourceObservation? observation,
-        bool allowAttached) => endpoint.Mode == ProviderMode.Attached ? allowAttached :
-        !settings.ActivityMonitoring || (endpoint.CanUnload || endpoint.CanStop ||
-            !endpoint.Online && endpoint.Executable is not null);
-
-    private bool Fits(MemoryCost cost, ResourceObservation? latest, long? freeRam, LocalSettings current,
-        bool settledExclusive = false)
-    {
-        if (latest is null) return true;
-        var reserve = Math.Max(ConfiguredRamReserve(latest, current),
-            MinimumFree(latest.TotalRam, current.RamCutoffPercent));
-        var outstandingRam = reservations.Sum(item => Unused(item, latest, null));
-        if (latest.TotalRam > 0 && freeRam is not null && cost.RamBytes > freeRam - reserve - outstandingRam)
+        if (CurrentObservation is not { TotalRam: > 0, Hardware: not null } latest) return false;
+        var free = latest.FreeRam;
+        try { free = checked((long)ram().Available); }
+        catch (Win32Exception) { WarnTelemetry(); }
+        var current = settings.Value;
+        if (cost.RamBytes > free - ConfiguredRamReserve(latest, current) - reservations.Sum(item => Unused(item, latest, null)))
             return false;
-        foreach (var id in cost.DeviceBytes.Keys.Concat(reservations.SelectMany(item => item.Cost.DeviceBytes.Keys)).Distinct())
+        var devices = windows?.ReadFreshGpuMemory() ?? latest.Devices;
+        foreach (var device in devices.Where(device => !device.Integrated))
         {
-            var device = latest.Devices.FirstOrDefault(item => item.Id == id && !item.Integrated);
-            if (device is not { TotalBytes: { } total, UsedBytes: { } used })
-                continue;
-            var outstanding = reservations.Sum(item => Unused(item, latest, id));
-            if (settledExclusive && outstanding == 0 && cost.DeviceBytes.GetValueOrDefault(id) == 0)
-                continue;
-            var deviceReserve = Math.Max((long)current.EffectiveVramReserveMiB * MiB, MinimumFree(total, current.VramCutoffPercent));
-            if (cost.DeviceBytes.GetValueOrDefault(id) > total - used - deviceReserve - outstanding)
+            if (!cost.DeviceBytes.TryGetValue(device.Id, out var peak) ||
+                device is not { TotalBytes: { } total, UsedBytes: { } used } ||
+                peak > 0 && peak > total - used - (long)current.EffectiveVramReserveMiB * MiB -
+                    reservations.Sum(item => Unused(item, latest, device.Id)))
                 return false;
         }
-        return true;
+        return cost.DeviceBytes.Keys.All(id => devices.Any(device => device.Id == id && !device.Integrated));
     }
-
-    private static long MinimumFree(long total, int cutoff) => (long)Math.Ceiling(total * (100 - cutoff) / 100.0);
 
     private static long ConfiguredRamReserve(ResourceObservation? latest, LocalSettings current) =>
         (long)current.EffectiveRamReserveMiB(LocalSettings.DefaultRamReserveMiB((ulong)(latest?.TotalRam ?? 0))) * MiB;
@@ -505,7 +277,7 @@ internal sealed partial class ResourceProtection : IDisposable
     private long Unused(ResourceReservation item, ResourceObservation latest, string? device)
     {
         var reserved = device is null ? item.Cost.RamBytes : item.Cost.DeviceBytes.GetValueOrDefault(device);
-        if (reserved == 0 || reservations.Count(other => other.Endpoint == item.Endpoint) > 1 ||
+        if (reserved == 0 || item.Baseline is null || reservations.Count(other => other.Endpoint == item.Endpoint && other.Cost != MemoryCost.Empty) > 1 ||
             !latest.Workers.TryGetValue(item.Endpoint, out var worker))
             return reserved;
         if (device is not null && (worker.DedicatedBytes is null || item.Baseline is { DedicatedBytes: null }))
@@ -538,9 +310,9 @@ internal sealed partial class ResourceProtection : IDisposable
                 lastClient = clock.GetUtcNow();
             item.Running = false;
             item.Settled |= settled;
-            if (item.Settled && item.Cost.DeviceBytes.Values.Any(value => value != 0))
+            if (item.Settled && item.Cost != MemoryCost.Empty)
                 Interlocked.Exchange(ref settlementSample, 1);
-            if (item.Settled && item.Cost.DeviceBytes.Values.All(value => value == 0))
+            if (item.Settled && item.Cost == MemoryCost.Empty)
                 Remove(item);
         }
         Signal();
@@ -584,21 +356,7 @@ internal sealed partial class ResourceProtection : IDisposable
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException)
         {
-            lock (sync)
-                BeginWithdrawal("Mango could not persist a failed memory allocation.");
-        }
-        lock (sync)
-        {
-            if (observed is { } current && current.TotalRam > 0)
-            {
-                try
-                {
-                    var free = (long)ram().Available;
-                    if (Pressure(current with { FreeRam = free }, settings.Value) is { } pressure)
-                        BeginWithdrawal(pressure);
-                }
-                catch (Win32Exception) { WarnTelemetry(); }
-            }
+            System.Diagnostics.Trace.TraceWarning("Mango could not persist the allocation failure diagnostic.");
         }
         Changed?.Invoke();
         Signal();
@@ -720,7 +478,6 @@ internal sealed partial class ResourceProtection : IDisposable
             }
             if (status.State == ContributionState.Withdrawing && withdraw)
                 return;
-            var pressure = nativeBenchmark ? null : Pressure(latest, current);
             var high = external;
             if (status.State == ContributionState.Cooldown)
             {
@@ -735,46 +492,11 @@ internal sealed partial class ResourceProtection : IDisposable
                     status = status with { QuietUntil = until };
                 return;
             }
-            if (pressure is not null)
-                BeginWithdrawal(pressure);
-            else
-            {
-                if (high)
-                    highSince ??= latest.At;
-                else
-                    highSince = null;
-                if (latest.At - highSince >= Sustained)
-                    BeginWithdrawal("Sustained external CPU or GPU activity.");
-                else if (withdrawalCause == WithdrawalCause.ExternalActivity)
-                    BeginWithdrawal("Sustained external CPU or GPU activity.");
-                else if (status.State is ContributionState.ManualLeech or ContributionState.Withdrawing)
-                    SetStatus(new(ContributionState.Contributor, null, null));
-            }
+            if (withdrawalCause == WithdrawalCause.ExternalActivity)
+                BeginWithdrawal("Sustained external CPU or GPU activity.");
+            else if (status.State is ContributionState.ManualLeech or ContributionState.Withdrawing)
+                SetStatus(new(ContributionState.Contributor, null, null));
         }
-    }
-
-    private static string? Pressure(ResourceObservation? latest, LocalSettings current)
-    {
-        if (latest is null) return null;
-        var reserve = ConfiguredRamReserve(latest, current);
-        WorkerMemory? exclusive = null;
-        if (latest.ExclusiveEndpoint is { } endpoint)
-        {
-            if (latest.FreeCommit is { } commit && commit < reserve)
-                return CommitPressure;
-            latest.Workers.TryGetValue(endpoint, out exclusive);
-        }
-        var freeForPressure = Math.Min(latest.TotalRam, latest.FreeRam + (exclusive?.ResidentBytes ?? 0));
-        if (latest.TotalRam > 0 && (latest.FreeRam < reserve || (latest.TotalRam - freeForPressure) * 100.0 >= latest.TotalRam * current.RamCutoffPercent))
-            return HostMemoryPressure;
-        foreach (var device in latest.Devices.Where(device => !device.Integrated))
-            if (device is { TotalBytes: { } total, UsedBytes: { } used })
-            {
-                var external = Math.Max(0, used - (exclusive?.DedicatedBytes?.GetValueOrDefault(device.Id) ?? 0));
-                if (total - external < (long)current.EffectiveVramReserveMiB * MiB || external * 100.0 >= total * current.VramCutoffPercent)
-                    return $"{DedicatedMemoryPressure}{device.Name}.";
-            }
-        return null;
     }
 
     private void BeginWithdrawal(string reason)
@@ -791,7 +513,7 @@ internal sealed partial class ResourceProtection : IDisposable
                 observed?.FreeRam, observed?.ExternalCpu, observed?.ExternalGpu);
             SetStatus(new(ContributionState.Withdrawing, reason, null));
             RequestCancel(benchmarkStop);
-            foreach (var lease in reservations.Where(item => !item.Yolo || settings.Value.Role == LocalRole.Leech))
+            foreach (var lease in reservations)
                 RequestCancel(lease.Stop);
         }
         Signal();
@@ -818,7 +540,6 @@ internal sealed partial class ResourceProtection : IDisposable
             if (status.State == ContributionState.Fault && recoverableReleaseSample is { } failedSample &&
                 sampleNumber > failedSample && settings.Value.Role == LocalRole.Contributor &&
                 observed is { } latest && latest.At > recoverableReleaseAt &&
-                Pressure(latest, settings.Value) is null &&
                 !(latest.WorkerAttribution && (latest.ExternalCpu >= settings.Value.CpuCutoffPercent || latest.ExternalGpu >= settings.Value.GpuCutoffPercent)) &&
                 !reservations.Any(item => item.Running) && !providers.HasActiveRequests &&
                 !providers.View.Models.Any(item => item.Instance?.Busy == true))
@@ -834,9 +555,8 @@ internal sealed partial class ResourceProtection : IDisposable
                 if (pending.OwnedProcesses.Length != 0 && pending.OwnedProcesses.All(pid => !WindowsObservation.ProcessExists(pid)))
                     ConfirmReleased(providers, pending.Endpoint);
             await SaveHoldAsync(new(ContributionState.Withdrawing, withdrawalReason!, Pending(providers), withdrawalCause));
-            release = providers.ReleaseManagedAsync(cancellation, includeYolo: settings.Value.Role == LocalRole.Leech);
+            release = providers.ReleaseManagedAsync(cancellation, includeYolo: true);
             _ = release.ContinueWith(_ => Signal(), TaskScheduler.Default);
-            releaseSample = null;
             return;
         }
         if (release is { IsCompleted: true } finished)
@@ -846,7 +566,6 @@ internal sealed partial class ResourceProtection : IDisposable
             lock (sync)
             {
                 error ??= VerifyRelease(result, beforeRelease, observed);
-                error ??= Pressure(CurrentObservation, settings.Value);
                 if (error is null)
                     foreach (var endpoint in result.Released)
                         ConfirmReleased(providers, endpoint.Id);
@@ -879,9 +598,8 @@ internal sealed partial class ResourceProtection : IDisposable
     {
         lock (sync)
         {
-            providers.ConfirmReleased(endpoint, includeYolo: settings.Value.Role == LocalRole.Leech);
-            foreach (var lease in reservations.Where(item => item.Endpoint == endpoint && !item.Running &&
-                (!item.Yolo || settings.Value.Role == LocalRole.Leech)).ToArray())
+            providers.ConfirmReleased(endpoint, includeYolo: true);
+            foreach (var lease in reservations.Where(item => item.Endpoint == endpoint && !item.Running).ToArray())
                 Settle(lease, true);
         }
     }

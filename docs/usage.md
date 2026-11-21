@@ -1,6 +1,6 @@
 # Use Mango on Windows
 
-The November 21 [serving boundary](requirements/09-recorded-decisions.md#serving-boundary--november-21-2026) is the current policy. It is pending implementation and rollout. Installed releases can still show the earlier resource qualification and benchmark controls.
+The November 21 [serving boundary](requirements/09-recorded-decisions.md#serving-boundary--november-21-2026) is the current policy. It applies from v0.0.21. Earlier releases can still show the previous resource qualification and benchmark controls.
 
 ## Install the Windows package
 

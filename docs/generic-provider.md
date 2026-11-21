@@ -118,3 +118,8 @@ Invoke-Lifecycle unload @{ instance_id = $second.instance_id }
 ```
 
 Run `dotnet run --project tests/Mango.Tests -c Release` to check discovery, load context, a scheduled single-slot swap, streaming, restart, and attached mode against the same fixture.
+
+
+### Optional memory evidence for co-residency
+
+A model inventory row can report `load_peak_bytes` for its actual local load configuration. For example, `{"ram":1073741824,"devices":{"GPU-ID":536870912},"context_length":8192}` describes an additional 1 GiB of host RAM and 512 MiB on the identified discrete GPU at the configured context. Omit `context_length` for provider defaults. Supply device IDs from Mango's local resource observation. Report zero for a known unused discrete device and omit unknown values. Include shared or integrated GPU memory in the RAM peak. An owner override takes precedence for its supplied pool. This evidence applies when an additional non-YOLO model would share the host.

@@ -4,9 +4,10 @@ param(
     [ValidateSet('Patch', 'Minor', 'Major')] [string] $Bump = 'Patch',
     [switch] $Cutoff,
     [switch] $WithLinux,
+    [switch] $Draft,
     [string] $Dotnet = 'dotnet',
     [string] $Notes = 'Mango for Windows x64. See Install.md in the ZIP.',
-    [string] $PublisherKey = (Join-Path $env:LOCALAPPDATA 'Mango.Release/publisher-key.dpapi'),
+    [string] $PublisherKey,
     [switch] $BuildOnly
 )
 
@@ -71,6 +72,13 @@ try {
     }
     if ($BuildOnly) { return }
 
+    if (-not $PublisherKey) {
+        $PublisherKey = @(
+            (Join-Path $env:LOCALAPPDATA 'Mango.Release/publisher-key.dpapi')
+            (Join-Path $env:LOCALAPPDATA 'Packages/OpenAI.Codex_2p2nqsd0c76g0/LocalCache/Local/Mango.Release/publisher-key.dpapi')
+        ) | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+        if (-not $PublisherKey) { throw 'Pass -PublisherKey with the existing DPAPI-protected Mango publisher key.' }
+    }
     Add-Type -AssemblyName System.Security.Cryptography.ProtectedData
     $rsa = [Security.Cryptography.RSA]::Create()
     try {
@@ -116,6 +124,7 @@ try {
                 throw "GitHub could not verify $name."
             }
         }
+        if ($Draft) { $release.html_url; return }
         $published = Invoke-RestMethod -Method Patch -Uri "$endpoint/$($release.id)" -Headers $headers `
             -ContentType 'application/json' -Body '{"draft":false}' -TimeoutSec 60
         $published.html_url

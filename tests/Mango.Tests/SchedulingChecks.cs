@@ -277,7 +277,7 @@ internal static class SchedulingChecks
         public event Action? Changed { add { } remove { } }
         public event Action? AdmissionChanged;
 
-        public ServingPlacement Placement(InferenceShape shape, string id, bool allowUnverifiedContext = true)
+        public ServingPlacement Placement(InferenceShape shape, string id)
         {
             var group = id == "independent" ? separate : shared;
             var model = new ProviderModel(id, id, id, id, null, ["text"], ["text"], [InferenceOperation.Chat],

@@ -379,10 +379,7 @@ internal sealed partial class PeerNetwork(string directory, int port, ProviderCa
         var view = providers.View;
         var protection = providers.Resources;
         var preferences = settings.Value;
-        var role = serving.Draining || protection is { ServingAllowed: false } &&
-            !view.Models.Any(model => protection.IsAvailable(model,
-                view.Endpoints.First(endpoint => endpoint.Id == model.EndpointId),
-                modeSwitch: ProviderCatalog.NeedsModeSwitch(view, model))) ? LocalRole.Leech : preferences.Role;
+        var role = serving.Draining || protection is { ServingAllowed: false } ? LocalRole.Leech : preferences.Role;
         var (before, after) = await ChangeAsync(current =>
         {
             if (current.Self is not { } self || DeviceChanged(current))

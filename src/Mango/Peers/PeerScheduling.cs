@@ -219,6 +219,7 @@ internal sealed partial class PeerNetwork
             var hint = affinity.Find(identity, payload.Shape, session, prefixes, arrived);
             var tried = new HashSet<Guid>();
             var unreachable = new Dictionary<Guid, (string? Address, string Epoch)>();
+            Guid? deferred = null;
             var attemptCount = 0;
             var choices = Candidates(payload.Shape);
             var searched = false;
@@ -238,6 +239,12 @@ internal sealed partial class PeerNetwork
                 var choice = Choose(choices, tried, hint, suggested, item, attempt, limit - clock.GetElapsedTime(age));
                 if (choice is null)
                 {
+                    if (deferred is { } waiting && tried.Remove(waiting))
+                    {
+                        deferred = null;
+                        choices = await ObserveRouteChoicesAsync(Candidates(payload.Shape), payload.Shape, access.KeyId, cancellation);
+                        continue;
+                    }
                     if (searched || last is not { Status: >= 500 or 409 } || !Ready || !IsMember)
                         break;
                     searched = true;
@@ -256,8 +263,7 @@ internal sealed partial class PeerNetwork
                 var remaining = limit - elapsed;
                 var here = Snapshot.Self?.Id ?? Guid.Empty;
                 var address = Snapshot.Nodes.GetValueOrDefault(choice.Node)?.Address;
-                var tryOtherHost = choice is { VerifiedFit: true, Busy: false, Displaces: false } &&
-                    choices.Any(other => !tried.Contains(other.Node) && other is { VerifiedFit: true, Busy: false, Displaces: false });
+                var tryOtherHost = choices.Any(other => !tried.Contains(other.Node) && !other.Busy && !other.Displaces);
                 var ticket = new AttemptTicket(item.Id, attempt, access.KeyId, choice.Deployment,
                     clock.GetUtcNow() - elapsed, clock.GetUtcNow() + remaining, session, choice.ServingEpoch, source, logGeneration, tryOtherHost);
                 var started = clock.GetTimestamp();
@@ -309,6 +315,7 @@ internal sealed partial class PeerNetwork
                     return;
                 }
                 last = result;
+                if (result.Deferred && tryOtherHost) deferred ??= choice.Node;
                 if (result.Unreachable)
                     unreachable[choice.Node] = (address, choice.ServingEpoch);
                 if (!result.Retryable)
@@ -373,9 +380,10 @@ internal sealed partial class PeerNetwork
                     wait += (use.AvoidUntil - now).TotalMilliseconds;
                 return (Placement: item, Wait: wait, Cost: wait + (item.Loaded ? 0 : 1000) + (item.PromptMilliseconds ?? 0),
                     WaitKnown: concurrent == 0 || use?.RuntimeMs is not null);
-            }).OrderByDescending(item => item.Placement.VerifiedFit)
-                .ThenByDescending(item => item.Placement.VerifiedFit ? null : item.Placement.Context)
+            }).OrderBy(item => item.Placement.Displaces || item.Wait > 0)
                 .ThenBy(item => item.Placement.Displaces).ThenBy(item => item.Wait > 0)
+                .ThenByDescending(item => item.Placement.VerifiedFit)
+                .ThenByDescending(item => item.Placement.VerifiedFit ? null : item.Placement.Context)
                 .ThenBy(item => item.Placement.Scarcity).ThenBy(item => item.Cost)
                 .ThenByDescending(item => item.Placement.Deployment == selected).ThenByDescending(item => item.Placement.Node == here)
                 .ThenBy(item => HashCode.Combine(here, item.Placement.Node))
@@ -422,7 +430,7 @@ internal sealed partial class PeerNetwork
         var states = await Task.WhenAll(probes.Select(async choice =>
         {
             if (choice.Node == here)
-                return (choice.Node, choice.Deployment, State: LocalPlacementState(shape, choice.Deployment, routing: true));
+                return (choice.Node, choice.Deployment, State: LocalPlacementState(shape, choice.Deployment));
             Interlocked.Increment(ref placementChecks);
             var reply = current.Nodes.TryGetValue(choice.Node, out var peer) && !peer.Removed
                 ? await SendAsync<PlacementCheckReply>(current, peer, "inference/eligible", new PlacementCheck(key, choice.Deployment, shape, Routing: true),
@@ -430,7 +438,8 @@ internal sealed partial class PeerNetwork
             return (choice.Node, choice.Deployment, State: reply?.Body);
         }));
         var live = states.ToDictionary(state => (state.Node, state.Deployment), state => state.State);
-        return choices.Select(choice => live.GetValueOrDefault((choice.Node, choice.Deployment)) is { Eligible: true } state
+        return choices.Where(choice => live.GetValueOrDefault((choice.Node, choice.Deployment))?.Eligible != false)
+            .Select(choice => live.GetValueOrDefault((choice.Node, choice.Deployment)) is { Eligible: true } state
             ? choice with { Busy = state.Busy ?? choice.Busy, Displaces = state.Displaces ?? choice.Displaces } : choice).ToArray();
     }
 
@@ -474,8 +483,7 @@ internal sealed partial class PeerNetwork
         foreach (var catalog in current.Records.Catalogs.Where(item => item.Node != here && !Incompatible(item.Node) && item.SchedulingEpoch is not null && item.Role == LocalRole.Contributor &&
             current.Nodes.TryGetValue(item.Node, out var node) && !node.Removed))
             foreach (var model in catalog.Models)
-                if ((catalog.ResourceState is null or ContributionState.Contributor || model.Yolo ||
-                    model is { LocallyAvailable: true, Readiness.State: "modeSwitch" }) &&
+                if ((catalog.ResourceState is null or ContributionState.Contributor) &&
                     sharedModels.TryGetValue((catalog.Node, model.Id), out var shared))
                     yield return (catalog.Node, model.ProviderIdentifiers is not null ? model :
                         model with { EffectiveAlias = model.EffectiveAlias ?? shared.Alias }, catalog.SchedulingEpoch!);
@@ -514,23 +522,13 @@ internal sealed partial class PeerNetwork
         var modeSwitch = ProviderCatalog.NeedsModeSwitch(view, model);
         var workloads = model.Model.Operations.Select(operation =>
         {
-            if (model.Yolo && protection?.IsAvailable(model, endpoint, operation) == true)
-            {
-                var nativeTiming = protection.RouteTiming(model, operation);
-                return new ObservedWorkload(new(operation, model.Context ?? ProviderLimits.MaxContext), null, null,
-                    Math.Clamp(model.Instance?.Slots ?? 1, 1, 256), GenerationTokensPerSecond: nativeTiming.GenerationTokensPerSecond,
-                    ProviderGenerationRate: nativeTiming.ProviderGenerationRate);
-            }
-            var budget = protection?.Estimate(model, endpoint, operation);
-            if (budget is null || protection?.IsAvailable(model, endpoint, operation, modeSwitch) != true)
-                return null;
-            var slots = protection.OverlapSlots(model, budget);
-            if (slots == 0)
-                return null;
+            if (protection?.IsAvailable(model, endpoint, operation) != true) return null;
             var timing = protection.RouteTiming(model, operation);
-            var qualified = protection.QualifiedUnits(model, endpoint, operation);
-            return new ObservedWorkload(budget.Workload with { Units = qualified ?? budget.Workload.Units },
-                timing.PromptMilliseconds, timing.CacheSavingsMilliseconds, slots, Qualified: qualified is not null,
+            var slots = Math.Clamp(model.Instance?.Slots ?? 1, 1, 128);
+            // Older ingresses compare this wire field against the requested workload.
+            var limit = new Workload(operation, operation is InferenceOperation.Chat or InferenceOperation.Embeddings or
+                InferenceOperation.SystemOne ? model.Context ?? ProviderLimits.MaxContext : ProviderLimits.MaxRequestBytes);
+            return new ObservedWorkload(limit, timing.PromptMilliseconds, timing.CacheSavingsMilliseconds, slots,
                 GenerationTokensPerSecond: timing.GenerationTokensPerSecond, ProviderGenerationRate: timing.ProviderGenerationRate);
         }).OfType<ObservedWorkload>().ToArray();
         return new(model.Id, DisplayName(model.Model.DisplayName), model.Model.Variant, model.Version, model.Model.Inputs,
@@ -552,14 +550,7 @@ internal sealed partial class PeerNetwork
         if (models.Length == 0)
             return [];
         var canonical = models[0].Model;
-        bool Fits(ObservedDeployment model, bool allowUnverifiedContext) => shape.Fits(model.Inputs, model.ClientTools,
-            model.StructuredOutput, model.Context, model.MediaTokensPerItem, model.EmbeddingEncodings,
-            allowUnverifiedContext);
-        var choices = models.Where(item => Fits(item.Model, allowUnverifiedContext: true) &&
-                (item.Model.Workloads is null || item.Model.Workloads.Any(work =>
-                    ResourceProtection.Covers(work.Limit, shape.Demand(item.Model.Context,
-                        !item.Model.Loaded && work.Qualified ? work.Limit.Units : null)))))
-            .ToArray();
+        var choices = models.Where(item => shape.Fits(item.Model.Inputs, item.Model.ClientTools, item.Model.StructuredOutput)).ToArray();
         var native = catalog.SelectMany(item => item.Model.ProviderIdentifiers ?? []).ToHashSet(StringComparer.Ordinal);
         var uniqueAliases = catalog.Where(item => item.Model.LocallyAvailable == true)
             .SelectMany(item => RoutingNames(item.Model, native).Select(identifier => (item.Node, Alias: identifier)))
@@ -589,7 +580,7 @@ internal sealed partial class PeerNetwork
     private Guid? Suggest(InferenceShape shape)
     {
         var here = Snapshot.Self?.Id ?? Guid.Empty;
-        return Candidates(shape).Where(item => item.Node != here && item.VerifiedFit).OrderBy(item => item.Scarcity)
+        return Candidates(shape).Where(item => item.Node != here && !item.Busy && !item.Displaces).OrderBy(item => item.Scarcity)
             .ThenByDescending(item => item.Loaded).FirstOrDefault()?.Node;
     }
 
@@ -598,14 +589,14 @@ internal sealed partial class PeerNetwork
         var current = Snapshot;
         var here = current.Self?.Id ?? Guid.Empty;
         var options = Candidates(probe.Shape).Where(item => item.Node != here).ToArray();
-        var uncertain = options.Length > 4 || options.Any(option => !option.VerifiedFit);
-        foreach (var option in options.Where(option => option.VerifiedFit).Take(4))
+        var uncertain = options.Length > 4;
+        foreach (var option in options.Take(4))
             if (current.Nodes.TryGetValue(option.Node, out var peer) && !peer.Removed)
             {
                 Interlocked.Increment(ref placementChecks);
                 var reply = await SendAsync<PlacementCheckReply>(current, peer, "inference/eligible",
                     new PlacementCheck(probe.Key, option.Deployment, probe.Shape), cancellation, refresh: true);
-                if (reply?.Body is { Eligible: true })
+                if (reply?.Body is { Eligible: true, Busy: not true, Displaces: not true })
                     return peer.Id;
                 uncertain |= reply?.Body is null;
             }

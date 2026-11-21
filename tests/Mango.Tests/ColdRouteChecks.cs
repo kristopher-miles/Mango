@@ -97,10 +97,6 @@ internal static class ColdRouteChecks
             catch (ProviderFailure error) when (error.Status == status) { return; }
             throw new InvalidOperationException("Expected cold route refusal " + status);
         }
-        await Reject(422);
-        Check(loads == 0 && calls == 0, "unqualified cold route keeps its ordinary rejection");
-        await resources.SaveBudgetAsync(new(model.Id, InferenceOperation.Chat, 262144, 1, 0,
-            64, 8192, null, null, false, 1, false), providers, default);
         refuseLoad = true;
         try
         {
@@ -149,8 +145,8 @@ internal static class ColdRouteChecks
         await providers.SetServingAsync(model.Id, true, default);
         pressure = true;
         resources.ApplyObservation(Sample());
-        await Reject(503);
-        Check(loads == 2 && calls == 3, "manual disable and ordinary host pressure still prevent cold dispatch");
+        await network.RouteAsync(InferenceOperation.Chat, Request(), deadline.Token);
+        Check(loads == 3 && calls == 4, "a sole cold load and inference reach the provider under tight headroom");
     }
 
     private static void Check(bool condition, string description)

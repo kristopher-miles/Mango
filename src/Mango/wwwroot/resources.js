@@ -11,7 +11,7 @@ function percent(value) { return value == null ? "unavailable" : `${value.toFixe
 function renderResourceProfile(model) {
   const profile = model.profile;
   document.querySelector("#measurement-controls").hidden = false;
-  document.querySelector("#resource-profile").textContent = [model.unsafe ? "An allocation failed. Correct the limits or explicitly retry before using this placement." : "",
+  document.querySelector("#resource-profile").textContent = [model.unsafe ? "The provider reported a memory allocation failure." : "",
     profile?.complete ? "Benchmark complete." : profile?.speed?.elapsed ? "Warm benchmark recorded." :
       profile?.measurements.length ? "Benchmark measurements are incomplete." : "No benchmark measurements.",
     profile?.error,
@@ -38,20 +38,14 @@ function renderResourceProfile(model) {
     pass.reusedCache == null ? "" : pass.reusedCache ? "Cache reused" : "Cache unused"].filter(Boolean).join(" · "))));
 }
 function budgetRecord(model, devices) {
-  const budget = model.budget;
-  const record = { units: budget?.workload.units ?? model.context ?? null, items: budget?.workload.items ?? 1, mediaItems: budget?.workload.mediaItems ?? 0,
-    loadRamMiB: budget ? Math.ceil(budget.load.ramBytes / mib) : null, executeRamMiB: budget ? Math.ceil(budget.execute.ramBytes / mib) : null,
-    allowAttached: budget?.allowAttached ?? false, allowOverlap: budget?.allowOverlap ?? false, parallelSlots: budget?.parallelSlots ?? 1, expectedRevision: model.budgetRevision, configuration: model.qualificationConfiguration };
-  for (const device of devices.filter(device => !device.integrated && device.totalBytes != null))
-    for (const stage of ["load", "execute"]) record[`${stage}:${device.id}`] = budget ? Math.ceil((budget[stage].deviceBytes[device.id] || 0) / mib) : null;
+  const override = model.loadOverride;
+  const record = { loadRamMiB: override?.ramBytes == null ? null : Math.ceil(override.ramBytes / mib),
+    expectedRevision: model.budgetRevision, configuration: model.qualificationConfiguration };
+  for (const device of devices.filter(device => !device.integrated && device.totalBytes != null)) {
+    const bytes = override?.deviceBytes?.[device.id];
+    record["load:" + device.id] = bytes == null ? null : Math.ceil(bytes / mib);
+  }
   return record;
-}
-function workloadLabels(operation) {
-  if (["chat", "embeddings", "systemOne"].includes(operation)) return ["Tokens per sequence", "Sequences per request"];
-  if (operation === "images") return ["Pixels per image", "Images per request"];
-  if (operation === "speech") return ["Input characters", "Items per request"];
-  if (operation === "transcription") return ["Input audio bytes", "Items per request"];
-  return ["Units per item", "Items per request"];
 }
 function renderQualification() {
   const local = localOwner(servingNode), models = (resourceView?.models || []).filter(item => item.id === servingModel);
@@ -66,15 +60,9 @@ function renderQualification() {
     document.querySelector("#qualification-title").textContent = item ? inventoryName(item) : "Model qualification";
     document.querySelector("#qualification-scope").textContent = item ? host + " · " + item.id : "Select a model to inspect its local limits.";
     const workloads = item?.observed?.workloads || [];
-    const lines = workloads.map(({ limit, slots }) => {
-      const units = workloadLabels(limit.operation);
-      return [operationNames[limit.operation], limit.units + " " + units[0].toLowerCase(), limit.items + " " + units[1].toLowerCase(),
-        limit.mediaItems + " inline media", slots == null ? "" : slots + " parallel slots"].filter(Boolean).join(" · ");
-    });
     const empty = document.querySelector("#qualification-empty");
-    empty.textContent = local ? item ? "Waiting for this model’s local limits." : "Select a model to view limits." :
-      (lines.length ? "Last reported workload limits" : "No workload limits reported") + " · Managed on " + host + ".";
-    for (const line of lines) empty.append(element("span", line, "remote-workload"));
+    empty.textContent = local ? "Select a model to view its load peaks." : "Load peaks are managed on " + host + ".";
+    for (const work of workloads) empty.append(element("span", operationNames[work.limit.operation] + " · " + work.slots + (work.slots === 1 ? " slot" : " slots"), "remote-workload"));
     document.querySelector("#measurement-title").textContent = item ? inventoryName(item) + " · " + host : "Benchmark measurements";
     document.querySelector("#resource-profile").textContent = item && !local ? "Detailed measurements are kept on " + host + "." : "No local measurement selected.";
     document.querySelector("#resource-passes").replaceChildren(...workloads.filter(work =>
@@ -95,11 +83,7 @@ function renderQualification() {
   selectOptions(resourceTarget, models.map(model => [resourceKey(model), operationNames[model.operation]]), resourceKey(selected));
   const key = resourceKey(selected), devices = resourceView.observation?.devices || [];
   document.querySelector("#qualification-title").textContent = item ? inventoryName(item) : selected.identifier;
-  document.querySelector("#qualification-scope").textContent = [selected.identifier, selected.budget?.estimated ? "Estimated limits" : "Local limits", host].join(" · ");
-  const [unitLabel, itemLabel] = workloadLabels(selected.operation);
-  document.querySelector("#resource-unit-label").textContent = unitLabel;
-  document.querySelector("#resource-item-label").textContent = itemLabel;
-  document.querySelector("#resource-attached").hidden = !selected.attached;
+  document.querySelector("#qualification-scope").textContent = [selected.identifier, host].join(" · ");
   const value = budgetRecord(selected, devices);
   const shape = `${key}:${devices.filter(d => !d.integrated && d.totalBytes != null).map(d => d.id).join(",")}`;
   if (qualificationKey !== shape) {
@@ -108,19 +92,15 @@ function renderQualification() {
     document.querySelector("#measure-feedback").textContent = "";
     resourceGpus.replaceChildren(...devices.filter(device => !device.integrated && device.totalBytes != null).map(device => {
       const row = element("tr"), heading = element("th", device.name + " VRAM"); heading.scope = "row"; row.append(heading);
-      for (const stage of ["load", "execute"]) {
-        const cell = element("td"), input = element("input");
-        Object.assign(input, { name: stage + ":" + device.id, type: "number", step: "1", min: 0, max: 1048576, required: true });
-        input.setAttribute("aria-label", device.name + (stage === "load" ? " load" : " additional execution") + " VRAM peak in MiB");
-        cell.append(input); row.append(cell);
-      }
+      const cell = element("td"), input = element("input");
+      Object.assign(input, { name: "load:" + device.id, type: "number", step: "1", min: 0, max: 1048576 });
+      input.setAttribute("aria-label", device.name + " load peak in MiB");
+      cell.append(input); row.append(cell);
       return row;
     }));
     delete resourceFeedback.dataset.feedback;
   }
   budgetWriter = recordWriter(`budget:${key}`, { value, reviewKeys: ["configuration"], label: `${selected.identifier} · ${operationNames[selected.operation]} limits`, page: `serving/${servingNode}/${servingProvider}?model=${selected.id}&operation=${selected.operation}`,
-    validate: values => Object.entries(values).some(([name, value]) => (name.includes(":") || ["units", "items", "mediaItems", "loadRamMiB", "executeRamMiB", "parallelSlots"].includes(name)) && value == null)
-      ? "Complete all workload and memory limits before qualification takes effect." : null,
     read: async () => {
       const current = await api("resources"), model = current.models.find(item => resourceKey(item) === key);
       if (!model) throw new Error("This deployment is no longer available."); return budgetRecord(model, current.observation?.devices || []);
@@ -128,25 +108,23 @@ function renderQualification() {
     write: async ({ changes, baseline }) => {
       const next = { ...baseline, ...changes };
       const payload = { deployment: selected.id, operation: selected.operation, expectedRevision: baseline.expectedRevision,
-        allowAttached: next.allowAttached, allowOverlap: next.allowOverlap, parallelSlots: next.allowOverlap ? next.parallelSlots : 1 };
-      for (const name of ["units", "items", "mediaItems", "loadRamMiB", "executeRamMiB"]) payload[name] = next[name];
-      for (const stage of ["load", "execute"]) payload[`${stage}VramMiB`] = Object.fromEntries(devices.filter(device => !device.integrated && device.totalBytes != null).map(device => [device.id, next[`${stage}:${device.id}`]]));
+        loadOnly: true, loadRamMiB: next.loadRamMiB,
+        loadVramMiB: Object.fromEntries(devices.filter(device => next["load:" + device.id] != null)
+          .map(device => [device.id, next["load:" + device.id]])) };
       await api("resources/budget", payload);
       const current = await api("resources"); resourceView = current;
       const model = current.models.find(item => resourceKey(item) === key); return budgetRecord(model, current.observation?.devices || []);
     }, changed: writer => {
       if (qualificationKey !== shape) return;
-      resourceForm.elements.parallelSlots.disabled = !writer.value.allowOverlap;
       resourceForm.classList.toggle("incomplete", writer.state.kind === "incomplete");
     }
   });
   resourceForm.classList.toggle("incomplete", budgetWriter.state.kind === "incomplete");
   bindPreferences(budgetWriter, resourceForm, resourceFeedback, { exclude: ["target"] });
   if (!selected.budget && !budgetWriter.pending && budgetWriter.state.kind === "current") {
-    resourceFeedback.textContent = "Waiting for Windows device observations before estimating limits.";
+    resourceFeedback.textContent = "Waiting for device observations.";
     delete resourceFeedback.dataset.feedback;
   }
-  resourceForm.elements.parallelSlots.disabled = !budgetWriter.value.allowOverlap;
   renderResourceProfile(selected);
 }
 function drawResources() {
@@ -234,7 +212,7 @@ async function loadResources() {
     document.querySelector("#resource-observation").textContent = reading ? [`Free RAM ${bytes(reading.freeRam)}`, `External CPU ${percent(reading.externalCpu)}`, `External GPU ${percent(reading.externalGpu)}`,
       ...reading.devices.map(device => device.integrated ? `${device.name} uses shared RAM` : `${device.name}: ${bytes(device.usedBytes)} of ${bytes(device.totalBytes)}`), reading.limitation, resourceView.recoveryWarning].filter(Boolean).join(" · ") : "Waiting for Windows observations.";
     document.querySelector("#resource-benchmark").textContent = resourceView.benchmark ? `${resourceView.forced ? "Forced benchmark" : "Benchmark"} · ${resourceView.benchmark.pass}` :
-      resourceView.forcedBenchmarkError || (view?.settings.benchmarkPolicy === "now" && !resourceView.benchmarkReady ? "Complete local benchmarks are required before serving." : "No benchmark is running.");
+      resourceView.forcedBenchmarkError || "No benchmark is running.";
     document.querySelector("#resource-benchmark-missing").disabled = !resourceView.missingBenchmarks || resourceView.forced;
     drawResources();
     if (catalogView) renderServingModels();

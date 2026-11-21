@@ -91,8 +91,8 @@ internal static class ProviderChecks
             var execution = await request.ForwardAsync(chat, adapter, context, default);
             Check(emitted && ReadBody(context) == Stream && context.Response.ContentType!.StartsWith("text/event-stream"),
                 "exact SSE forwarding");
-            Check(execution.PromptTokens == 10 && execution.PromptCountSource == "provider" && execution.FirstOutput.HasValue,
-                "provider token and first output timing recorded");
+            Check(execution.PromptTokens is null && execution.FirstOutput.HasValue,
+                "timing retained without a speculative token count");
             Check(!context.Response.Headers.ContainsKey("Set-Cookie"), "upstream credential headers are excluded");
         }
 
@@ -103,7 +103,7 @@ internal static class ProviderChecks
             Context("""{"model":"test","input":"Hello","provider_id":"external"}""").Request, default));
         await RejectTranscriptionFieldAsync("prompt", "This field would be ignored by the provider.");
         await RejectTranscriptionFieldAsync("provider_id", "external");
-        await Fails(422, () => Run(InferenceOperation.Chat, ChatBody.Replace("25", "2050"), chat, adapter));
+        await Run(InferenceOperation.Chat, ChatBody.Replace("\"max_tokens\":25", "\"max_tokens\":2050"), chat with { Options = chat.Options with { ServedContext = null } }, adapter);
         await Fails(422, () => Run(InferenceOperation.Chat, """
             {"model":"test","messages":[{"role":"user","content":[{"type":"image_url",
               "image_url":{"url":"http://127.0.0.1/private"}}]}]}
@@ -193,7 +193,7 @@ internal static class ProviderChecks
             deployment = deployment with { Model = deployment.Model with { Inputs = ["image", "text"],
                 ReportedMediaTokensPerItem = 1024, Instances = (await adapter.InspectAsync(default)).Models.Single().Instances } };
             var timing = await peer.ForwardAsync(deployment, adapter, servingContext, default);
-            Check(calls == 1 && (operation != InferenceOperation.Chat || timing.PromptTokens < 10240),
+            Check(calls == 1 && (operation != InferenceOperation.Chat || timing.PromptTokens is null),
                 "otherwise admissible opaque request reaches provider without a tokenizer preflight");
         }
         var oversized = Context("{}");
@@ -394,15 +394,13 @@ internal static class ProviderChecks
         var boundedMedia = new Deployment(endpoint.Id, model, new(null, [], null, null, null, null, 0), true, false, null);
         Check(boundedMedia.MediaTokensPerItem == 1024 && new InferenceShape("sample", InferenceOperation.Chat,
             ["text", "image"], false, false, 49, 8192, 1, 1, 1, null, null)
-            .Fits(model.Inputs, model.ClientTools, model.StructuredOutput, boundedMedia.Context,
-                boundedMedia.MediaTokensPerItem, model.EmbeddingEncodings),
-            "reported enforced media token allowance enables one-image context admission without a configured override");
+            .Fits(model.Inputs, model.ClientTools, model.StructuredOutput),
+            "reported image input is eligible without a configured override");
         Check((boundedMedia with { Options = boundedMedia.Options with { MediaTokensPerItem = 2048 } }).MediaTokensPerItem == 2048,
             "a larger configured conservative media allowance remains effective");
         var fiveImages = new InferenceShape("sample", InferenceOperation.Chat, ["text", "image"],
             false, false, 49, 8192, 5, 1, 1, null, null);
-        Check(fiveImages.Fits(model.Inputs, model.ClientTools, model.StructuredOutput, boundedMedia.Context,
-            boundedMedia.MediaTokensPerItem, model.EmbeddingEncodings) &&
+        Check(fiveImages.Fits(model.Inputs, model.ClientTools, model.StructuredOutput) &&
             Mango.Resources.ResourceProtection.Covers(new(InferenceOperation.Chat, 262144, 1, 1), fiveImages.Demand(262144)) &&
             Mango.Resources.ResourceProtection.Covers(new(InferenceOperation.Chat, 262144, 1, 5), fiveImages.Demand(262144)),
             "media evidence count does not impose a provider input cap");
@@ -589,7 +587,7 @@ internal static class ProviderChecks
         var batch = Context("""{"model":"test","input":["first","second"]}""");
         using (var request = await InferenceRequest.ReadAsync(InferenceOperation.Embeddings, batch.Request, default))
         {
-            Check(unreported.Eligible && request.Shape.Fits(["text"], false, false, unreported.Context, null, ["float"]),
+            Check(unreported.Eligible && request.Shape.Fits(["text"], false, false),
                 "an enabled embedding model with a served context needs no reported vector length");
             await request.ForwardAsync(unreported, adapter, batch, default);
             Check(ReadBody(batch) == output, "an embedding batch with unreported dimensions is returned unchanged");

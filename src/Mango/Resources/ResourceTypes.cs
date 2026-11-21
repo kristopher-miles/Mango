@@ -23,8 +23,9 @@ internal sealed record MemoryCost(long RamBytes, Dictionary<string, long> Device
 // A text unit is one token in one sequence. Images use total pixels, audio uses bytes or input characters.
 internal readonly record struct Workload(InferenceOperation Operation, long Units, int Items = 1, int MediaItems = 0,
     int? Width = null, int? Height = null);
+internal sealed record LoadPeak(long? RamBytes, Dictionary<string, long> DeviceBytes);
 internal sealed record ResourceBudget(string Deployment, string Configuration, string? Runtime, Workload Workload,
-    MemoryCost Load, MemoryCost Execute, bool AllowOverlap, int ParallelSlots = 1, bool AllowAttached = false, bool Estimated = false);
+    MemoryCost Load, MemoryCost Execute, bool AllowOverlap, int ParallelSlots = 1, bool AllowAttached = false, bool Estimated = false, LoadPeak? LoadOverride = null);
 internal sealed record PendingRelease(Guid Endpoint, string Deployment, int[] OwnedProcesses, bool Loading = false);
 internal sealed record ResourceHold(ContributionState State, string Reason, PendingRelease[]? Pending = null,
     WithdrawalCause Cause = WithdrawalCause.Safety);
@@ -33,7 +34,7 @@ internal sealed record ResourceEvent(DateTimeOffset At, string Reason, bool Load
 
 internal sealed record BenchmarkMeasurement(Workload Workload, string Pass, int? PromptTokens, int? OutputTokens,
     TimeSpan Elapsed, TimeSpan? FirstToken, double? PromptMilliseconds, double? TokensPerSecond, bool? ReusedCache,
-    MemoryCost? ObservedIncrement, long? WorkerPeakRamBytes, int Samples, int? CachedTokens = null);
+    MemoryCost? ObservedIncrement, long? WorkerPeakRamBytes, int Samples, int? CachedTokens = null, MemoryCost? SettledIncrement = null, string? LoadIdentity = null);
 internal sealed record BenchmarkProfile(string Deployment, string Configuration, string Runtime, InferenceOperation Operation,
     DateTimeOffset Updated, BenchmarkMeasurement[] Measurements, bool Complete, string? Error, BenchmarkSpeed? Speed = null);
 internal sealed record BenchmarkSpeed(DateTimeOffset At, double? TokensPerSecond, string? Error,

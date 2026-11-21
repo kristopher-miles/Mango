@@ -382,7 +382,7 @@ function renderModelCard(item) {
       const capacity = action("Provider-managed capacity (YOLO)", event => providerAction(event.currentTarget,
         "Updating provider capacity policy…",
         () => api(`providers/models/${item.id}/yolo`, { enabled: !yolo, revision: item.local.options.revision }),
-        yolo ? "Mango resource protection restored." : "YOLO enabled: native provider owns capacity."));
+        yolo ? "Checked co-residency enabled." : "YOLO enabled: native provider owns capacity."));
       capacity.setAttribute("aria-pressed", String(yolo));
       capacity.title = "YOLO uses native provider capacity checks alongside other YOLO models. Mango swaps idle models when demand changes resource mode.";
       if (!endpoint.exclusiveHost) actions.append(capacity);

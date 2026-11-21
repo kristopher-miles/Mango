@@ -153,7 +153,7 @@ internal abstract class ProviderAdapter(HttpClient http, ProviderEndpoint endpoi
             if (IsAllocationFailure(message))
                 throw new ProviderFailure(503, "The provider could not allocate model memory.", allocationFailure: true);
             if (chat && (int)response.StatusCode is 400 or 422 && IsContextFailure(message))
-                throw new ProviderFailure(422, "The input plus reserved output does not fit the deployment's served context.");
+                throw new ProviderFailure(422, "The provider rejected the request because it exceeds its context limit.");
         }
         RequireSuccess(response);
     }

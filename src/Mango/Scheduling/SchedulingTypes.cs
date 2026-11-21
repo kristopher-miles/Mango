@@ -7,7 +7,7 @@ internal enum AttemptState { Waiting, Running, Rejected, Stopped, Failed, Uncert
 
 internal sealed record AttemptReply(AttemptState State, int Status = 503, string? Reason = null,
     string? Epoch = null, Guid? SuggestedNode = null, ProviderExecution? Timing = null, bool Unreachable = false,
-    double? QueueMilliseconds = null, double? LoadMilliseconds = null)
+    double? QueueMilliseconds = null, double? LoadMilliseconds = null, bool Deferred = false)
 {
     public bool Retryable => State is AttemptState.Rejected or AttemptState.Stopped or AttemptState.Failed &&
         (Status is 409 or 422 || Status >= 500);

@@ -48,6 +48,21 @@ internal static class TelemetryPolicyChecks
             if (held.Status.State != ContributionState.Fault || held.ServingAllowed)
                 failures.Add("Unavailable observation cleared a persisted hard hold.");
         }
+        foreach (var hasPending in new[] { false, true })
+        {
+            var oldDirectory = Directory.CreateDirectory(Path.Combine(root, "legacy-pressure-" + hasPending)).FullName;
+            PendingRelease[] pending = hasPending ? [new(Guid.NewGuid(), new string('a', 64), [], Loading: true)] : [];
+            await new SnapshotFile<ResourceData>(Path.Combine(oldDirectory, "resources.json"), _ => null)
+                .LoadAsync(ResourceData.Empty with { Hold = new(ContributionState.Fault, "Dedicated memory pressure on fixture.", pending) });
+            using var migrated = new ResourceProtection(oldDirectory, settings, (_, _) => Sample(0), clock: clock);
+            await migrated.InitializeAsync();
+            if (hasPending ? migrated.Status.State != ContributionState.Withdrawing : !migrated.ServingAllowed)
+                failures.Add("Legacy pressure migration lost the distinction between a memory hold and unfinished work.");
+            var disk = new SnapshotFile<ResourceData>(Path.Combine(oldDirectory, "resources.json"), _ => null);
+            await disk.LoadAsync(ResourceData.Empty);
+            if (hasPending ? disk.Value.Hold?.Pending?.Single().Loading != true : disk.Value.Hold is not null)
+                failures.Add("Legacy pressure migration did not persist the expected release fence.");
+        }
         var manualDirectory = Directory.CreateDirectory(Path.Combine(root, "telemetry-manual-hold")).FullName;
         var manualSettings = new SnapshotFile<LocalSettings>(Path.Combine(manualDirectory, "local-settings.json"), LocalSettings.Validate);
         await manualSettings.LoadAsync(new LocalSettings { Role = LocalRole.Leech });

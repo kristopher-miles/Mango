@@ -97,14 +97,14 @@ internal sealed partial class PeerNetwork
             return new(false);
         using var lease = AcquireLease(check.Key ?? Guid.Empty, null, check.Shape.Operation, out _, forwarded: true);
         return lease is null || !AllowsMedia(lease.Access, check.Shape) ? new(false) :
-            LocalPlacementState(check.Shape, check.Deployment, check.Routing);
+            LocalPlacementState(check.Shape, check.Deployment);
     }
 
-    private PlacementCheckReply LocalPlacementState(InferenceShape shape, string deployment, bool routing)
+    private PlacementCheckReply LocalPlacementState(InferenceShape shape, string deployment)
     {
-        if (serving.Draining || providers.Placement(shape, deployment, allowUnverifiedContext: routing) is not { } placement)
+        if (serving.Draining || providers.Placement(shape, deployment) is not { } placement)
             return new(false);
-        return new(true, placement.Model.Busy || placement.Model.Instance?.Busy == true || serving.HasConflictingWork(placement),
+        return new(true, providers.Resources?.BenchmarkOccupiesSlot == true || placement.Model.Busy || placement.Model.Instance?.Busy == true || serving.HasConflictingWork(placement),
             providers.WouldDisplace(placement));
     }
 

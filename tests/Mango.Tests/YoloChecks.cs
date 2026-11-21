@@ -2,6 +2,7 @@ using System.Net;
 using System.Text;
 using System.Text.Json;
 using Mango.Host;
+using Mango.Peers;
 using Mango.Providers;
 using Mango.Resources;
 using Microsoft.AspNetCore.Builder;
@@ -23,8 +24,12 @@ internal static class YoloChecks
     private static async Task HostAsync(string directory, ProviderProfile profile)
     {
         Directory.CreateDirectory(directory);
-        var loaded = new Dictionary<string, bool> { ["native-model"] = false, ["ordinary-model"] = true };
+        var loaded = new System.Collections.Concurrent.ConcurrentDictionary<string, bool> { ["native-model"] = false, ["ordinary-model"] = true, ["second-native"] = false };
         var loads = 0;
+        var activeA = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var activeB = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseA = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseB = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var pressure = false;
         var pressureFromNative = false;
         var nativeKind = "llm";
@@ -35,7 +40,7 @@ internal static class YoloChecks
         builder.Logging.ClearProviders();
         builder.WebHost.ConfigureKestrel(server => server.Listen(IPAddress.Loopback, 0));
         await using var fixture = builder.Build();
-        fixture.MapGet("/api/v1/models", () => new { version = "fixture", max_loaded_models = 1, models = loaded.Select(item => new
+        fixture.MapGet("/api/v1/models", () => new { version = "fixture", max_loaded_models = 2, models = loaded.Select(item => new
         {
             key = item.Key, type = item.Key == "native-model" ? nativeKind : "llm", max_context_length = 8192, size_bytes = 64 * 1024 * 1024,
             loaded_instances = item.Value ? new[] { new { id = item.Key + "-instance", config = new { context_length = 1024, parallel = 2 } } } : []
@@ -66,6 +71,14 @@ internal static class YoloChecks
             {
                 context.Response.ContentType = "text/event-stream";
                 await context.Response.WriteAsync("data: {\"timings\":{\"predicted_per_second\":25}}\n\ndata: [DONE]\n\n");
+                return;
+            }
+            if (body.RootElement.TryGetProperty("hold", out var gate) && gate.ValueKind == JsonValueKind.String)
+            {
+                var first = gate.GetString() == "A";
+                (first ? activeA : activeB).TrySetResult();
+                await (first ? releaseA : releaseB).Task.WaitAsync(context.RequestAborted);
+                await context.Response.WriteAsJsonAsync(new { served = gate.GetString() });
                 return;
             }
             if (body.RootElement.GetProperty("model").GetString() == "ordinary-model-instance")
@@ -107,6 +120,8 @@ internal static class YoloChecks
             throw new InvalidOperationException("Stale policy update accepted");
         }
         catch (ProviderFailure error) when (error.Status == 409) { }
+        var secondModel = providers.View.Models.Single(item => item.Model.NativeId == "second-native");
+        await providers.SetYoloAsync(secondModel.Id, new(true, secondModel.Options.Revision), default);
         var ordinary = providers.View.Models.Single(item => !item.Yolo);
         await providers.EditAsync(new(ordinary.Id, null, [], 1024, null, null, null, ordinary.Options.Revision), default);
         await settings.UpdateAsync(value => value with { BenchmarkPolicy = BenchmarkPolicy.Never });
@@ -117,12 +132,36 @@ internal static class YoloChecks
 
         using var protectedRequest = await ReadRequestAsync("ordinary-model");
         using var nativeRequest = await ReadRequestAsync("native-model");
+        await using var network = new PeerNetwork(directory, 0, providers, settings);
+        await network.InitializeAsync();
+        async Task Route(string name, string? hold = null)
+        {
+            var context = new DefaultHttpContext();
+            context.Items[typeof(InferenceAccess)] = new InferenceAccess(null, null, [], KeyPriority.Normal, default);
+            context.Request.ContentType = "application/json";
+            context.Request.Body = new MemoryStream(JsonSerializer.SerializeToUtf8Bytes(new
+            { model = name, hold, messages = new[] { new { role = "user", content = "synthetic" } } }));
+            context.Response.Body = new MemoryStream();
+            await network.RouteAsync(InferenceOperation.Chat, context, swapDeadline.Token);
+        }
+        var firstRequest = Route("native-model", "A");
+        await activeA.Task.WaitAsync(swapDeadline.Token);
+        var secondRequest = Route("second-native", "B");
+        await activeB.Task.WaitAsync(swapDeadline.Token);
+        Check(!firstRequest.IsCompleted && loaded["native-model"] && loaded["second-native"],
+            "a cold YOLO model starts and generates alongside running YOLO work");
+        releaseA.SetResult();
+        await firstRequest;
         var nativeWork = providers.TryStart(nativeRequest, Model().Id).Execute!;
         var protectedPlacement = providers.Placement(protectedRequest.Shape, ordinary.Id)!;
         var displaced = new List<string>();
         Task Record(string id) { displaced.Add(id); return Task.CompletedTask; }
         await WaitForOtherModeAsync(() => providers.PreparePlacementAsync(protectedPlacement, Record, swapDeadline.Token));
         await FinishAsync(nativeWork);
+        await WaitForOtherModeAsync(() => providers.PreparePlacementAsync(protectedPlacement, Record, swapDeadline.Token));
+        Check(loaded["native-model"] && loaded["second-native"], "group eviction waits for the last active YOLO request");
+        releaseB.SetResult();
+        await secondRequest;
 
         pressureFromNative = pressure = true;
         resources.ApplyObservation(Sample());
@@ -132,11 +171,11 @@ internal static class YoloChecks
             resources.ApplyObservation(Sample());
             await Task.Delay(20, swapDeadline.Token);
         }
-        Check(resources.Status.State == ContributionState.Fault &&
+        Check(resources.Status.State == ContributionState.Contributor &&
             providers.Placement(protectedRequest.Shape, ordinary.Id) is not null,
-            "a cold protected request can prepare a swap through a memory-only hold");
+            "memory pressure cannot block an authorized swap");
         await ObserveWhileAsync(providers.PreparePlacementAsync(protectedPlacement, Record, swapDeadline.Token));
-        Check(displaced.SequenceEqual([Model().Id]) && !loaded["native-model"] && loaded["ordinary-model"] &&
+        Check(displaced.ToHashSet().SetEquals([Model().Id, secondModel.Id]) && !loaded["native-model"] && loaded["ordinary-model"] &&
             resources.Status.State == ContributionState.Contributor,
             "protected preparation unloads YOLO, samples recovered capacity, and loads the protected model");
         pressureFromNative = false;
@@ -147,7 +186,7 @@ internal static class YoloChecks
         await FinishAsync(protectedWork);
         Check(!loaded["native-model"], "an evicted model stays unloaded until its next request can run");
         await ObserveWhileAsync(providers.PreparePlacementAsync(nativePlacement, Record, swapDeadline.Token));
-        Check(displaced.SequenceEqual([Model().Id, ordinary.Id]) && loads == 2 &&
+        Check(displaced.Take(2).ToHashSet().SetEquals([Model().Id, secondModel.Id]) && displaced.Last() == ordinary.Id && !loaded["second-native"] && loads == 2 &&
             loaded["native-model"] && !loaded["ordinary-model"], "a later YOLO request restores its model after protected work settles");
 
         loaded["ordinary-model"] = true;
@@ -177,8 +216,8 @@ internal static class YoloChecks
         pressure = true;
         resources.ApplyObservation(Sample());
         Check(!lease.Cancellation.IsCancellationRequested && resources.IsAvailable(model, endpoint) &&
-            !resources.IsAvailable(providers.View.Models.Single(item => !item.Yolo), endpoint),
-            "automatic hard pressure preserves only opted-in models and their work");
+            resources.IsAvailable(providers.View.Models.Single(item => !item.Yolo), endpoint),
+            "memory pressure and missing profiles permit both modes to serve");
         lease.Complete(); lease.Dispose();
         await providers.EditAsync(new(Model().Id, "renamed", [], 4096, null, null, null, Model().Options.Revision), default);
         Check(Model().Yolo, "ordinary model edits preserve the independent local opt-in");
@@ -213,8 +252,8 @@ internal static class YoloChecks
             resources.ApplyObservation(Sample());
             await Task.Delay(20, deadline.Token);
         }
-        Check(resources.Status is { State: ContributionState.Fault, Reason: "Dedicated memory pressure on fixture." },
-            "resident YOLO leaves the normal dedicated-memory protection fault in place");
+        Check(resources.Status.State == ContributionState.Contributor,
+            "a resident YOLO model does not trigger withdrawal through memory pressure");
         foreach (var kind in new[] { "llm", "embedding", "decision" })
         {
             nativeKind = kind;

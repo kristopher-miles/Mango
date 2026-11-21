@@ -24,21 +24,12 @@ internal sealed record InferenceShape(string Alias, InferenceOperation Operation
     bool Structured, long PromptUnits, int OutputUnits, int MediaItems, int Items, long WorkUnits,
     int? Dimensions, string? Encoding, bool CanCountPrompt = false)
 {
-    public Workload Demand(int? context, long? qualifiedUnits = null) => new(Operation,
+    public Workload Demand(int? context) => new(Operation,
         Operation is InferenceOperation.Chat or InferenceOperation.Embeddings or InferenceOperation.SystemOne
-            ? context ?? qualifiedUnits ?? ProviderLimits.MaxContext : WorkUnits, Items, MediaItems);
+            ? context ?? ProviderLimits.MaxContext : WorkUnits, Items, MediaItems);
 
-    public bool Fits(string[] inputs, bool tools, bool structured, int? context, int? mediaTokens,
-        string[]? encodings, bool allowUnverifiedContext = false)
-    {
-        if (!Inputs.All(inputs.Contains) || Tools && !tools || Structured && !structured)
-            return false;
-        if (Operation is not (InferenceOperation.Chat or InferenceOperation.Embeddings or InferenceOperation.SystemOne))
-            return true;
-        // Context and memory are reserved on the serving host. Estimated prompt
-        // syntax/length is not a public routing veto; the provider validates input.
-        return allowUnverifiedContext || context is > 0 && (MediaItems == 0 || mediaTokens is > 0);
-    }
+    public bool Fits(string[] inputs, bool tools, bool structured) =>
+        Inputs.All(inputs.Contains) && (!Tools || tools) && (!Structured || structured);
 
     public bool FitsEstimatedContext(long? context, int? mediaTokens)
     {
@@ -59,7 +50,6 @@ internal sealed record InferenceShape(string Alias, InferenceOperation Operation
 internal sealed class InferenceRequest(InferenceOperation operation, string alias, JsonObject? json, IFormCollection? form)
     : IDisposable
 {
-    private const int DefaultMaxOutput = 1024;
     private const int MaxBatch = 128;
     private const int MaxImagePixels = 4096 * 4096;
     private const int MaxSpeechCharacters = 4096;
@@ -273,21 +263,14 @@ internal sealed class InferenceRequest(InferenceOperation operation, string alia
             payload["model"] = instance.Id;
             try
             {
-                if (!deployment.Yolo) switch (operation)
+                if (!Shape.Fits(deployment.Model.Inputs, deployment.Model.ClientTools, deployment.Model.StructuredOutput))
+                    throw new ProviderFailure(422, "This deployment does not support the requested inputs or features.");
+                if (!deployment.Yolo)
                 {
-                    case InferenceOperation.Chat:
-                        (promptTokens, promptCountSource) = await PrepareChatAsync(payload, deployment, adapter, cancellation);
-                        break;
-                    case InferenceOperation.Embeddings:
-                        (promptTokens, promptCountSource, embeddingEncoding, embeddingCount) =
-                            await PrepareEmbeddingsAsync(payload, deployment, adapter, instance.Id, cancellation);
-                        break;
-                    case InferenceOperation.SystemOne:
-                        (promptTokens, promptCountSource) = CheckDecision(deployment);
-                        break;
-                }
-                if (!deployment.Yolo && operation != InferenceOperation.Chat)
                     adapter.Prepare(operation, payload);
+                    if (operation == InferenceOperation.Embeddings)
+                        (promptTokens, promptCountSource, embeddingEncoding, embeddingCount) = PrepareEmbeddings(payload);
+                }
             }
             catch (ArgumentException)
             {
@@ -526,7 +509,13 @@ internal sealed class InferenceRequest(InferenceOperation operation, string alia
             foreach (var part in parts)
             {
                 var kind = part is JsonObject item ? String(item["type"]) : null;
-                if (kind is "image_url" or "input_image") { inputs.Add("image"); media++; }
+                if (kind is "image_url" or "input_image")
+                {
+                    var url = part!["image_url"];
+                    RequireInlineMedia(String(url is JsonObject image ? image["url"] : url), "image");
+                    inputs.Add("image");
+                    media++;
+                }
                 else if (kind is "input_audio") { inputs.Add("audio"); media++; }
                 else prompt += part is JsonObject text && String(text["type"]) == "text" ? Size(text["text"]) + 8 : Size(part);
             }
@@ -538,43 +527,13 @@ internal sealed class InferenceRequest(InferenceOperation operation, string alia
             media, OptionalPositive(payload["n"]) ?? 1, 1, null, null, CanCountPrompt: media == 0);
     }
 
-    public long EstimatedChatContext(Deployment deployment) => Shape.PromptUnits + OutputReserve(RequireContext(deployment)) +
-        MediaBudget(Shape.MediaItems, deployment);
-
-    private int OutputReserve(int context) => Shape.OutputUnits != 0 ? Shape.OutputUnits :
-        Math.Min(DefaultMaxOutput, Math.Max(1, context / 4));
-
-    private async Task<(int, string)> PrepareChatAsync(JsonObject payload, Deployment deployment,
-        ProviderAdapter adapter, CancellationToken cancellation)
-    {
-        var limit = RequireContext(deployment);
-        if (Shape.Tools && !deployment.Model.ClientTools)
-            throw new ProviderFailure(422, "Client-executed function tools are unavailable on this deployment.");
-        if (Shape.Structured && !deployment.Model.StructuredOutput)
-            throw new ProviderFailure(422, "Structured chat output is unavailable on this deployment.");
-        if (!Shape.Inputs.All(deployment.Model.Inputs.Contains))
-            throw new ProviderFailure(422, "This deployment does not support the requested chat inputs.");
-        if (adapter.TransparentInference)
-            return ((int)Math.Min(int.MaxValue, Shape.PromptUnits + MediaBudget(Shape.MediaItems, deployment)), "routing estimate");
-        var reserved = OutputReserve(limit);
-        if (reserved >= limit)
-            throw new ProviderFailure(422, "The reserved output tokens exceed the deployment's usable context.");
-        adapter.Prepare(InferenceOperation.Chat, payload);
-        var reported = Shape.MediaItems == 0 ? await adapter.CountChatAsync(payload, cancellation) : null;
-        var estimate = Shape.PromptUnits + MediaBudget(Shape.MediaItems, deployment);
-        if (reported is null && adapter.ValidatesChatContext)
-            return ((int)Math.Min(int.MaxValue, estimate), "routing estimate");
-        return CheckFit(reported, estimate, reserved, limit);
-    }
-
-    private static Task<(int, string, string?, int)> PrepareEmbeddingsAsync(JsonObject payload, Deployment deployment,
-        ProviderAdapter adapter, string nativeId, CancellationToken cancellation)
+    private static (int, string, string?, int) PrepareEmbeddings(JsonObject payload)
     {
         var encoding = String(payload["encoding_format"]) ?? "float";
         var rows = EmbeddingRows(payload);
         var largest = rows.Max(row => (int)Math.Min(int.MaxValue, Size(row) + 32));
-        return Task.FromResult<(int, string, string?, int)>((largest, "routing estimate",
-            encoding is "float" or "base64" ? encoding : null, rows.Length));
+        return (largest, "routing estimate",
+            encoding is "float" or "base64" ? encoding : null, rows.Length);
     }
 
     private static JsonNode[] EmbeddingRows(JsonObject payload)
@@ -661,13 +620,6 @@ internal sealed class InferenceRequest(InferenceOperation operation, string alia
             throw new ProviderFailure(400, "Choose a provider voice name.");
     }
 
-    private (int, string) CheckDecision(Deployment deployment)
-    {
-        if (!Shape.Inputs.All(deployment.Model.Inputs.Contains))
-            throw new ProviderFailure(422, "This deployment does not support the requested decision inputs.");
-        return ((int)Math.Min(int.MaxValue, Shape.PromptUnits + MediaBudget(Shape.MediaItems, deployment)), "routing estimate");
-    }
-
     private static InferenceShape DecisionShape(JsonObject payload, string alias)
     {
         var media = 0;
@@ -688,21 +640,6 @@ internal sealed class InferenceRequest(InferenceOperation operation, string alia
             value.IndexOf(";base64,", StringComparison.OrdinalIgnoreCase) is < 1 or > 80)
             throw new ProviderFailure(422, "Use inline base64 media supported by the selected deployment.");
     }
-
-    private static long MediaBudget(int count, Deployment deployment) => count == 0 ? 0
-        : (long)count * (deployment.MediaTokensPerItem ??
-            throw new ProviderFailure(422, "Configure a conservative per-item media token limit for this deployment."));
-
-    private static (int, string) CheckFit(int? reported, long estimate, int reserved, int context)
-    {
-        var count = reported ?? estimate;
-        if (count + reserved > context)
-            throw new ProviderFailure(422, "The input plus reserved output does not fit the deployment's served context.");
-        return ((int)count, reported.HasValue ? "provider" : "conservative estimate");
-    }
-
-    private static int RequireContext(Deployment deployment) => deployment.Context ??
-        throw new ProviderFailure(422, "Configure the deployment's served context before using this operation.");
 
     private static long Size(JsonNode? node) => node is null ? 0
         : Encoding.UTF8.GetByteCount(String(node) ?? node.ToJsonString());

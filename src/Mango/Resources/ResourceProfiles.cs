@@ -6,14 +6,13 @@ namespace Mango.Resources;
 
 internal sealed record BudgetUpdate(string Deployment, InferenceOperation Operation, long Units, int Items, int MediaItems,
     long? LoadRamMiB, long? ExecuteRamMiB, Dictionary<string, long>? LoadVramMiB, Dictionary<string, long>? ExecuteVramMiB,
-    bool AllowOverlap, int ParallelSlots, bool AllowAttached, string? ExpectedRevision = null);
+    bool AllowOverlap, int ParallelSlots, bool AllowAttached, string? ExpectedRevision = null, bool LoadOnly = false);
 
 internal sealed partial class ResourceProtection
 {
     private bool benchmarksReady;
     private string? benchmarkDeployment;
     private string? benchmarkPass;
-    private bool nativeBenchmark;
     private const string MissingColdAllowance = "A peak memory allowance is required for the cold load benchmark.";
     private const string MissingGenerationRate = "The provider did not expose a reliable generation rate.";
     private sealed record ForcedBenchmark(string Deployment, InferenceOperation Operation, bool SampleOnly, DateTimeOffset RequestedAt);
@@ -31,6 +30,11 @@ internal sealed partial class ResourceProtection
         get { lock (sync) return requestedBenchmark is not null || runningForcedBenchmark || missingBenchmarks.Count != 0; }
     }
 
+    internal bool BenchmarkOccupiesSlot
+    {
+        get { lock (sync) return benchmark is { IsCompleted: false } || ForcedBenchmarkHoldsServing; }
+    }
+
     internal bool ForcedBenchmarkDisplacesWork
     {
         get { lock (sync) return ForcedBenchmarkHoldsServing && !preparingForcedBenchmark; }
@@ -42,7 +46,7 @@ internal sealed partial class ResourceProtection
         {
             lock (sync)
                 return status.State == ContributionState.Contributor && settings.Value.Role == LocalRole.Contributor &&
-                    (settings.Value.BenchmarkPolicy != BenchmarkPolicy.Now || benchmarksReady);
+                    Volatile.Read(ref stopping) == 0;
         }
     }
 
@@ -128,6 +132,7 @@ internal sealed partial class ResourceProtection
         public readonly Guid Endpoint = endpoint;
         public long Ram;
         public readonly Dictionary<string, long> Vram = [];
+        public MemoryCost? LastIncrement;
         public long? WorkerPeak;
         public int Samples;
     }
@@ -144,6 +149,7 @@ internal sealed partial class ResourceProtection
                 identifier = target.Model.Alias ?? target.Model.Model.NativeId,
                 target.Operation,
                 Budget = target.Budget,
+                LoadOverride = target.Budget is { Estimated: false } budgetOverride ? OwnerPeak(budgetOverride) : null,
                 QualificationConfiguration = target.Configuration + ":" + target.Model.Instance?.ResourceFingerprint,
                 BudgetRevision = BudgetRevision(store.Value.Budgets.FirstOrDefault(item => item.Deployment == target.Model.Id &&
                     item.Workload.Operation == target.Operation), target.Configuration, target.Model.Instance?.ResourceFingerprint),
@@ -181,7 +187,18 @@ internal sealed partial class ResourceProtection
                 throw new ProviderFailure(409, "Wait for this deployment's work to settle before changing its memory limits.");
             if (observed?.Hardware is null)
                 throw new ProviderFailure(503, "Wait for Windows to report the local devices.");
-            budget = new(target.Model.Id, target.Configuration, target.Model.Instance?.ResourceFingerprint,
+            if (update.LoadOnly)
+            {
+                if (update.LoadRamMiB is < 0 or > LocalSettings.MaximumReserveMiB || update.LoadVramMiB?.Any(pair =>
+                    pair.Value is < 0 or > LocalSettings.MaximumReserveMiB ||
+                    !observed.Devices.Any(device => !device.Integrated && device.Id == pair.Key)) == true)
+                    throw new ProviderFailure(400, "Enter a peak in MiB for a known local memory pool.");
+                var peak = new LoadPeak(update.LoadRamMiB * MiB,
+                    update.LoadVramMiB?.ToDictionary(pair => pair.Key, pair => pair.Value * MiB) ?? []);
+                budget = target.Budget! with { Runtime = target.Model.Instance?.ResourceFingerprint, LoadOverride = peak,
+                    Estimated = false, Load = new(peak.RamBytes ?? 0, peak.DeviceBytes) };
+            }
+            else budget = new(target.Model.Id, target.Configuration, target.Model.Instance?.ResourceFingerprint,
                 new(update.Operation, update.Units, update.Items, update.MediaItems),
                 FromMiB(update.LoadRamMiB, update.LoadVramMiB), FromMiB(update.ExecuteRamMiB, update.ExecuteVramMiB),
                 update.AllowOverlap, update.ParallelSlots, update.AllowAttached);
@@ -343,16 +360,15 @@ internal sealed partial class ResourceProtection
     private string Configuration(Deployment model) => ProviderIdentity.Hash(model.Configuration, model.Id,
         hardwareObservation?.Hardware, hardwareObservation?.TotalRam.ToString(System.Globalization.CultureInfo.InvariantCulture));
 
-    private ResourceBudget? FindBudget(Deployment model, EndpointStatus endpoint, InferenceOperation operation,
-        long? estimatedContextUnits = null)
+    private ResourceBudget? FindBudget(Deployment model, EndpointStatus endpoint, InferenceOperation operation)
     {
         var configuration = Configuration(model);
         var runtime = model.Instance?.ResourceFingerprint;
         var stored = store.Value.Budgets.FirstOrDefault(item => item.Deployment == model.Id &&
             item.Workload.Operation == operation && item.Configuration == configuration &&
             (item.Runtime is null || runtime is null || item.Runtime == runtime));
-        stored ??= EstimateBudget(model, operation, configuration, runtime, estimatedContextUnits: estimatedContextUnits);
-        if (stored is null) return null;
+        stored ??= EstimateBudget(model, operation, configuration, runtime);
+        if (!stored.Estimated) return stored;
         var profile = MatchProfile(model.Id, operation, configuration, runtime);
         if (profile is null)
             return stored;
@@ -369,14 +385,51 @@ internal sealed partial class ResourceProtection
         return stored with { Load = load, Execute = run };
     }
 
-    private ResourceBudget EstimateBudget(Deployment model, InferenceOperation operation, string configuration, string? runtime,
-        Workload? execution = null, long? estimatedContextUnits = null)
+    private MemoryCost? CheckedLoadCost(Deployment model, InferenceOperation operation)
     {
-        var hardware = hardwareObservation;
+        var configuration = Configuration(model);
+        var runtime = model.Instance?.ResourceFingerprint;
+        var owner = store.Value.Budgets.FirstOrDefault(item => item.Deployment == model.Id &&
+            item.Configuration == configuration && item.Workload.Operation == operation &&
+            (runtime is null || item.Runtime is null || item.Runtime == runtime));
+        var overrides = owner is null ? null : OwnerPeak(owner);
+        var native = model.Options.ServedContext == model.Model.NativePeakContext ? model.Model.NativeLoadPeak : null;
+        var profile = MatchProfile(model.Id, operation, configuration, runtime);
+        var measured = unsafePlacements.Contains(ProviderIdentity.Hash(model.Id, configuration, operation.ToString())) ? null :
+            MeasuredLoadCost(profile, LoadIdentity(model));
+        if ((overrides?.RamBytes ?? native?.RamBytes ?? measured?.RamBytes) is not { } ramBytes) return null;
+        var devices = measured?.DeviceBytes.ToDictionary() ?? [];
+        foreach (var pair in native?.DeviceBytes ?? []) devices[pair.Key] = pair.Value;
+        foreach (var pair in overrides?.DeviceBytes ?? []) devices[pair.Key] = pair.Value;
+        return new(ramBytes, devices);
+    }
 
-        var text = operation is InferenceOperation.Chat or InferenceOperation.Embeddings or InferenceOperation.SystemOne;
+    private static string LoadIdentity(Deployment model) => ProviderIdentity.Hash(model.Configuration, model.Version,
+        model.Model.ManagementId, model.Model.Variant, model.Model.Format,
+        model.Model.ArtifactBytes?.ToString(System.Globalization.CultureInfo.InvariantCulture));
+
+    internal static MemoryCost? MeasuredLoadCost(BenchmarkProfile? profile, string identity)
+    {
+        var cold = profile?.Measurements.LastOrDefault(pass => pass.Pass == "cold" && pass.LoadIdentity == identity);
+        if (cold is not { Samples: > 0, ObservedIncrement: { } peak, SettledIncrement: { } resident }) return null;
+        foreach (var pass in profile!.Measurements)
+        {
+            if (pass.Pass == "cold" || pass.LoadIdentity != identity || pass.ObservedIncrement is not { } warm) continue;
+            // Warm increments start with the model resident. The cold peak already includes its residency.
+            peak = new(Math.Max(peak.RamBytes, resident.RamBytes + warm.RamBytes),
+                peak.DeviceBytes.Keys.Intersect(resident.DeviceBytes.Keys).Intersect(warm.DeviceBytes.Keys)
+                    .ToDictionary(id => id, id => Math.Max(peak.DeviceBytes[id], resident.DeviceBytes[id] + warm.DeviceBytes[id])));
+        }
+        return peak;
+    }
+
+    private static LoadPeak OwnerPeak(ResourceBudget budget) =>
+        budget.LoadOverride ?? new(budget.Load.RamBytes, budget.Load.DeviceBytes);
+
+    private ResourceBudget EstimateBudget(Deployment model, InferenceOperation operation, string configuration, string? runtime)
+    {
         var context = Math.Clamp(model.Context ?? model.Model.TheoreticalContext ?? 4096, 1, ProviderLimits.MaxContext);
-        var workload = execution ?? (operation switch
+        var workload = operation switch
         {
             InferenceOperation.Embeddings => new Workload(operation, context, 16),
             InferenceOperation.SystemOne => new Workload(operation, context, 4, model.MediaTokensPerItem is null ? 0 : 1),
@@ -385,22 +438,9 @@ internal sealed partial class ResourceProtection
             InferenceOperation.Transcription => new Workload(operation, ProviderLimits.MaxAudioBytes),
             InferenceOperation.Speech => new Workload(operation, 4096),
             _ => throw new ArgumentOutOfRangeException(nameof(operation))
-        });
+        };
 
-        // Reserve working memory in addition to resident weights already counted by Windows.
-        var weightBytes = model.Model.ArtifactBytes.GetValueOrDefault();
-        var limit = (long)LocalSettings.MaximumReserveMiB * MiB;
-        var estimatedUnits = Math.Min(workload.Units, estimatedContextUnits ?? workload.Units);
-        var inputBytes = text ? estimatedUnits * workload.Items * (operation == InferenceOperation.Embeddings ? 32 * 1024L : 128 * 1024L)
-            : workload.Units * (operation == InferenceOperation.Images ? 64 : 4);
-        if (model.Model.Origin == ModelOrigin.LmLink)
-            return new(model.Id, configuration, runtime, workload, MemoryCost.Empty, new(128 * MiB, []),
-                AllowOverlap: false, Estimated: true);
-        var executeBytes = Math.Min(limit, 256 * MiB + Math.Max(inputBytes, weightBytes / 8));
-        var loadBytes = weightBytes > 0 && weightBytes <= limit - executeBytes ? weightBytes + executeBytes : 0;
-        MemoryCost Cost(long bytes) => new(bytes, (hardware?.Devices ?? []).Where(device => !device.Integrated && device.TotalBytes is not null)
-            .ToDictionary(device => device.Id, _ => bytes));
-        return new(model.Id, configuration, runtime, workload, Cost(loadBytes), Cost(executeBytes),
+        return new(model.Id, configuration, runtime, workload, MemoryCost.Empty, MemoryCost.Empty,
             AllowOverlap: false, Estimated: true);
     }
 
@@ -456,7 +496,6 @@ internal sealed partial class ResourceProtection
                 benchmarkStop = null;
                 benchmark = null;
                 benchmarkDeployment = benchmarkPass = null;
-                nativeBenchmark = false;
                 if (runningForcedBenchmark)
                 {
                     runningForcedBenchmark = false;
@@ -492,9 +531,8 @@ internal sealed partial class ResourceProtection
                 item.Model.Instance?.Busy != true && !providers.HasUnsettledWork(item.Endpoint) &&
                 ProviderCatalog.ExclusiveBlocker(catalog, item.Endpoint) is null).ToArray();
             bool Protected(Target item) => item.Budget is { } budget &&
-                (item.NativeBenchmark ? NativeBenchmarkAllowed(current) : status.State == ContributionState.Contributor) &&
-                (!unsafePlacements.Contains(FaultKey(budget)) || item.NativeBenchmark && requestedBenchmark is not null) &&
-                AttributionAllows(item.Endpoint, current, observed, budget.AllowAttached);
+                status.State == ContributionState.Contributor &&
+                (!unsafePlacements.Contains(FaultKey(budget)) || item.NativeBenchmark && requestedBenchmark is not null);
 
             var forced = requestedBenchmark;
             bool Matches(Target item) => forced is null ||
@@ -502,7 +540,7 @@ internal sealed partial class ResourceProtection
             var target = candidates.FirstOrDefault(item =>
                 Matches(item) && (forced is null || forced.SampleOnly || item.Model.Yolo) &&
                 CanSample(item.Model, item.Operation) &&
-                (item.Model.Yolo ? IsTextBenchmark(item.Operation) && NativeBenchmarkAllowed(current) :
+                (item.Model.Yolo ? IsTextBenchmark(item.Operation) && ServingAllowed :
                     Protected(item) && Covers(item.Budget!.Workload, BenchmarkProtocol.SampleWorkload(item.Operation))) &&
                 (forced is not null || item.Profile?.Speed is null || item.Profile.Speed.Error is not null &&
                     item.Profile.Speed.Attempts < 2 && now - item.Profile.Speed.At >= BenchmarkIdle));
@@ -526,7 +564,6 @@ internal sealed partial class ResourceProtection
             if (forced is not null)
                 forcedBenchmarkError = null;
             runningForcedBenchmark = forced is not null;
-            nativeBenchmark = target.NativeBenchmark && !target.Model.Yolo;
             benchmarkStop = CancellationTokenSource.CreateLinkedTokenSource(stopping);
             benchmarkDeployment = target.Model.Id;
             benchmarkPass = speedOnly ? "Warm sample" : "Preparing";
@@ -677,7 +714,7 @@ internal sealed partial class ResourceProtection
                 if (profile.Runtime != runtime)
                     profile = profile with { Runtime = runtime, Measurements = [], Speed = null };
                 await WaitForObservationAsync(cancellation);
-                var pass = EndMeasurement(new(target.Operation, model.Context ?? 1), "cold", elapsed);
+                var pass = EndMeasurement(new(target.Operation, model.Context ?? 1), "cold", elapsed) with { LoadIdentity = LoadIdentity(model) };
                 profile = await SavePassAsync(profile, pass, preserveCompletion: sampleOnly);
             }
             if (model.Instance is null)
@@ -705,7 +742,7 @@ internal sealed partial class ResourceProtection
                 var result = await providers.BenchmarkAsync(model.Id, workload, name, instance.ResourceFingerprint, cancellation);
                 var pass = EndMeasurement(workload, name, result.Elapsed) with
                 {
-                    PromptTokens = result.PromptTokens, OutputTokens = result.OutputTokens, FirstToken = result.FirstToken,
+                    LoadIdentity = LoadIdentity(model), PromptTokens = result.PromptTokens, OutputTokens = result.OutputTokens, FirstToken = result.FirstToken,
                     PromptMilliseconds = result.PromptMilliseconds, TokensPerSecond = result.TokensPerSecond,
                     CachedTokens = result.CachedTokens, ReusedCache = result.ReusedCache
                 };
@@ -804,13 +841,19 @@ internal sealed partial class ResourceProtection
 
     private void ObserveBenchmark(ResourceObservation current)
     {
-        if (measurement is not { Before: { } start } window)
+        if (measurement is not { Before: { Hardware: not null, TotalRam: > 0 } start } window ||
+            current.Hardware != start.Hardware || current.TotalRam != start.TotalRam)
             return;
         window.Samples++;
         window.Ram = Math.Max(window.Ram, start.FreeRam - current.FreeRam);
+        Dictionary<string, long> resident = [];
         foreach (var device in current.Devices.Where(item => !item.Integrated && item.UsedBytes.HasValue))
             if (start.Devices.FirstOrDefault(item => item.Id == device.Id)?.UsedBytes is { } before)
-                window.Vram[device.Id] = Math.Max(window.Vram.GetValueOrDefault(device.Id), device.UsedBytes!.Value - before);
+            {
+                resident[device.Id] = Math.Max(0, device.UsedBytes!.Value - before);
+                window.Vram[device.Id] = Math.Max(window.Vram.GetValueOrDefault(device.Id), resident[device.Id]);
+            }
+        window.LastIncrement = new(Math.Max(0, start.FreeRam - current.FreeRam), resident);
         if (current.Workers.GetValueOrDefault(window.Endpoint)?.PeakResidentBytes is { } peak)
             window.WorkerPeak = Math.Max(window.WorkerPeak ?? 0, peak);
     }
@@ -822,7 +865,7 @@ internal sealed partial class ResourceProtection
             var window = measurement!;
             measurement = null;
             var usage = window.Samples > 0 ? new MemoryCost(window.Ram, window.Vram) : null;
-            return new(workload, pass, null, null, elapsed, null, null, null, null, usage, window.WorkerPeak, window.Samples);
+            return new(workload, pass, null, null, elapsed, null, null, null, null, usage, window.WorkerPeak, window.Samples, SettledIncrement: pass == "cold" ? window.LastIncrement : null);
         }
     }
 
@@ -866,7 +909,8 @@ internal sealed partial class ResourceProtection
                 !Enum.IsDefined(item.Operation) || !Hash(item.Deployment) || !Hash(item.Configuration) ||
                 item.Runtime is not { Length: 0 } && !Hash(item.Runtime) ||
                 item.Measurements is not { Length: <= 8 } ||
-                item.Measurements.Any(pass => pass is null || pass.ObservedIncrement is not null && !ValidCost(pass.ObservedIncrement))) ||
+                item.Measurements.Any(pass => pass is null || pass.ObservedIncrement is not null && !ValidCost(pass.ObservedIncrement) ||
+                    pass.SettledIncrement is not null && !ValidCost(pass.SettledIncrement) || pass.LoadIdentity is not null && !Hash(pass.LoadIdentity))) ||
             data.Unsafe is not { Length: <= 1024 } || data.Unsafe.Any(item => !Hash(item)) ||
             data.Hold is { } hold && (hold.State is not (ContributionState.Fault or ContributionState.Cooldown or ContributionState.Withdrawing) ||
                 !Enum.IsDefined(hold.Cause) || string.IsNullOrWhiteSpace(hold.Reason) || hold.Reason.Length > 512 ||
@@ -891,7 +935,9 @@ internal sealed partial class ResourceProtection
             InferenceOperation.SystemOne => item.Workload.Units <= ProviderLimits.MaxContext,
             _ => item.Workload.Units <= ProviderLimits.MaxContext
         }) &&
-        ValidCost(item.Load) && ValidCost(item.Execute);
+        ValidCost(item.Load) && ValidCost(item.Execute) &&
+        (item.LoadOverride is null || item.LoadOverride.RamBytes is not (< 0 or > (long)LocalSettings.MaximumReserveMiB * MiB) &&
+            ValidCost(new(0, item.LoadOverride.DeviceBytes)));
     private static bool ValidCost(MemoryCost? cost) => cost is { RamBytes: >= 0 and <= (long)LocalSettings.MaximumReserveMiB * MiB,
         DeviceBytes.Count: <= 32 } && cost.DeviceBytes.All(item => item.Key.Length <= 64 &&
             item.Value is >= 0 and <= (long)LocalSettings.MaximumReserveMiB * MiB);

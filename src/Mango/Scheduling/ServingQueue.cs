@@ -10,8 +10,9 @@ internal interface IServingBackend
     event Action? Changed;
     event Action? AdmissionChanged;
     ResourceProtection? Resources { get; }
-    ServingPlacement? Placement(InferenceShape shape, string id, bool allowUnverifiedContext = true);
+    ServingPlacement? Placement(InferenceShape shape, string id);
     bool Conflicts(ServingPlacement a, ServingPlacement b);
+    bool WouldDisplace(ServingPlacement placement) => false;
     bool NeedsPreparation(ServingPlacement placement) => placement.Model.Instance is null;
     bool HasUnsettled(string deployment);
     void RequestSettlementRefresh(string deployment);
@@ -171,8 +172,8 @@ internal sealed class ServingQueue : IAsyncDisposable
             if (stop.IsCancellationRequested || cancellation.IsCancellationRequested)
                 return Task.FromResult(Cancelled(work));
             if (work.Ticket.TryOtherHost && providers.Placement(work.Payload.Shape, work.Ticket.Deployment) is { } target &&
-                (target.Model.Busy || target.Model.Instance?.Busy == true || HasConflictingWork(target)))
-                return Task.FromResult(new AttemptReply(AttemptState.Rejected, 409, "The host gained conflicting work before admission."));
+                (target.Model.Busy || target.Model.Instance?.Busy == true || HasConflictingWork(target) || providers.WouldDisplace(target) || providers.Resources?.ForcedBenchmarkHoldsServing == true))
+                return Task.FromResult(new AttemptReply(AttemptState.Rejected, 409, "The host gained conflicting work before admission.", Deferred: true));
             if (entries.Count >= MaxAttempts || waiting >= MaxWaiting || waitingBytes + work.Payload.Bytes > MaxWaitingBytes)
                 return Task.FromResult(Rejected("The serving queue reached its local capacity."));
             var entry = new Entry(work.Ticket.QueueUntil.AddMinutes(5))
@@ -405,9 +406,10 @@ internal sealed class ServingQueue : IAsyncDisposable
                         continue;
                     }
                 }
-                if (start.Status == AdmissionStatus.Unavailable || start.MemoryWait && work.Ticket.TryOtherHost)
+                if (start.Status == AdmissionStatus.Unavailable || work.Ticket.TryOtherHost &&
+                    (start.MemoryWait || !providers.NeedsPreparation(placement) || providers.WouldDisplace(placement)))
                 {
-                    Finish(entry, Rejected(start.Reason ?? "The local deployment is unavailable."));
+                    Finish(entry, Rejected(start.Reason ?? "The local deployment is unavailable.") with { Deferred = start.Status == AdmissionStatus.Wait });
                     continue;
                 }
                 reason = start.Reason ?? "Waiting for local capacity.";
@@ -527,16 +529,20 @@ internal sealed class ServingQueue : IAsyncDisposable
             await providers.PreparePlacementAsync(placement, id => work.Displaced(id, timeout.Token), timeout.Token);
         }
         catch (OperationCanceledException) { }
-        catch (ProviderFailure error) when (error.MemoryWait && work.Ticket.TryOtherHost)
+        catch (ProviderFailure error) when (error.CapacityWait && work.Ticket.TryOtherHost)
         {
-            return Rejected(error.Message);
+            return Rejected(error.Message) with { Deferred = true };
+        }
+        catch (ProviderFailure error) when (error.Code == "load_rejected")
+        {
+            return new(AttemptState.Rejected, error.Status, error.Message);
         }
         catch (ProviderFailure error) when (error.Status == 409 || error.CapacityWait) { return null; }
-        catch (ProviderFailure error) when (error.Code is "strata_attached_resident" or "mode_switch_lifecycle")
+        catch (ProviderFailure error)
         {
-            return Rejected(error.Message);
+            return new(AttemptState.Rejected, error.Status, error.Message);
         }
-        catch (Exception error) when (error is ProviderFailure or IOException or HttpRequestException or UnauthorizedAccessException
+        catch (Exception error) when (error is IOException or HttpRequestException or UnauthorizedAccessException
             or System.ComponentModel.Win32Exception)
         {
             return Rejected("Mango could not prepare the local deployment.");

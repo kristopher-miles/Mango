@@ -1,3 +1,4 @@
+using System.Net.Http.Json;
 using System.Collections.Concurrent;
 using System.Net;
 using System.Text.Json;
@@ -91,16 +92,23 @@ internal static partial class PeerChecks
             model = alias, messages = new[] { new { role = "user", content = new string('x', 270_000) } }, max_tokens = 16
         }, expected: 422);
 
-        Hold("first short");
-        Hold("second short");
-        var first = Chat("first short");
-        var firstHost = await Started("first short");
-        var second = Chat("second short", large);
-        var secondHost = await Started("second short");
-        Check(firstHost != secondHost, "simultaneous eligible requests spread across the two hosts");
-        Release("first short");
-        Release("second short");
-        await Task.WhenAll(first, second);
+        var firstPrompt = "compressible " + new string('a', 220_000);
+        var secondPrompt = "compressible " + new string('b', 220_000);
+        Hold(firstPrompt);
+        Hold(secondPrompt);
+        using (var first = await OpenStream(firstPrompt, small))
+        using (var firstBody = new StreamReader(await first.Content.ReadAsStreamAsync()))
+        {
+            Check((await firstBody.ReadLineAsync())?.Contains("generating") == true, "the first native stream has generated output");
+            using var second = await OpenStream(secondPrompt, large);
+            using var secondBody = new StreamReader(await second.Content.ReadAsStreamAsync());
+            Check((await secondBody.ReadLineAsync())?.Contains("generating") == true &&
+                await Started(firstPrompt) != await Started(secondPrompt), "staggered long streams generate on different native workers");
+            Release(firstPrompt);
+            Release(secondPrompt);
+            Check((await firstBody.ReadToEndAsync()).Contains("[DONE]") && (await secondBody.ReadToEndAsync()).Contains("[DONE]"),
+                "both overlapping streams finish");
+        }
 
         Hold("race small ingress");
         Hold("race large ingress");
@@ -145,13 +153,24 @@ internal static partial class PeerChecks
         Check(Served(await queuedFirst) == smallId && Served(await queuedSecond) == smallId &&
             !drawing.IsCompleted, "both text requests use the open host without disturbing image generation");
         var waitingLong = Chat(longInput + " while drawing");
+        Check(await Started(longInput + " while drawing") == smallId, "an idle smaller host gets the request before a busy larger worker");
         await Eventually(() => JsonSerializer.SerializeToElement(large.Network.SchedulingView(), Json)
-            .GetProperty("waiting").GetInt32() == 1 && !calls.ContainsKey(longInput + " while drawing"),
-            "a long request waits for the larger host while it serves another operation");
+            .GetProperty("waiting").GetInt32() == 1,
+            "after a provider context refusal the request waits for its remaining host");
         Release("draw blocker");
         await drawing;
         Check(Served(await waitingLong) == largeId, "after image work finishes, the pending long request runs on the only fitting host");
         Check(calls.Values.All(call => call.Task.IsCompletedSuccessfully), "all provider calls settle");
+
+        async Task<HttpResponseMessage> OpenStream(string prompt, Host ingress)
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Post, ingress.LocalAddress + "/v1/chat/completions");
+            request.Headers.Authorization = new("Bearer", ingress.Session);
+            request.Content = JsonContent.Create(new { model = alias, stream = true, messages = new[] { new { role = "user", content = prompt } } });
+            var response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
+            response.EnsureSuccessStatusCode();
+            return response;
+        }
 
         async Task Register(Host host, WebApplication provider, string native)
         {
@@ -195,6 +214,16 @@ internal static partial class PeerChecks
                 Check(!vision && body.RootElement.GetProperty("tools").GetArrayLength() == 2 &&
                     body.RootElement.GetProperty("max_tokens").GetInt32() == 8192,
                     "the serving host receives both function definitions and the caller's output limit");
+            if (body.RootElement.TryGetProperty("stream", out var stream) && stream.GetBoolean())
+            {
+                web.Response.ContentType = "text/event-stream";
+                var chunk = JsonSerializer.Serialize(new { model = native, choices = new[] { new { delta = new { content = "generating" } } } });
+                await web.Response.WriteAsync($"data: {chunk}\n\n", web.RequestAborted);
+                await web.Response.Body.FlushAsync(web.RequestAborted);
+                await Record(text, native, web.RequestAborted);
+                await web.Response.WriteAsync("data: [DONE]\n\n", web.RequestAborted);
+                return Results.Empty;
+            }
             await Record(text, native, web.RequestAborted);
             var tokens = text.StartsWith("compressible ", StringComparison.Ordinal) ? text.Length / 4 : text.Length;
             if (tokens > context || !vision && text == "provider measured overflow")

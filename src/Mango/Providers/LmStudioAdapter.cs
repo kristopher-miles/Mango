@@ -71,7 +71,11 @@ internal sealed class LmStudioAdapter(HttpClient http, ProviderEndpoint endpoint
                 structured: type == "llm" && (!Generic || capabilities.IsTrue("structured_output")),
                 dimensions: row.Number("embedding_dimensions"), encodings: type == "embedding" ? ["float"] : [],
                 artifactBytes: row.Long("size_bytes"), format: row.Text("format"),
-                mediaTokensPerItem: Generic ? row.Number("media_tokens_per_item") : null));
+                mediaTokensPerItem: Generic ? row.Number("media_tokens_per_item") : null) with
+            {
+                NativeLoadPeak = Generic ? ReadLoadPeak(row.Get("load_peak_bytes")) : null,
+                NativePeakContext = Generic ? row.Get("load_peak_bytes").Number("context_length") : null
+            });
         }
         var devices = Generic ? null : await (inspectDevices ?? LmStudioDevices.InspectAsync)(new Uri(Endpoint.Address), cancellation);
         Volatile.Write(ref deviceInventory, devices);
@@ -80,6 +84,20 @@ internal sealed class LmStudioAdapter(HttpClient http, ProviderEndpoint endpoint
         return new(version, inventory, Managed, Managed, false,
             MaxLoadedModels: Generic ? result.Number("max_loaded_models") : null,
             LoadsSettled: Generic && result.IsTrue("loads_settled"));
+    }
+
+    private static Mango.Resources.LoadPeak? ReadLoadPeak(JsonElement peak)
+    {
+        if (peak.ValueKind != JsonValueKind.Object) return null;
+        var ram = peak.Long("ram");
+        var devices = new Dictionary<string, long>(StringComparer.Ordinal);
+        if (peak.Get("devices") is { ValueKind: JsonValueKind.Object } values)
+            foreach (var value in values.EnumerateObject())
+            {
+                if (devices.Count >= 32 || value.Name.Length is 0 or > 64 || value.Value.ValueKind != JsonValueKind.Number ||
+                    !value.Value.TryGetInt64(out var bytes) || bytes < 0 || !devices.TryAdd(value.Name, bytes)) return null;
+            }
+        return new(ram is >= 0 ? ram : null, devices);
     }
 
     private ProviderModel[] ResolveDevices(ProviderModel[] rows, LmStudioDevices? devices)

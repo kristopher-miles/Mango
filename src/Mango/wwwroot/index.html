@@ -78,7 +78,7 @@
           <div class="actions"></div>
         </form><div id="provider-extra-actions" class="actions"></div><div id="model-serving-actions" class="actions" role="group" aria-label="Serving controls for the selected provider" hidden><button type="button" id="model-serve-all" class="quiet">Serve all models</button><button type="button" id="model-serve-none" class="quiet">Serve no models</button></div>
 <div id="local-placement" class="panel" hidden><label>Local model preference<select id="local-selection" name="id" aria-describedby="selection-help"><option value="">Automatic placement</option></select></label><p id="selection-help" class="muted">Favors this model when it is eligible and other placements are comparable.</p><p id="selection-status" class="field-status" role="status"></p></div>
-<p id="provider-applied" class="muted"></p><div class="serving-quick"><label class="switch">Contribute this computer<input type="checkbox" data-setting="role" data-role-switch></label><span class="field-status" data-setting-status="role"></span><label>Benchmark policy<select data-setting="benchmarkPolicy"><option value="never">Never</option><option value="now">Now · before serving</option><option value="whenConvenient">When convenient</option></select></label></div></div><p id="provider-status" role="status" class="field-status"></p></section><p id="catalog-status" class="field-status" role="status"></p>
+<p id="provider-applied" class="muted"></p><div class="serving-quick"><label class="switch">Contribute this computer<input type="checkbox" data-setting="role" data-role-switch></label><span class="field-status" data-setting-status="role"></span><label>Benchmark policy<select data-setting="benchmarkPolicy"><option value="never">Never</option><option value="now">Run now</option><option value="whenConvenient">When convenient</option></select></label></div></div><p id="provider-status" role="status" class="field-status"></p></section><p id="catalog-status" class="field-status" role="status"></p>
 <div class="serving-grid">
 <section class="panel inventory" aria-labelledby="inventory-title">
   <div class="panel-heading"><h2 id="inventory-title">Model inventory</h2><div class="tools"><span id="model-count" class="muted"></span><button id="inventory-expand" type="button" class="quiet icon-control" aria-label="Expand inventory" title="Expand inventory" aria-pressed="false"><svg class="glyph" aria-hidden="true"><use href="/glyphs.svg#expand"></use></svg></button></div></div>
@@ -94,20 +94,10 @@
   <label id="selected-operation" class="compact" hidden>Operation<select name="target" form="resource-form" required></select></label>
   <div id="selected-measurements" hidden></div>
   <div id="selected-limits"><p id="resource-feedback" class="field-status" role="status"></p><form id="resource-form" hidden>
-    <fieldset><legend>Request size</legend>
-      <div class="inputs workload">
-        <label><span id="resource-unit-label">Units per item</span><input name="units" type="number" min="1" max="67108864" required></label>
-        <label><span id="resource-item-label">Items per request</span><input name="items" type="number" min="1" max="128" required></label>
-        <label>Inline media items<input name="mediaItems" type="number" min="0" max="128" required></label>
-      </div>
-    </fieldset>
-    <fieldset><legend>Peak memory <span class="muted">(MiB)</span></legend>
-      <table class="memory-matrix"><thead><tr><th scope="col">Resource</th><th scope="col">Load peak</th><th scope="col">Additional execution peak</th></tr></thead>
-        <tbody><tr><th scope="row">Host RAM</th><td><input aria-label="Host RAM load peak in MiB" name="loadRamMiB" type="number" min="0" max="1048576" required></td><td><input aria-label="Host RAM additional execution peak in MiB" name="executeRamMiB" type="number" min="0" max="1048576" required></td></tr></tbody><tbody id="resource-gpus"></tbody></table>
-    </fieldset>
-    <fieldset><legend>Execution</legend>
-      <div class="execution-fields"><label class="checkbox"><input name="allowOverlap" type="checkbox"> Qualified for overlapping executions</label><label>Parallel slots<input name="parallelSlots" type="number" min="1" max="64" value="1" required></label></div>
-      <label id="resource-attached" class="checkbox" hidden><input name="allowAttached" type="checkbox"> Allow this attached provider. Its model may remain resident when Mango stops forwarding requests.</label>
+    <fieldset><legend>Additional model load peaks (MiB)</legend>
+      <p>Override the measured peak for loading this model alongside other residents. Leave a field empty to use provider or benchmark evidence.</p>
+      <table class="memory-matrix"><thead><tr><th scope="col">Memory</th><th scope="col">Peak override</th></tr></thead>
+        <tbody><tr><th scope="row">Host RAM</th><td><input aria-label="Host RAM load peak in MiB" name="loadRamMiB" type="number" min="0" max="1048576"></td></tr></tbody><tbody id="resource-gpus"></tbody></table>
     </fieldset></form><p id="qualification-empty" class="muted">Models appear after the provider reports its inventory.</p></div></section></div></section>
 <section data-page="serving/aliases" class="page " hidden><section class="panel settings-panel"><h2>Alias capability ratings</h2><p id="alias-scope" class="muted">Changes affect every deployment with the selected alias.</p><form id="alias-rating-form">
           <fieldset>
@@ -282,8 +272,6 @@
             <label>Quiet cooldown (seconds)<input name="cooldownSeconds" type="number" min="1" max="86400" required></label>
             <label>CPU cutoff (%)<input name="cpuCutoffPercent" type="number" min="1" max="100" required></label>
             <label>GPU cutoff (%)<input name="gpuCutoffPercent" type="number" min="1" max="100" required></label>
-            <label>RAM pressure cutoff (%)<input name="ramCutoffPercent" type="number" min="1" max="100" required></label>
-            <label>VRAM pressure cutoff (%)<input name="vramCutoffPercent" type="number" min="1" max="100" required></label>
           </div>
         </fieldset></form><p id="resource-observation" class="muted"></p><p id="protection-feedback" class="field-status" role="status"></p><button id="resource-refresh" type="button" class="quiet icon-control" aria-label="Refresh observations" title="Refresh observations"><svg class="glyph" aria-hidden="true"><use href="/glyphs.svg#refresh"></use></svg></button><button id="resource-release" type="button" class="secondary" hidden>Verify release again</button></section></section>
 <section data-page="protection/memory" class="page " hidden><section class="panel settings-panel"><h2>Memory reserves</h2><p class="scope-label">This computer</p><form id="settings-memory"><fieldset>
@@ -311,7 +299,7 @@
           <label>When to benchmark
             <select name="benchmarkPolicy">
               <option value="never">Never</option>
-              <option value="now">Now · before serving requests</option>
+              <option value="now">Run now</option>
               <option value="whenConvenient">When convenient</option>
             </select>
           </label>

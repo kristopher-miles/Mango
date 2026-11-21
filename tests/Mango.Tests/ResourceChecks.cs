@@ -113,36 +113,9 @@ internal static class ResourceChecks
             resources.Estimate(model, managed, InferenceOperation.Embeddings) is { Estimated: true, Workload.Items: 16 } &&
             resources.Estimate(model, managed, InferenceOperation.SystemOne) is { Estimated: true, Workload.Items: 4 },
             "observed hardware supplies usable operation-specific fallback limits before any owner edit");
-        Check(resources.Readiness(model, endpoint, Chat.Operation).State == "attached", "estimated limits require attached-provider consent");
-
+        Check(resources.Readiness(model, endpoint, Chat.Operation).Available, "attached serving needs no execution budget");
         var strata = managed with { Profile = ProviderProfile.Strata };
-        var longContext = model with { Model = model.Model with
-            { Instances = [model.Instance! with { Context = 200_000 }] } };
-        var fullContext = Chat with { Units = 200_000 };
-        var shortChat = resources.TryAdmit(longContext, strata, fullContext, ResourceWork.Execute, estimatedContextUnits: 512);
-        Check(shortChat.Reservation is not null, "a short Strata chat fits under automatic limits after its large context model loads");
-        shortChat.Require().Complete();
-        Check(resources.TryAdmit(longContext, strata, fullContext, ResourceWork.Execute, estimatedContextUnits: 200_000).MemoryWait,
-            "a large Strata chat still requires the estimated memory for that workload");
-        await resources.SaveBudgetAsync(update, providers, default);
-        Check(resources.Readiness(model, endpoint, Chat.Operation) is { State: "ready", Available: true } && !resources.HasWork(endpoint.Id),
-            "readiness accepts unrated models without reserving resources");
-        await resources.SaveBudgetAsync(update with { AllowAttached = false }, providers, default);
-        Check(resources.Readiness(model, endpoint, Chat.Operation).State == "attached", "readiness explains attached permission");
-        await resources.SaveBudgetAsync(update, providers, default);
-
-        await resources.SaveBudgetAsync(update with { MediaItems = 5, ExecuteRamMiB = 100, AllowOverlap = false, ParallelSlots = 1 }, providers, default);
-        var sixMedia = new Workload(InferenceOperation.Chat, 512, 1, 6);
-        var projected = resources.TryAdmit(model, endpoint, sixMedia, ResourceWork.Execute, payloadBytes: MiB).Require();
-        Check(projected.Cost.RamBytes == 124 * MiB,
-            "six media items project five-item measured cost by6/5 and reserve actual JSON bytes separately");
-        projected.Complete();
-        free = 110 * MiB;
-        Tick(2);
-        Check(resources.TryAdmit(model, endpoint, sixMedia, ResourceWork.Execute, payloadBytes: MiB).Status == AdmissionStatus.Wait,
-            "removing a media eligibility cap still refuses real insufficient memory headroom");
-        free = 900 * MiB;
-        Tick(2);
+        resources.TryAdmit(model, strata, new(InferenceOperation.Chat, 200_000), ResourceWork.Execute).Require().Complete();
         await resources.SaveBudgetAsync(update, providers, default);
 
         var revision = JsonSerializer.SerializeToElement(resources.View(providers), SnapshotFile<ResourceData>.Json)
@@ -156,7 +129,7 @@ internal static class ResourceChecks
         catch (ProviderFailure error) when (error.Status == 409) { }
         await resources.SaveBudgetAsync(update, providers, default);
 
-        Check(resources.TryAdmit(model, managed, Chat, ResourceWork.Load).Status == AdmissionStatus.Wait,
+        Check(resources.TryAdmit(model, managed, Chat, ResourceWork.Load, additionalLoad: true).Status == AdmissionStatus.Wait,
             "a transient load peak can exceed memory even when execution would fit");
         free = 1450 * MiB;
         Tick(2);
@@ -193,13 +166,14 @@ internal static class ResourceChecks
             if (scenario == "absent")
                 headroom.ApplyObservation(Sample(clock.GetUtcNow()) with { TotalRam = 0, FreeRam = 0 });
             if (scenario == "stale") clock.Advance(settings.Value.SampleSeconds + 6);
-            var attempt = headroom.TryAdmit(model, managed, Chat, ResourceWork.Load);
+            var attempt = headroom.TryAdmit(model, managed, Chat, ResourceWork.Load, additionalLoad: true);
             attempt.Reservation?.Complete();
-            Check(scenario == "insufficient"
+            Check(scenario != "sufficient"
                     ? attempt.Status == AdmissionStatus.Wait && attempt.MemoryWait
                     : attempt.Status == AdmissionStatus.Admitted,
                 $"RAM reread failure uses only current measured headroom ({scenario}); got {attempt.Status}, memoryWait={attempt.MemoryWait}");
         }
+        await CheckPoolsAsync();
         Check(resources.Readiness(model, endpoint, Chat.Operation).State == "busy", "readiness reports live reservations without taking another");
         Check(resources.TryAdmit(model, endpoint, Chat, ResourceWork.Execute).Status == AdmissionStatus.Wait,
             "the load reservation excludes concurrent inference before the worker allocates");
@@ -207,50 +181,29 @@ internal static class ResourceChecks
         free = 900 * MiB;
         Tick(2);
 
-        var racing = await Task.WhenAll(Enumerable.Range(0, 2).Select(_ => Task.Run(
+        var racing = await Task.WhenAll(Enumerable.Range(0, 3).Select(_ => Task.Run(
             () => resources.TryAdmit(model, endpoint, Chat, ResourceWork.Execute))));
-        Check(racing.Count(result => result.Status == AdmissionStatus.Admitted) == 1 &&
-            racing.Count(result => result.Status == AdmissionStatus.Wait) == 1, "racing reservations spend free RAM once");
-        var first = racing.Single(result => result.Reservation is not null).Require();
-        worker = 200 * MiB;
-        free = 500 * MiB;
-        Tick(2);
+        Check(racing.Count(result => result.Reservation is not null) == 2, "racing requests share exactly two native slots");
+        var running = racing.Where(result => result.Reservation is not null).Select(result => result.Require()).ToArray();
+        running[0].Complete(settled: false);
+        running[1].Complete();
         Check(resources.TryAdmit(model, endpoint, Chat, ResourceWork.Execute).Status == AdmissionStatus.Wait,
-            "a transient worker allocation still leaves the remainder of its peak reserved");
-        free = 1450 * MiB;
-        Tick(2);
-        var second = resources.TryAdmit(model, endpoint, Chat, ResourceWork.Execute).Require();
-        Check(resources.TryAdmit(model, endpoint, Chat, ResourceWork.Execute).Status == AdmissionStatus.Wait,
-            "local qualification and native slots jointly bound overlap");
-        first.Complete(settled: false);
-        second.Complete();
-        Check(resources.TryAdmit(model, endpoint, Chat, ResourceWork.Execute).Status == AdmissionStatus.Wait,
-            "cancelled work keeps its reservation until verified idle");
+            "unconfirmed cancellation retains its lease");
         resources.ConfirmSettled(model.Id);
         var failed = resources.TryAdmit(model, endpoint, Chat, ResourceWork.Execute).Require();
         await resources.AllocationFailedAsync(failed);
         failed.Complete();
-        Check(resources.TryAdmit(model, endpoint, Chat, ResourceWork.Execute).Status == AdmissionStatus.Unavailable,
-            "allocation failure blocks repeated unsafe admission");
-        Check(resources.Readiness(model, endpoint, Chat.Operation).State == "allocation", "readiness points to explicit allocation recovery");
-        using (var reloaded = new ResourceProtection(directory, settings, (_, now) => Sample(now), () => ((ulong)Total, (ulong)free), clock))
+        using (var reloaded = new ResourceProtection(directory, settings, (_, now) => Sample(now), () => ((ulong)Total, 0), clock))
         {
             await reloaded.InitializeAsync();
-            reloaded.ApplyObservation(Sample(clock.GetUtcNow()));
-            Check(reloaded.TryAdmit(model, endpoint, Chat, ResourceWork.Execute).Status == AdmissionStatus.Unavailable,
-                "allocation failure survives restart");
+            reloaded.TryAdmit(model, managed, Chat, ResourceWork.Load).Require().Complete();
+            reloaded.TryAdmit(model, endpoint, Chat, ResourceWork.Execute).Require().Complete();
         }
         await resources.SaveBudgetAsync(update, providers, default);
-
         await settings.UpdateAsync(value => value with { BenchmarkPolicy = BenchmarkPolicy.Never });
         Tick(301);
         resources.AdvanceBenchmarks(providers, default);
         Check(calls == 0 && Profile(model.Id).ValueKind == JsonValueKind.Null, "Never skips automatic benchmarks");
-        var conservative = resources.TryAdmit(model, endpoint, Chat, ResourceWork.Execute).Require();
-        Check(resources.TryAdmit(model, endpoint, Chat, ResourceWork.Execute).Status == AdmissionStatus.Wait,
-            "Never uses single-execution admission");
-        conservative.Complete();
-
         await settings.UpdateAsync(value => value with { BenchmarkPolicy = BenchmarkPolicy.WhenConvenient });
         await resources.ClientArrivedAsync(default);
         Tick(299);
@@ -271,16 +224,15 @@ internal static class ResourceChecks
         Check(calls == 5, "convenient policy resumes at the first missing pass");
 
         await settings.UpdateAsync(value => value with { BenchmarkPolicy = BenchmarkPolicy.Now });
-        Check(!resources.ServingAllowed, "Now closes serving immediately until profiles are checked");
+        Check(resources.ServingAllowed, "Now allows serving while profiles are being scheduled");
         resources.AdvanceBenchmarks(providers, default);
         Check(resources.ServingAllowed, "Now reuses complete matching evidence");
         extra = true;
         await providers.RefreshAsync(endpoint.Id, default);
         resources.AdvanceBenchmarks(providers, default);
-        Check(!resources.ServingAllowed, "Now closes serving after a new model appears");
+        Check(resources.ServingAllowed, "a new model can serve before it is benchmarked");
         var added = providers.View.Models.Single(item => item.Id != model.Id);
-        await resources.SaveBudgetAsync(update with { Deployment = added.Id }, providers, default);
-        await EventuallyAsync(() => resources.ServingAllowed);
+        await EventuallyAsync(() => Profile(added.Id).ValueKind != JsonValueKind.Null && Profile(added.Id).GetProperty("complete").GetBoolean());
         Check(calls == 9, "new deployments inherit the local policy");
         await settings.UpdateAsync(value => value with { BenchmarkPolicy = BenchmarkPolicy.Never });
         await resources.RetryBenchmarkAsync(model.Id, Chat.Operation, providers, default);
@@ -320,12 +272,12 @@ internal static class ResourceChecks
         unconfirmed.Complete();
         await settings.UpdateAsync(value => value with { BenchmarkPolicy = BenchmarkPolicy.Now });
         await resources.SaveBudgetAsync(update with { Items = 2 }, providers, default);
-        Check(!resources.ServingAllowed && Profile(model.Id).ValueKind == JsonValueKind.Null &&
+        Check(resources.ServingAllowed && Profile(model.Id).ValueKind == JsonValueKind.Null &&
             Profile(added.Id).GetProperty("complete").GetBoolean(), "a workload change invalidates only its own evidence");
         runtime = "different";
         await providers.RefreshAsync(endpoint.Id, default);
         resources.AdvanceBenchmarks(providers, default);
-        Check(!resources.ServingAllowed && Profile(model.Id).ValueKind == JsonValueKind.Null,
+        Check(resources.ServingAllowed && Profile(model.Id).ValueKind == JsonValueKind.Null,
             "runtime fingerprint invalidates only matching placement evidence");
 
         await settings.UpdateAsync(value => value with { Role = LocalRole.Leech });
@@ -365,6 +317,41 @@ internal static class ResourceChecks
         await resumed.AdvanceWithdrawalAsync(resumedProviders, default);
         await FinishWithdrawalAsync(ContributionState.Contributor);
         Console.WriteLine("Resource admission and benchmark checks passed.");
+
+        async Task CheckPoolsAsync()
+        {
+            using var pools = new ResourceProtection(Directory.CreateDirectory(Path.Combine(directory, "checked-pools")).FullName,
+                settings, (_, now) => Sample(now), () => ((ulong)Total, (ulong)(2048 * MiB)), clock);
+            await pools.InitializeAsync();
+            var latest = Sample(clock.GetUtcNow()) with { Devices = [
+                new("a", "first", false, 8L * 1024 * MiB, 6L * 1024 * MiB),
+                new("b", "second", false, 8L * 1024 * MiB, 2L * 1024 * MiB)] };
+            pools.ApplyObservation(latest);
+            Deployment Native(long? host, Dictionary<string, long> devices) => model with
+                { Model = model.Model with { NativeLoadPeak = new(host, devices) } };
+            bool Fits(Deployment target) => pools.AdditionalLoadFits(target, Chat.Operation);
+            var cold = new BenchmarkMeasurement(Chat, "cold", null, null, TimeSpan.Zero, null, null, null, null,
+                new(100, new() { ["a"] = 40 }), null, 2, SettledIncrement: new(70, new() { ["a"] = 20 }), LoadIdentity: "current");
+            var warm = cold with { Pass = "warm", ObservedIncrement = new(60, new() { ["a"] = 5 }) };
+            var profile = new BenchmarkProfile(model.Id, "", "", Chat.Operation, clock.GetUtcNow(), [cold, warm], true, null);
+            var combined = ResourceProtection.MeasuredLoadCost(profile, "current");
+            Check(combined?.RamBytes == 130 && combined.DeviceBytes["a"] == 40 &&
+                ResourceProtection.MeasuredLoadCost(profile, "changed") is null, "only comparable peaks cover cold load and warm execution together");
+            var known = Native(1024 * MiB, new() { ["a"] = MiB, ["b"] = 256 * MiB });
+            Check(Fits(known) && !Fits(Native(1024 * MiB, new() { ["a"] = 1280 * MiB, ["b"] = 0 })) &&
+                !Fits(Native(1024 * MiB, new() { ["a"] = MiB })), "a checked load must fit each discrete pool, including its margin");
+            await pools.SaveBudgetAsync(update with { LoadOnly = true, LoadRamMiB = 32, LoadVramMiB = new() { ["a"] = 1 } },
+                providers, default);
+            Check(Fits(Native(Total, new() { ["a"] = Total, ["b"] = 0 })),
+                "owner values override native values only for supplied pools");
+            var attempt = pools.TryAdmit(known, managed, Chat, ResourceWork.Load, additionalLoad: true).Require();
+            Check(pools.TryAdmit(known, managed, Chat, ResourceWork.Load, additionalLoad: true).Status == AdmissionStatus.Wait,
+                "a racing load cannot spend the active reservation");
+            attempt.Complete();
+            pools.ApplyObservation(latest with { Hardware = "unified", Devices = [new("integrated", "shared", true, Total, Total)] });
+            Check(Fits(Native(2048 * MiB, [])) && !Fits(Native(2049 * MiB, [])),
+                "integrated memory shares exactly one RAM pool");
+        }
 
         ResourceObservation Sample(DateTimeOffset now) =>
             new(now, Total, free, 2, 3, [], "test-device", new() { [endpointId] = new([1234], worker, [], worker) }, true, null);
@@ -757,6 +744,10 @@ internal static class ResourceChecks
         loaded = keepLoaded = true;
         await providers.RefreshAsync(providers.View.Endpoints.Single().Id, default);
         resources.ApplyObservation(Sample() with { FreeRam = 0 });
+        Check(resources.ServingAllowed && loaded, "memory pressure alone preserves serving and residency");
+        resources.ApplyObservation(Sample() with { ExternalCpu = 100 });
+        clock.Advance(10);
+        resources.ApplyObservation(Sample() with { ExternalCpu = 100 });
         await Pump(ContributionState.Fault);
         loaded = false;
         clock.Advance(1);

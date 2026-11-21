@@ -87,7 +87,7 @@ test('changing to a provider without models clears the previous qualification an
   assert.equal(oldWriter.bindings.length, 0);
 });
 
-test('a peer deployment sharing a local ID shows its advertised limits and never binds the local budget', () => {
+test('a peer deployment sharing a local ID shows its advertised slots and never binds the local budget', () => {
   const nodes = new Map();
   const get = selector => {
     if (!nodes.has(selector)) nodes.set(selector, { dataset: {}, textContent: '', addEventListener() {},
@@ -106,8 +106,8 @@ test('a peer deployment sharing a local ID shows its advertised limits and never
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../../src/Mango/wwwroot/resources.js'), 'utf8'), context);
   vm.runInContext('resourceView = { models: [{ id: "same", identifier: "Local model" }] }; renderQualification();', context);
   assert.equal(get('#qualification-title').textContent, 'Peer model');
-  assert.match(get('#qualification-empty').textContent, /Managed on Peer host/);
-  assert.match(get('#qualification-empty').textContent, /1024 pixels per image/);
+  assert.match(get('#qualification-empty').textContent, /Load peaks are managed on Peer host/);
+  assert.match(get('#qualification-empty').textContent, /Images · 1 slot/);
   assert.equal(get('#resource-form').hidden, true);
   assert.equal(get('#resource-retry').disabled, true);
 });

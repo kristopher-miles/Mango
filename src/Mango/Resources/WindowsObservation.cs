@@ -20,7 +20,7 @@ internal sealed class WindowsObservation : IDisposable
     public ResourceObservation Sample(CatalogView view, DateTimeOffset now)
     {
         var memory = WindowsMemory.ReadWithCommit();
-        var endpoints = view.Endpoints.Where(endpoint => endpoint.Mode == ProviderMode.Managed &&
+        var endpoints = view.Endpoints.Where(endpoint => (endpoint.Mode == ProviderMode.Managed || view.Models.Any(model => model.EndpointId == endpoint.Id && model.Busy)) &&
             (endpoint.ExclusiveHost ? endpoint.HostReserved : endpoint.Online || endpoint.OwnedProcessId.HasValue)).ToArray();
         var roots = new Dictionary<Guid, (int[] Processes, bool Exact)>();
         var listeners = endpoints.Any(endpoint => !endpoint.ExclusiveHost && !endpoint.OwnedProcessId.HasValue) ? ReadListeners() : [];

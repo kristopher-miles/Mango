@@ -51,7 +51,7 @@ internal static class StrataChecks
         resources.ApplyObservation(observed);
         Check(resources.Status.State == ContributionState.Contributor, "Commit headroom uses the confirmed Mango RAM reserve.");
         resources.ApplyObservation(observed with { FreeCommit = gib });
-        Check(resources.Status.State == ContributionState.Withdrawing, "Commit below the configured reserve releases Strata.");
+        Check(resources.Status.State == ContributionState.Contributor, "Low commit alone leaves Strata available.");
 
         Check(StrataAdapter.AllowsClientTools(default), "Cold Strata can route client tools before its template is loaded.");
         using var compatible = JsonDocument.Parse("""{"chat_template_caps":{"supports_tools":true,"supports_tool_calls":true}}""");
