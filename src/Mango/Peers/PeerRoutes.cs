@@ -33,6 +33,8 @@ internal static class PeerRoutes
             HandleAsync(context, token => peers.JoinAsync(input, token)));
         network.MapPost("/pairing-code", (HttpRequest request, HttpContext context) =>
             HandleAsync(context, token => peers.IssuePairingAsync(request, token)));
+        network.MapPost("/login-code", (HttpRequest request, HttpContext context) =>
+            HandleAsync(context, _ => Task.FromResult(peers.IssueBrowserLoginCode(request))));
         network.MapPut("/unlock", (UnlockRequest input, HttpContext context) =>
             HandleAsync(context, token => peers.UnlockAsync(input, context.Connection.RemoteIpAddress!, token)));
         network.MapPut("/lock", (HttpRequest request) =>
@@ -151,6 +153,10 @@ internal static class PeerRoutes
         peer.MapGet("/info", () => peers.Introduction() is { } info ? Results.Json(info) : Results.NotFound());
         peer.MapPost("/enroll", (EnrollmentRequest input, HttpContext context) =>
             HandleAsync(context, token => peers.AcceptEnrollmentAsync(input, context.Connection.RemoteIpAddress!, token)));
+        peer.MapPost("/login-code/claim", (LoginCodeClaim input, HttpContext context) =>
+            peers.Administration!.Claim(peers.Snapshot, input, ((PeerAuthentication)context.Items[typeof(PeerAuthentication)]!).Node));
+        peer.MapPost("/login-code/check", (LoginCodeCheck input, HttpContext context) =>
+            peers.Administration!.Check(peers.Snapshot, input, ((PeerAuthentication)context.Items[typeof(PeerAuthentication)]!).Node));
         peer.MapGet("/ping", () => Results.NoContent());
         peer.MapGet("/versions", () => new PeerVersions(peers.Snapshot.Versions));
         peer.MapPost("/pull", (PeerVersions known) => PeerNetwork.ValidVersions(known.Records)

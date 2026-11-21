@@ -4,7 +4,13 @@ Use `Mango admin` on Linux or `Mango.Cli.exe admin` from the Windows package. `M
 
 For an Apple silicon CLI build, run `dotnet publish src/Mango/Mango.csproj -p:MangoLinux=true -c Release -r osx-arm64 --self-contained -o out/osx-arm64` and use `Mango admin --target ADDRESS`. Install and connect the [Tailscale macOS client](https://tailscale.com/docs/reference/tailscale-cli?tab=macos).
 
-## Log in and hand off access
+## Get a login code
+
+In the Mango browser console, unlock network administration and open **Network → Computers and queue**. Select **Get login code** in the **Network computers** header and copy the code from the dialog.
+
+The 27-character code works once across the Mango network. Choose the computer to manage when signing in. The computer that issued the code must remain reachable while you use that session.
+
+You can also generate a code from the terminal:
 
 ```sh
 Mango admin --target 100.64.0.10 login
@@ -12,7 +18,7 @@ Mango admin --target 100.64.0.10 status
 Mango admin --target 100.64.0.10 access issue
 ```
 
-`login` reads the regular Mango master password from a hidden prompt or one line of stdin. `access issue` returns a 22-character code and its ID. Give the recipient the target address and the code. The recipient runs:
+`login` reads the regular Mango master password from a hidden prompt or one line of stdin. `access issue` returns the code and its ID. Give the recipient the code. The recipient chooses their target and runs:
 
 ```sh
 Mango admin --target 100.64.0.10 login --code
@@ -20,7 +26,7 @@ Mango admin --target 100.64.0.10 status
 Mango admin --target 100.64.0.10 logout
 ```
 
-The code signs the recipient into that node with the same Mango permissions as a password login. The node accepts it once, and it expires in ten minutes by default. An optional number of minutes from 1 to 60 follows `access issue`. Both login methods open a ten-minute session. `access list` shows code IDs and whether they were redeemed. `access revoke ID` cancels the code and the session it opened. Losing or restarting the issuer clears the codes and sessions. Operations such as removing a peer, changing the network password, or sharing updates still affect the Mango network.
+The code signs the recipient into their chosen node with the same Mango permissions as a password login. It expires in ten minutes by default. An optional number of minutes from 1 to 60 follows `access issue`. Both login methods open a ten-minute session. On the issuing node, `access list` shows code IDs and whether they were redeemed, and `access revoke ID` cancels the code and the session it opened. Losing or restarting the issuer clears its codes and sessions. Operations such as removing a peer, changing the network password, or sharing updates still affect the Mango network.
 
 On the target, run the CLI as the service account and use `--data-dir PATH` in place of `--target` to connect through the local control socket. A new local installation can use `network create --stdin` with a JSON object containing `name` and `password`. The local `network recover --stdin` command takes `recoveryRecord` and `newPassword`. Use the normal `--pair` launcher option to enroll a fresh installation. Pairing codes identify the issuer and intended network and can enroll a node for one hour. They are separate from admin login codes.
 

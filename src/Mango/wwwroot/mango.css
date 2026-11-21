@@ -176,8 +176,8 @@ input[type=checkbox]{accent-color:var(--green);width:18px;height:18px;margin:0;f
 .node-card p{font-size:13px;margin:6px 0}
 .node-card .actions{margin:8px 0 0}
 .network-computers-heading{align-items:center}
-#network-pairing{padding-inline:8px}
-@media(max-width:480px){#network-pairing span{display:none}}
+:is(#network-pairing,#network-login-code){padding-inline:8px}
+@media(max-width:480px){:is(#network-pairing,#network-login-code) span{display:none}}
 table{border-collapse:collapse;width:100%;font-size:12px}
 td,th{padding:11px 10px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top;overflow-wrap:anywhere}
 th{font-weight:600;color:var(--muted);background:var(--canvas)}

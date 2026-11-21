@@ -111,7 +111,7 @@ internal static partial class PeerChecks
             var joined = await Local(http, joining, "network/join", join with { PairingSecret = fresh.Secret });
             var joinedId = joined.GetProperty("node").GetGuid();
             Check(issuer.Network.Snapshot.Nodes.ContainsKey(joinedId) && joining.Network.IsMember, "pairing enrolls without a password");
-            await TestNodeAdminAsync(http, issuer, joining, address, clock);
+            await TestNodeAdminAsync(http, issuer, joining, clock);
 
             await issuer.DisposeAsync();
             issuer = await Host.StartAsync(issuerPath, status, issuerPort, time: clock);
@@ -122,11 +122,14 @@ internal static partial class PeerChecks
         finally { await issuer.DisposeAsync(); }
     }
 
-    private static async Task TestNodeAdminAsync(HttpClient http, Host issuer, Host other, IPAddress ip, PairingClock clock)
+    private static async Task TestNodeAdminAsync(HttpClient http, Host issuer, Host other, PairingClock clock)
     {
         var address = issuer.TailAddress + "/peer/admin/";
+        var remote = other.TailAddress + "/peer/admin/";
         var unauthorized = new AdminInvocation("status", null, null);
         await Request(http, HttpMethod.Post, address + "run", body: unauthorized, expected: 401);
+        await Request(http, HttpMethod.Post, issuer.TailAddress + "/peer/login-code/claim",
+            body: new LoginCodeClaim(PeerCredentials.Secret(), Guid.NewGuid(), issuer.Network.Snapshot.Records.Authority!.Revision), expected: 401);
         await Request(http, HttpMethod.Post, address + "login", body: new AdminLogin("incorrect password", null), expected: 401);
         var owner = (await Request(http, HttpMethod.Post, address + "login", body: new AdminLogin(Password, null)))
             .GetProperty("token").GetString()!;
@@ -134,28 +137,30 @@ internal static partial class PeerChecks
         clock.Now = clock.Now.AddMinutes(1);
         await Request(http, HttpMethod.Post, address + "login",
             body: new AdminLogin(null, shortGrant.GetProperty("code").GetString()), expected: 401);
-        var grant = await Request(http, HttpMethod.Post, address + "codes", body: new AdminCodeRequest(), nodeAdmin: owner);
+        await Local(http, issuer, "network/login-code", method: HttpMethod.Post, expected: 403);
+        var browser = await Unlock(http, issuer, Password);
+        var grant = await Local(http, issuer, "network/login-code", admin: browser, method: HttpMethod.Post);
         var code = grant.GetProperty("code").GetString()!;
-        Check(code.Length == 22, "login code is compact");
-        await Request(http, HttpMethod.Post, other.TailAddress + "/peer/admin/login", body: new AdminLogin(null, code), expected: 401);
-        var helper = (await Request(http, HttpMethod.Post, address + "login", body: new AdminLogin(null, code)))
+        Check(code.Length == 27, "browser returns a compact network-wide login code");
+        var helper = (await Request(http, HttpMethod.Post, remote + "login", body: new AdminLogin(null, code)))
             .GetProperty("token").GetString()!;
         await Request(http, HttpMethod.Post, address + "login", body: new AdminLogin(null, code), expected: 401);
-        var settings = await Request(http, HttpMethod.Post, address + "run", body: new AdminInvocation("settings show", null, null), nodeAdmin: helper);
+        await Request(http, HttpMethod.Post, remote + "login", body: new AdminLogin(null, code), expected: 401);
+        var settings = await Request(http, HttpMethod.Post, remote + "run", body: new AdminInvocation("settings show", null, null), nodeAdmin: helper);
         Check(settings.GetProperty("settings").GetProperty("role").GetString() == "leech", "code login has the same node access as password login");
-        await Request(http, HttpMethod.Post, address + "run", body: new AdminInvocation("keys revoke", "../logs", null), nodeAdmin: helper,
+        await Request(http, HttpMethod.Post, remote + "run", body: new AdminInvocation("keys revoke", "../logs", null), nodeAdmin: helper,
             expected: 400);
         var proxyPort = Port(IPAddress.Loopback);
         var publicOrigin = $"http://127.0.0.1:{proxyPort}";
-        await Request(http, HttpMethod.Post, address + "run", body: new AdminInvocation("https set", null,
+        await Request(http, HttpMethod.Post, remote + "run", body: new AdminInvocation("https set", null,
             JsonSerializer.SerializeToElement(new { enabled = true, port = proxyPort, httpsOrigin = "https://mango.example.test" })),
             nodeAdmin: helper, expected: 204);
         await Request(http, HttpMethod.Get, publicOrigin + "/v1/models", expected: 401);
         await Request(http, HttpMethod.Post, publicOrigin + "/peer/admin/run", body: unauthorized, nodeAdmin: helper, expected: 404);
-        await Request(http, HttpMethod.Post, address + "run", body: new AdminInvocation("updates policy", null,
+        await Request(http, HttpMethod.Post, remote + "run", body: new AdminInvocation("updates policy", null,
             JsonSerializer.SerializeToElement(new { daily = true })), nodeAdmin: helper, expected: 204);
         await Request(http, HttpMethod.Delete, address + "codes/" + grant.GetProperty("id").GetGuid(), nodeAdmin: owner, expected: 204);
-        await Request(http, HttpMethod.Post, address + "run", body: unauthorized, nodeAdmin: helper, expected: 401);
+        await Request(http, HttpMethod.Post, remote + "run", body: unauthorized, nodeAdmin: helper, expected: 401);
         await Request(http, HttpMethod.Post, address + "logout", nodeAdmin: owner, expected: 204);
         await Request(http, HttpMethod.Post, address + "run", body: unauthorized, nodeAdmin: owner, expected: 401);
     }

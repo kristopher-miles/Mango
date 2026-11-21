@@ -16,8 +16,8 @@ internal static class AdminCli
         login                         Read the master password from a hidden prompt or stdin.
         login --code                  Read a one-time login code from a hidden prompt or stdin.
         logout                        End the current session.
-        access issue [MINUTES]        Issue a one-time login code for this node.
-        access list                   List code IDs, expiry and redemption status.
+        access issue [MINUTES]        Issue a one-time login code for this Mango network.
+        access list                   List codes issued by this node.
         access revoke ID              Revoke a code and any session it opened.
         updates enable | disable | defer | resume
         https enable ORIGIN [UPSTREAM_PORT] | disable

@@ -3,6 +3,7 @@
 const networkFeedback = document.querySelector("#network-status");
 const networkForms = Object.fromEntries(["discover", "join", "create", "unlock", "issue", "password", "recover", "reset", "queue"].map(name => [name, document.querySelector(`#network-${name}`)]));
 const networkPairing = document.querySelector("#network-pairing");
+const networkLoginCode = document.querySelector("#network-login-code");
 const networkScopes = { ...operationNames, imageInput: "Image input", audioInput: "Audio input" };
 const networkSecretPanel = document.querySelector("#network-secret");
 const networkSecret = document.querySelector("#network-secret-value");
@@ -16,14 +17,16 @@ for (const [value, text] of Object.entries(networkScopes)) {
   Object.assign(input, { type: "checkbox", name: "scopes", value });
   label.append(input, text); document.querySelector("#network-scopes").append(label);
 }
-function showNetworkSecret(value, recovery, pairingExpiry = null) {
+function showNetworkSecret(value, title, label, download = false) {
   networkSecret.value = value;
-  document.querySelector("#network-secret-title").textContent = pairingExpiry ? "One-time pairing code" : recovery ? "Keep your recovery record" : "Your inference key";
-  document.querySelector("#network-secret-label").textContent = pairingExpiry ? `Run Mango --pair <code> on the computer joining the network. The code expires after one use or at ${timeLabel(pairingExpiry)}.` :
-    recovery ? "Store this recovery record outside the network. Download it to keep or print it." : "Copy this key now. Mango cannot display the secret again.";
+  document.querySelector("#network-secret-title").textContent = title;
+  document.querySelector("#network-secret-label").textContent = label;
   document.querySelector("#secret-feedback").textContent = "";
-  networkDownload.hidden = !recovery;
+  networkDownload.hidden = !download;
   networkSecretPanel.showModal(); networkSecret.focus(); networkSecret.select();
+}
+function showRecoveryRecord(value) {
+  showNetworkSecret(value, "Keep your recovery record", "Store this recovery record outside the network. Download it to keep or print it.", true);
 }
 function hideNetworkSecret() { networkSecretPanel.close(); }
 networkSecretPanel.addEventListener("close", () => { networkSecret.value = ""; });
@@ -88,8 +91,10 @@ function renderAdministration() {
   document.querySelector("#admin-lock").disabled = administration.locking;
   document.querySelector("#admin-control").disabled = administration.locking;
   for (const form of [networkForms.issue, networkForms.password, networkForms.reset, networkForms.queue]) form.querySelector("fieldset") ? form.querySelector("fieldset").disabled = !unlocked : [...form.elements].filter(input => !input.hasAttribute("data-admin-unlock")).forEach(input => input.disabled = !unlocked);
-  networkPairing.hidden = !active;
-  networkPairing.disabled = administration.locking || !networkView?.ready;
+  for (const button of [networkPairing, networkLoginCode]) {
+    button.hidden = !active;
+    button.disabled = administration.locking || !networkView?.ready;
+  }
   for (const button of document.querySelectorAll("[data-admin-unlock]")) button.hidden = !active || unlocked;
   const feedback = document.querySelector("#queue-feedback");
   if (!unlocked) { feedback.textContent = "Unlock administration in the top bar to change the queue."; delete feedback.dataset.feedback; }
@@ -240,7 +245,7 @@ async function enroll(kind, fields) {
   if (session) setAdministration(session);
   await Promise.allSettled([loadSettings(), loadNetwork(), loadProviders(), loadLogs()]);
   navigate(`serving/${result.node}`);
-  if (result.recoveryRecord) showNetworkSecret(result.recoveryRecord, true);
+  if (result.recoveryRecord) showRecoveryRecord(result.recoveryRecord);
   if (interrupted && kind === "create") showSessionError(new Error("The network was created, but its one-time recovery record was lost with the interrupted response. Mango cannot show it again. Keep the master password securely."));
   if (unlockError) {
     showSessionError(new Error(`Network ${kind === "create" ? "created" : "joined"}. Automatic unlock failed: ${unlockError.message} Use Unlock in the top bar; setup is already complete.`));
@@ -264,14 +269,25 @@ networkForms.issue.elements.expiry.addEventListener("change", event => {
 networkForm("issue", "key-feedback", async (values, fields) => {
   const result = await api("network/keys", { name: values.name, priority: values.priority, scopes: fields.getAll("scopes"),
     neverExpires: values.expiry === "never", expiresAt: values.expiry === "date" ? new Date(values.expiresAt).toISOString() : null }, "POST");
-  showNetworkSecret(result.secret, false); await loadNetwork(); return showDelivery(result.delivery);
+  showNetworkSecret(result.secret, "Your inference key", "Copy this key now. Mango cannot display the secret again.");
+  await loadNetwork(); return showDelivery(result.delivery);
 });
 networkPairing.addEventListener("click", () => {
   if (!administration.token) { openAdministration(); return; }
   networkAction(networkPairing, async () => {
     const result = await api("network/pairing-code", null, "POST");
-    showNetworkSecret(result.code, false, result.expiresAt);
+    showNetworkSecret(result.code, "One-time pairing code",
+      `Run Mango --pair <code> on the computer joining the network. The code expires after one use or at ${timeLabel(result.expiresAt)}.`);
     return "Pairing code created.";
+  });
+});
+networkLoginCode.addEventListener("click", () => {
+  if (!administration.token) { openAdministration(); return; }
+  networkAction(networkLoginCode, async () => {
+    const result = await api("network/login-code", null, "POST");
+    showNetworkSecret(result.code, "One-time login code",
+      `Use this code to log in to any updated computer on your Mango network. It expires after one use or at ${timeLabel(result.expiresAt)}.`);
+    return "Login code created.";
   });
 });
 networkForm("password", "recovery-feedback", async fields => {
@@ -291,7 +307,7 @@ networkForm("recover", "recovery-feedback", async fields => {
 });
 networkForm("reset", "recovery-feedback", async fields => {
   const result = await api("network/reset", { newPassword: fields.newPassword, confirm: fields.confirm === "on" });
-  setAdministration(null); showNetworkSecret(result.recoveryRecord, true); await Promise.allSettled([loadNetwork(), loadLogs()]); return showDelivery(result.delivery);
+  setAdministration(null); showRecoveryRecord(result.recoveryRecord); await Promise.allSettled([loadNetwork(), loadLogs()]); return showDelivery(result.delivery);
 });
 document.querySelector("#network-refresh").addEventListener("click", event => networkAction(event.currentTarget, async () => {
   await api("network/refresh", {}); await loadNetwork(); return "Network refreshed.";
