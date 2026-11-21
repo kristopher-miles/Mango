@@ -1,19 +1,29 @@
-using System.ComponentModel;
 using System.Diagnostics;
+using System.Text;
 using Mango.Host;
 using Mango.Peers;
 using Mango.Providers;
 using Mango.Resources;
+#if WINDOWS
+using System.ComponentModel;
+#endif
 
 namespace Mango;
 
 internal static class Program
 {
+    private const string Usage = "Mango options: --headless, --background (Windows), --quit, --url, --data-dir <path>, --port <0-65535>, --peer-port <1-65535>, --join <peer-address> <network-id> [--name <node-name>].";
+
     [STAThread]
     public static int Main(string[] args)
     {
-        if (args.FirstOrDefault() == WindowsJob.StarterArgument)
+        if (OperatingSystem.IsWindows() && args.FirstOrDefault() == WindowsJob.StarterArgument)
             return WindowsJob.StartChildAsync(args).GetAwaiter().GetResult();
+        if (args is ["--help"])
+        {
+            Console.WriteLine(Usage);
+            return 0;
+        }
         LaunchOptions options;
         try
         {
@@ -40,16 +50,28 @@ internal static class Program
                 return 0;
             }
 
-            Directory.CreateDirectory(directory);
+            if (OperatingSystem.IsLinux())
+            {
+                const UnixFileMode privateDirectory = UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute;
+                Directory.CreateDirectory(directory, privateDirectory);
+                if (File.GetUnixFileMode(directory) != privateDirectory)
+                    throw new IOException("Mango's data directory must have permissions 0700.");
+            }
+            else
+                Directory.CreateDirectory(directory);
             lease = instance.TryAcquire();
             if (lease is null)
             {
+                if (options.Join is not null)
+                    throw new IOException("Stop the Mango host for this data directory before enrolling.");
+#if WINDOWS
                 if (!options.Background && !options.Headless)
                     OpenBrowser(instance.ContactAsync(quit: false).GetAwaiter().GetResult());
+#endif
                 return 0;
             }
 
-            using var package = UpdateInstall.HoldPackage();
+            using var package = OperatingSystem.IsWindows() ? UpdateInstall.HoldPackage() : null;
             Run(options, directory, instance, diagnostic);
             return 0;
         }
@@ -57,7 +79,7 @@ internal static class Program
         {
             var message = $"Mango could not start or contact its host. {error.Message}";
             Console.Error.WriteLine(message);
-            if (lease is not null)
+            if (lease is not null && options.Join is null)
             {
                 try
                 {
@@ -70,8 +92,10 @@ internal static class Program
             }
             lease?.Dispose();
             lease = null;
-            if (!options.Headless && !options.ControlOnly)
+#if WINDOWS
+            if (!options.Headless && !options.ControlOnly && options.Join is null)
                 MessageBox.Show(message, "Mango", MessageBoxButtons.OK, MessageBoxIcon.Error);
+#endif
             return 1;
         }
         finally
@@ -82,24 +106,33 @@ internal static class Program
 
     private static void Run(LaunchOptions options, string directory, InstanceControl instance, string diagnostic)
     {
+        var windows = OperatingSystem.IsWindows();
         var settings = new SnapshotFile<LocalSettings>(Path.Combine(directory, "local-settings.json"), LocalSettings.Validate);
         settings.LoadAsync(new LocalSettings()).GetAwaiter().GetResult();
         var nodePort = settings.Value.NodePort;
         var loopbackPort = nodePort ?? options.Port ?? (options.DataDirectory is null ? LocalWeb.DefaultPort : 0);
-        using var resources = new ResourceProtection(directory, settings);
+        using var resources = windows ? new ResourceProtection(directory, settings) : null;
         var providers = new ProviderCatalog(directory, resources);
         var peers = new PeerNetwork(directory, nodePort ?? options.PeerPort ?? PeerLimits.DefaultPort, providers, settings);
-        using var updates = new WindowsUpdates(directory, options.RestartArguments(), settings, peers, options.UpdateReady is not null);
+        using var updates = windows
+            ? new WindowsUpdates(directory, options.RestartArguments(), settings, peers, options.UpdateReady is not null) : null;
         peers.Updates = updates;
-        var ingress = new PublicIngress(directory, peers);
+        var ingress = windows ? new PublicIngress(directory, peers) : null;
         var web = new LocalWeb();
         try
         {
-            resources.InitializeAsync().GetAwaiter().GetResult();
+            resources?.InitializeAsync().GetAwaiter().GetResult();
             providers.InitializeAsync().GetAwaiter().GetResult();
-            resources.RestoreUnsettled(providers);
+            resources?.RestoreUnsettled(providers);
             peers.InitializeAsync().GetAwaiter().GetResult();
-            ingress.InitializeAsync().GetAwaiter().GetResult();
+            if (options.Join is { } join)
+            {
+                peers.RefreshTransportAsync(CancellationToken.None).GetAwaiter().GetResult();
+                var joined = peers.JoinAsync(join with { Password = ReadJoinPassword() }, CancellationToken.None).GetAwaiter().GetResult();
+                Console.WriteLine($"Enrolled leech node {joined.Node} in Mango network {joined.Identity.Id}.");
+                return;
+            }
+            ingress?.InitializeAsync().GetAwaiter().GetResult();
             var startup = new LoginStartup(options.DataDirectory);
             var app = web.Build(loopbackPort, directory, settings, startup, providers, peers, ingress);
             int? unavailablePort = null;
@@ -123,20 +156,20 @@ internal static class Program
         }
         finally
         {
-            ingress.DisposeAsync().AsTask().GetAwaiter().GetResult();
+            ingress?.DisposeAsync().AsTask().GetAwaiter().GetResult();
             peers.DisposeAsync().AsTask().GetAwaiter().GetResult();
             providers.DisposeAsync().AsTask().GetAwaiter().GetResult();
         }
     }
 
     private static void RunHost(WebApplication app, LaunchOptions options, string directory, InstanceControl instance, string diagnostic,
-        SnapshotFile<LocalSettings> settings, LocalWeb web, ProviderCatalog providers, PeerNetwork peers, WindowsUpdates updates,
+        SnapshotFile<LocalSettings> settings, LocalWeb web, ProviderCatalog providers, PeerNetwork peers, WindowsUpdates? updates,
         int? unavailableLoopbackPort)
     {
-        var inventory = providers.RunAsync(app.Lifetime.ApplicationStopping);
+        var inventory = providers.Resources is null ? Task.CompletedTask : providers.RunAsync(app.Lifetime.ApplicationStopping);
         var network = peers.RunAsync(app.Lifetime.ApplicationStopping, refreshTransport: false);
-        var protection = providers.Resources!.RunAsync(providers, app.Lifetime.ApplicationStopping);
-        var updateChecks = updates.RunAsync(app.Lifetime);
+        var protection = providers.Resources?.RunAsync(providers, app.Lifetime.ApplicationStopping) ?? Task.CompletedTask;
+        var updateChecks = updates?.RunAsync(app.Lifetime) ?? Task.CompletedTask;
         try
         {
             var url = web.BrowserUrl(app.Urls.Single());
@@ -167,8 +200,10 @@ internal static class Program
 
             try
             {
+#if WINDOWS
                 if (!options.Headless)
                     Tray.Run(settings, app.Lifetime, () => OpenBrowser(url), openOnStartup: !options.Background || portUnavailable);
+#endif
             }
             finally
             {
@@ -185,6 +220,28 @@ internal static class Program
         }
     }
 
+    private static string? ReadJoinPassword()
+    {
+        if (Console.IsInputRedirected)
+            return Console.ReadLine();
+        Console.Error.Write("Mango network master password: ");
+        var password = new StringBuilder();
+        while (true)
+        {
+            var key = Console.ReadKey(intercept: true);
+            if (key.Key == ConsoleKey.Enter)
+            {
+                Console.Error.WriteLine();
+                return password.ToString();
+            }
+            if (key.Key == ConsoleKey.Backspace && password.Length > 0)
+                password.Length--;
+            else if (!char.IsControl(key.KeyChar))
+                password.Append(key.KeyChar);
+        }
+    }
+
+#if WINDOWS
     private static void OpenBrowser(string url)
     {
         try
@@ -197,9 +254,10 @@ internal static class Program
                 MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
     }
+#endif
 
     private sealed record LaunchOptions(bool Headless, bool Background, bool Quit, bool PrintUrl, string? DataDirectory, int? Port,
-        int? PeerPort, string? UpdateReady)
+        int? PeerPort, string? UpdateReady, JoinNetworkRequest? Join)
     {
         public bool ControlOnly => Quit || PrintUrl;
 
@@ -218,15 +276,18 @@ internal static class Program
             int? peerPort = null;
             string? directory = null;
             string? updateReady = null;
+            string? joinAddress = null;
+            string? nodeName = null;
+            var network = Guid.Empty;
             for (var index = 0; index < args.Length; index++)
             {
                 switch (args[index])
                 {
                     case "--headless": headless = true; break;
-                    case "--background": background = true; break;
+                    case "--background" when OperatingSystem.IsWindows(): background = true; break;
                     case "--quit": quit = true; break;
                     case "--url": printUrl = true; break;
-                    case "--update-ready" when index + 1 < args.Length && Guid.TryParseExact(args[index + 1], "N", out _):
+                    case "--update-ready" when OperatingSystem.IsWindows() && index + 1 < args.Length && Guid.TryParseExact(args[index + 1], "N", out _):
                         updateReady = args[++index];
                         break;
                     case "--data-dir" when index + 1 < args.Length:
@@ -240,13 +301,25 @@ internal static class Program
                         peerPort = servicePort;
                         index++;
                         break;
+                    case "--join" when joinAddress is null && index + 2 < args.Length &&
+                        Tailnet.Address(args[index + 1]) is { } target && Guid.TryParse(args[index + 2], out network) && network != Guid.Empty:
+                        joinAddress = target.GetLeftPart(UriPartial.Authority);
+                        index += 2;
+                        break;
+                    case "--name" when nodeName is null && index + 1 < args.Length && !args[index + 1].StartsWith("--", StringComparison.Ordinal):
+                        nodeName = args[++index];
+                        break;
                     default:
-                        throw new ArgumentException($"Invalid option {args[index]}. Use --headless, --background, --quit, --url, --data-dir <path>, --port <0-65535>, or --peer-port <1-65535>.");
+                        throw new ArgumentException($"Invalid command line. {Usage}");
                 }
             }
-            if ((headless ? 1 : 0) + (background ? 1 : 0) + (quit ? 1 : 0) + (printUrl ? 1 : 0) > 1)
+            if ((headless ? 1 : 0) + (background ? 1 : 0) + (quit ? 1 : 0) + (printUrl ? 1 : 0) + (joinAddress is not null ? 1 : 0) > 1)
                 throw new ArgumentException("Use only one launch mode at a time.");
-            return new LaunchOptions(headless, background, quit, printUrl, directory, port, peerPort, updateReady);
+            if (nodeName is not null && joinAddress is null)
+                throw new ArgumentException("Use --name with --join.");
+            var join = joinAddress is null ? null :
+                new JoinNetworkRequest(nodeName ?? Environment.MachineName, joinAddress, network, null, BenchmarkPolicy.Never, LocalRole.Leech);
+            return new LaunchOptions(headless || !OperatingSystem.IsWindows(), background, quit, printUrl, directory, port, peerPort, updateReady, join);
         }
     }
 }

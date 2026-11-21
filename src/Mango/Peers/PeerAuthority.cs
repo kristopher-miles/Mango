@@ -43,6 +43,7 @@ internal sealed partial class PeerNetwork
     private async Task<NetworkSetup> CreateNetworkAsync(CreateNetworkRequest input, CancellationToken cancellation)
     {
         var name = RequireName(input.Name, "node");
+        ValidateEnrollmentPreferences(input.BenchmarkPolicy, input.Role);
         var status = RequireInterface();
         var recovery = PeerCredentials.Secret();
         var secret = PeerCredentials.Secret();
@@ -75,6 +76,7 @@ internal sealed partial class PeerNetwork
         try
         {
             var name = RequireName(input.Name, "node");
+            ValidateEnrollmentPreferences(input.BenchmarkPolicy, input.Role);
             var status = RequireInterface();
             var target = Tailnet.Address(input.Address, port) ?? throw new PeerFailure(400, "Enter the selected peer's Tailscale address.");
             if (input.Network == Guid.Empty || input.Password is not { Length: > 0 and <= 256 })
@@ -156,10 +158,16 @@ internal sealed partial class PeerNetwork
         finally { setup.Release(); }
     }
 
-    private async Task SaveEnrollmentPreferencesAsync(BenchmarkPolicy? choice, LocalRole? role, CancellationToken cancellation)
+    private static void ValidateEnrollmentPreferences(BenchmarkPolicy? choice, LocalRole? role)
     {
         if (choice is { } policy && !Enum.IsDefined(policy) || role is { } preferred && !Enum.IsDefined(preferred))
             throw new PeerFailure(400, "Choose a local role and benchmark policy.");
+        if (OperatingSystem.IsLinux() && role == LocalRole.Contributor)
+            throw new PeerFailure(400, "Linux nodes must use the leech role.");
+    }
+
+    private async Task SaveEnrollmentPreferencesAsync(BenchmarkPolicy? choice, LocalRole? role, CancellationToken cancellation)
+    {
         if (choice is not null || role is not null)
             await settings.UpdateAsync(current => current with
             {

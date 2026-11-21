@@ -53,8 +53,11 @@ internal static class Tailnet
 
     public static async Task<TailnetStatus> ReadAsync(CancellationToken stopping)
     {
-        var executable = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Tailscale", "tailscale.exe");
-        if (!File.Exists(executable))
+        var windows = OperatingSystem.IsWindows();
+        var executable = windows
+            ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Tailscale", "tailscale.exe")
+            : "tailscale";
+        if (windows && !File.Exists(executable))
             return new(null, [], [], "Tailscale is missing. Install and sign in to the Windows Tailscale client.");
 
         try
@@ -96,9 +99,11 @@ internal static class Tailnet
             if (!root.TryGetProperty("Self", out var self) || String(self, "ID") is not { Length: > 0 } device)
                 return new(null, [], [], "Tailscale did not report this device's identity.");
             var bound = NetworkInterface.GetAllNetworkInterfaces()
-                .Where(item => item.OperationalStatus == OperationalStatus.Up &&
-                    (item.Name.Equals("Tailscale", StringComparison.OrdinalIgnoreCase) ||
-                     item.Description.Contains("Tailscale", StringComparison.OrdinalIgnoreCase)))
+                .Where(item => windows
+                    ? item.OperationalStatus == OperationalStatus.Up &&
+                        (item.Name.Equals("Tailscale", StringComparison.OrdinalIgnoreCase) ||
+                         item.Description.Contains("Tailscale", StringComparison.OrdinalIgnoreCase))
+                    : item.Name == "tailscale0" && item.OperationalStatus is OperationalStatus.Up or OperationalStatus.Unknown)
                 .SelectMany(item => item.GetIPProperties().UnicastAddresses.Select(entry => entry.Address))
                 .ToHashSet();
             var local = Addresses(root).Where(bound.Contains).ToArray();

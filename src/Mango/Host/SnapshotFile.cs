@@ -102,7 +102,13 @@ internal sealed class SnapshotFile<T>(string path, Func<T, string?> validate) wh
         if (validate(next) is { } error)
             throw new ArgumentException(error);
 
-        await using (var stream = new FileStream(pending, FileMode.Create, FileAccess.Write, FileShare.None, 4096, useAsync: true))
+        var options = new FileStreamOptions
+        {
+            Mode = FileMode.Create, Access = FileAccess.Write, Share = FileShare.None, Options = FileOptions.Asynchronous
+        };
+        if (OperatingSystem.IsLinux())
+            options.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+        await using (var stream = new FileStream(pending, options))
         {
             await JsonSerializer.SerializeAsync(stream, next, Json, cancellationToken);
             stream.Flush(flushToDisk: true);

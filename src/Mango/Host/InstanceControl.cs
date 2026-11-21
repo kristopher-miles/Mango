@@ -8,7 +8,8 @@ internal sealed class InstanceControl(string directory)
 {
     private readonly string lockPath = Path.Combine(directory, "host.lock");
     private readonly string pipeName =
-        "Mango-" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(directory.ToUpperInvariant())));
+        "Mango-" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(
+            OperatingSystem.IsWindows() ? directory.ToUpperInvariant() : directory)));
 
     public FileStream? TryAcquire()
     {
@@ -16,7 +17,8 @@ internal sealed class InstanceControl(string directory)
         {
             return new FileStream(lockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
         }
-        catch (IOException error) when ((error.HResult & 0xffff) is 32 or 33)
+        catch (IOException error) when ((error.HResult & 0xffff) is 32 or 33 ||
+            OperatingSystem.IsLinux() && (error.HResult & 0xffff) == 11)
         {
             return null;
         }

@@ -1,14 +1,18 @@
 <Project Sdk="Microsoft.NET.Sdk.Web">
   <PropertyGroup>
-    <TargetFramework>net10.0-windows</TargetFramework>
-    <OutputType>WinExe</OutputType>
-    <UseWindowsForms>true</UseWindowsForms>
+    <TargetFramework Condition="'$(MangoLinux)' != 'true'">net10.0-windows</TargetFramework>
+    <TargetFramework Condition="'$(MangoLinux)' == 'true'">net10.0</TargetFramework>
+    <OutputType Condition="'$(MangoLinux)' != 'true'">WinExe</OutputType>
+    <UseWindowsForms Condition="'$(MangoLinux)' != 'true'">true</UseWindowsForms>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <Version>0.0.1</Version>
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
   </PropertyGroup>
+  <ItemGroup Condition="'$(MangoLinux)' == 'true'">
+    <Compile Remove="Host/Tray.cs" />
+  </ItemGroup>
   <ItemGroup>
     <Content Update="wwwroot/**/*" CopyToOutputDirectory="PreserveNewest" />
     <InternalsVisibleTo Include="Mango.Tests" />

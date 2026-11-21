@@ -79,7 +79,8 @@ internal sealed class LocalWeb
         app.UseDefaultFiles();
         app.UseStaticFiles();
 
-        var defaultRamMiB = LocalSettings.DefaultRamReserveMiB(WindowsMemory.PhysicalBytes());
+        var defaultRamMiB = LocalSettings.DefaultRamReserveMiB(OperatingSystem.IsWindows()
+            ? WindowsMemory.PhysicalBytes() : (ulong)GC.GetGCMemoryInfo().TotalAvailableMemoryBytes);
         var local = app.MapGroup("/api/local");
         local.MapGet("/settings", (HttpContext context) =>
         {
