@@ -108,6 +108,25 @@ internal static partial class PeerChecks
         var drawing = Request(http, HttpMethod.Post, large.LocalAddress + "/v1/images/generations", large.Session,
             new { model = imageId, prompt = "draw blocker", size = "64x64" });
         Check(await Started("draw blocker") == imageId, "a different ingress occupies the large host doing image work");
+        var lowKey = (await Local(http, large, "network/keys", new
+        {
+            name = "low-priority responder", priority = "low", scopes = new[] { "chat", "imageInput" }, neverExpires = true
+        }, await Unlock(http, large, Password), HttpMethod.Post)).GetProperty("secret").GetString();
+        Check(Served(await Request(http, HttpMethod.Post, large.TailAddress + "/v1/chat/completions", lowKey, new
+        {
+            model = alias, messages = new[] { new { role = "user", content = "low-priority independent request" } }
+        })) == smallId && !drawing.IsCompleted, "a low-priority client uses the free alias host during higher-priority work");
+
+        var beforeDiscovery = (await Local(http, large, "network/scheduling")).GetProperty("discoveryRuns").GetInt32();
+        await Request(http, HttpMethod.Post, large.TailAddress + "/v1/chat/completions", lowKey, new
+        {
+            model = alias,
+            messages = new[] { new { role = "user", content = new[] { new { type = "image_url",
+                image_url = new { url = "data:image/png;base64,AAAA" } } } } }
+        }, expected: 503);
+        Check((await Local(http, large, "network/scheduling")).GetProperty("discoveryRuns").GetInt32() == beforeDiscovery + 1,
+            "a definitive priority refusal refreshes an exhausted route even when the tried host is reachable");
+
         var queuedFirst = Chat("queued first");
         Check(await Started("queued first") == smallId, "text uses the open host while the image endpoint is active");
         var queuedSecond = Chat("queued second");

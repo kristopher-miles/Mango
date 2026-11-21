@@ -29,7 +29,7 @@ internal sealed record ServingPlacement(Deployment Model, EndpointStatus Endpoin
 internal sealed record ExecutionResult(bool Settled, ProviderFailure? Failure, ProviderExecution? Timing,
     bool RetryBeforeSubmission = false);
 internal sealed record StartExecution(AdmissionStatus Status, string? Reason,
-    Func<HttpContext, CancellationToken, Task<ExecutionResult>>? Execute = null, string? Epoch = null);
+    Func<HttpContext, CancellationToken, Task<ExecutionResult>>? Execute = null, string? Epoch = null, bool MemoryWait = false);
 
 internal sealed class ProviderCatalog(string directory, ResourceProtection? resources = null) : IAsyncDisposable, IServingBackend
 {
@@ -135,15 +135,21 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
         try
         {
             await RefreshAsync(null, stopping);
+            var idleCheckInterval = TimeSpan.FromSeconds(10);
+            var lastIdleCheck = Stopwatch.GetTimestamp();
             while (!stopping.IsCancellationRequested)
             {
-                var wait = View.Endpoints.Any(endpoint => endpoint.HostReserved) ? TimeSpan.FromSeconds(10) : ProviderLimits.InventoryInterval;
+                var reserved = View.Endpoints.Any(endpoint => endpoint.HostReserved);
+                if (reserved && Stopwatch.GetElapsedTime(lastIdleCheck) >= idleCheckInterval)
+                {
+                    await ReleaseIdleStrataAsync(stopping);
+                    lastIdleCheck = Stopwatch.GetTimestamp();
+                }
+                var wait = reserved ? idleCheckInterval : ProviderLimits.InventoryInterval;
                 if (!await wake.WaitAsync(wait, stopping))
                 {
-                    if (wait == ProviderLimits.InventoryInterval)
+                    if (!reserved)
                         await RefreshAsync(null, stopping);
-                    else
-                        await ReleaseIdleStrataAsync(stopping);
                     continue;
                 }
                 await Task.Delay(ProviderLimits.RefreshCoalesceInterval, stopping);
@@ -900,10 +906,13 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
             ResourceReservation? reservation = null;
             if (resources is not null)
             {
+                // Strata reserves the loaded runtime separately from a request's estimated working memory.
+                var estimatedContext = placement.Endpoint.ExclusiveHost && payload.Operation == InferenceOperation.Chat
+                    ? payload.EstimatedChatContext(model) : (long?)null;
                 var admission = resources.TryAdmit(model, placement.Endpoint, placement.Workload, ResourceWork.Execute,
-                    payloadBytes: payload.Bytes);
+                    payloadBytes: payload.Bytes, estimatedContextUnits: estimatedContext);
                 if (admission.Reservation is null)
-                    return new(admission.Status, admission.Reason);
+                    return new(admission.Status, admission.Reason, MemoryWait: admission.MemoryWait);
                 reservation = admission.Reservation;
             }
             var adapter = adapters[model.EndpointId];

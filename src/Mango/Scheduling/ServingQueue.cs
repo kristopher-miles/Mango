@@ -405,7 +405,7 @@ internal sealed class ServingQueue : IAsyncDisposable
                         continue;
                     }
                 }
-                if (start.Status == AdmissionStatus.Unavailable)
+                if (start.Status == AdmissionStatus.Unavailable || start.MemoryWait && work.Ticket.TryOtherHost)
                 {
                     Finish(entry, Rejected(start.Reason ?? "The local deployment is unavailable."));
                     continue;
@@ -527,6 +527,10 @@ internal sealed class ServingQueue : IAsyncDisposable
             await providers.PreparePlacementAsync(placement, id => work.Displaced(id, timeout.Token), timeout.Token);
         }
         catch (OperationCanceledException) { }
+        catch (ProviderFailure error) when (error.MemoryWait && work.Ticket.TryOtherHost)
+        {
+            return Rejected(error.Message);
+        }
         catch (ProviderFailure error) when (error.Status == 409 || error.CapacityWait) { return null; }
         catch (ProviderFailure error) when (error.Code is "strata_attached_resident" or "mode_switch_lifecycle")
         {

@@ -222,7 +222,6 @@ internal sealed partial class PeerNetwork
             var attemptCount = 0;
             var choices = Candidates(payload.Shape);
             var searched = false;
-            var onlyUnreachable = true;
             if (choices.Length == 0 && Ready && IsMember)
             {
                 await DiscoverMissingAsync(cancellation);
@@ -239,7 +238,7 @@ internal sealed partial class PeerNetwork
                 var choice = Choose(choices, tried, hint, suggested, item, attempt, limit - clock.GetElapsedTime(age));
                 if (choice is null)
                 {
-                    if (searched || !onlyUnreachable || tried.Count == 0 || !Ready || !IsMember)
+                    if (searched || last is not { Status: >= 500 or 409 } || !Ready || !IsMember)
                         break;
                     searched = true;
                     await DiscoverMissingAsync(cancellation);
@@ -310,7 +309,6 @@ internal sealed partial class PeerNetwork
                     return;
                 }
                 last = result;
-                onlyUnreachable &= result.Unreachable;
                 if (result.Unreachable)
                     unreachable[choice.Node] = (address, choice.ServingEpoch);
                 if (!result.Retryable)

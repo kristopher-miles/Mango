@@ -343,14 +343,15 @@ internal sealed partial class ResourceProtection
     private string Configuration(Deployment model) => ProviderIdentity.Hash(model.Configuration, model.Id,
         hardwareObservation?.Hardware, hardwareObservation?.TotalRam.ToString(System.Globalization.CultureInfo.InvariantCulture));
 
-    private ResourceBudget? FindBudget(Deployment model, EndpointStatus endpoint, InferenceOperation operation)
+    private ResourceBudget? FindBudget(Deployment model, EndpointStatus endpoint, InferenceOperation operation,
+        long? estimatedContextUnits = null)
     {
         var configuration = Configuration(model);
         var runtime = model.Instance?.ResourceFingerprint;
         var stored = store.Value.Budgets.FirstOrDefault(item => item.Deployment == model.Id &&
             item.Workload.Operation == operation && item.Configuration == configuration &&
             (item.Runtime is null || runtime is null || item.Runtime == runtime));
-        stored ??= EstimateBudget(model, operation, configuration, runtime);
+        stored ??= EstimateBudget(model, operation, configuration, runtime, estimatedContextUnits: estimatedContextUnits);
         if (stored is null) return null;
         var profile = MatchProfile(model.Id, operation, configuration, runtime);
         if (profile is null)
@@ -369,7 +370,7 @@ internal sealed partial class ResourceProtection
     }
 
     private ResourceBudget EstimateBudget(Deployment model, InferenceOperation operation, string configuration, string? runtime,
-        Workload? execution = null)
+        Workload? execution = null, long? estimatedContextUnits = null)
     {
         var hardware = hardwareObservation;
 
@@ -389,7 +390,8 @@ internal sealed partial class ResourceProtection
         // Reserve working memory in addition to resident weights already counted by Windows.
         var weightBytes = model.Model.ArtifactBytes.GetValueOrDefault();
         var limit = (long)LocalSettings.MaximumReserveMiB * MiB;
-        var inputBytes = text ? workload.Units * workload.Items * (operation == InferenceOperation.Embeddings ? 32 * 1024L : 128 * 1024L)
+        var estimatedUnits = Math.Min(workload.Units, estimatedContextUnits ?? workload.Units);
+        var inputBytes = text ? estimatedUnits * workload.Items * (operation == InferenceOperation.Embeddings ? 32 * 1024L : 128 * 1024L)
             : workload.Units * (operation == InferenceOperation.Images ? 64 : 4);
         if (model.Model.Origin == ModelOrigin.LmLink)
             return new(model.Id, configuration, runtime, workload, MemoryCost.Empty, new(128 * MiB, []),
@@ -637,6 +639,21 @@ internal sealed partial class ResourceProtection
         var profile = ProfileFor(target);
         var model = target.Model;
         var openedForBenchmark = false;
+        async Task LoadAsync()
+        {
+            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
+            deadline.CancelAfter(ProviderLimits.LifecycleTimeout);
+            try { await providers.ManageAsync(model.Id, load: true, deadline.Token, benchmark: target.Operation); }
+            catch (OperationCanceledException) when (!cancellation.IsCancellationRequested)
+            {
+                throw deadline.IsCancellationRequested
+                    ? new ProviderFailure(504, "The benchmark model did not load within the time limit.")
+                    : new ProviderFailure(503, "The benchmark model load was interrupted.");
+            }
+            openedForBenchmark = target.Model.Instance is null;
+            model = providers.View.Models.First(item => item.Id == model.Id);
+        }
+
         try
         {
             if (model.Instance is null && (target.HasLoadAllowance || target.NativeBenchmark))
@@ -654,10 +671,8 @@ internal sealed partial class ResourceProtection
                 }
                 BeginMeasurement("cold", model.EndpointId, freshBaseline);
                 var started = System.Diagnostics.Stopwatch.GetTimestamp();
-                await providers.ManageAsync(model.Id, load: true, cancellation, target.Operation);
-                openedForBenchmark = target.Model.Instance is null;
+                await LoadAsync();
                 var elapsed = System.Diagnostics.Stopwatch.GetElapsedTime(started);
-                model = providers.View.Models.First(item => item.Id == model.Id);
                 var runtime = model.Instance?.ResourceFingerprint ?? throw new ProviderFailure(502, "The benchmark load was not observed.");
                 if (profile.Runtime != runtime)
                     profile = profile with { Runtime = runtime, Measurements = [], Speed = null };
@@ -666,11 +681,7 @@ internal sealed partial class ResourceProtection
                 profile = await SavePassAsync(profile, pass, preserveCompletion: sampleOnly);
             }
             if (model.Instance is null)
-            {
-                await providers.ManageAsync(model.Id, load: true, cancellation, target.Operation);
-                openedForBenchmark = target.Model.Instance is null;
-                model = providers.View.Models.First(item => item.Id == model.Id);
-            }
+                await LoadAsync();
             if (model.Instance is not { } instance || !model.Model.Operations.Contains(target.Operation))
                 throw new ProviderFailure(409, "This operation is not supported by the loaded model.");
             if (profile.Runtime != instance.ResourceFingerprint)
@@ -730,17 +741,20 @@ internal sealed partial class ResourceProtection
         {
             lock (sync)
                 measurement = null;
-            // A model loaded for a benchmark should release its slot for the next deployment.
-            if (openedForBenchmark && target.CanColdLoad && !cancellation.IsCancellationRequested &&
-                providers.View.Models.FirstOrDefault(item => item.Id == model.Id) is { Busy: false } current &&
-                current.Instance is { Busy: false } loaded && loaded.Id == model.Instance?.Id && !current.Yolo)
+            if (openedForBenchmark && target.CanColdLoad &&
+                providers.View.Models.FirstOrDefault(item => item.Id == model.Id) is { Yolo: false } current &&
+                current.Instance is { } loaded && loaded.Fingerprint == model.Instance?.Fingerprint &&
+                (target.Endpoint.ExclusiveHost || !current.Busy && !loaded.Busy))
             {
+                // A client can cancel the benchmark after the runtime has loaded.
+                using var cleanup = new CancellationTokenSource(ProviderLimits.LifecycleTimeout);
                 try
                 {
-                    await providers.ManageAsync(model.Id, load: false, cancellation, target.Operation);
-                    await WaitForObservationAsync(cancellation);
+                    await providers.ManageAsync(model.Id, load: false, cleanup.Token, benchmark: target.Operation);
+                    if (!cancellation.IsCancellationRequested)
+                        await WaitForObservationAsync(cleanup.Token);
                 }
-                catch (ProviderFailure) { }
+                catch (Exception error) when (error is ProviderFailure or OperationCanceledException) { }
             }
         }
     }

@@ -291,7 +291,7 @@ internal sealed partial class ResourceProtection : IDisposable
         latest.ExternalCpu < current.CpuCutoffPercent && latest.ExternalGpu < current.GpuCutoffPercent;
 
     public Admission TryAdmit(Deployment model, EndpointStatus endpoint, Workload workload, ResourceWork work,
-        bool profiling = false, long payloadBytes = 0, bool speedSample = false)
+        bool profiling = false, long payloadBytes = 0, bool speedSample = false, long? estimatedContextUnits = null)
     {
         if (model.Yolo)
         {
@@ -337,7 +337,7 @@ internal sealed partial class ResourceProtection : IDisposable
             var latest = CurrentObservation;
             if (needsFreshGpu && freshGpu is not null && latest is not null)
                 latest = latest with { Devices = freshGpu };
-            var budget = FindBudget(model, endpoint, workload.Operation);
+            var budget = FindBudget(model, endpoint, workload.Operation, estimatedContextUnits);
             if (budget is null || !Covers(budget.Workload, workload))
                 return Refuse("Set a local memory and workload limit for this deployment and operation.");
             if (!AttributionAllows(endpoint, current, latest, budget.AllowAttached))

@@ -114,6 +114,16 @@ internal static class ResourceChecks
             resources.Estimate(model, managed, InferenceOperation.SystemOne) is { Estimated: true, Workload.Items: 4 },
             "observed hardware supplies usable operation-specific fallback limits before any owner edit");
         Check(resources.Readiness(model, endpoint, Chat.Operation).State == "attached", "estimated limits require attached-provider consent");
+
+        var strata = managed with { Profile = ProviderProfile.Strata };
+        var longContext = model with { Model = model.Model with
+            { Instances = [model.Instance! with { Context = 200_000 }] } };
+        var fullContext = Chat with { Units = 200_000 };
+        var shortChat = resources.TryAdmit(longContext, strata, fullContext, ResourceWork.Execute, estimatedContextUnits: 512);
+        Check(shortChat.Reservation is not null, "a short Strata chat fits under automatic limits after its large context model loads");
+        shortChat.Require().Complete();
+        Check(resources.TryAdmit(longContext, strata, fullContext, ResourceWork.Execute, estimatedContextUnits: 200_000).MemoryWait,
+            "a large Strata chat still requires the estimated memory for that workload");
         await resources.SaveBudgetAsync(update, providers, default);
         Check(resources.Readiness(model, endpoint, Chat.Operation) is { State: "ready", Available: true } && !resources.HasWork(endpoint.Id),
             "readiness accepts unrated models without reserving resources");
@@ -554,6 +564,9 @@ internal static class ResourceChecks
         await settings.LoadAsync(new LocalSettings { Role = LocalRole.Contributor, BenchmarkPolicy = BenchmarkPolicy.Now, SampleSeconds = 2 });
         string? resident = "previous";
         var batchModels = false;
+        var cancellationModel = false;
+        var benchmarkActive = 0;
+        var benchmarkStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var releases = 0;
         var holdRefresh = 0;
         var refreshing = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -572,11 +585,13 @@ internal static class ResourceChecks
             return new
             {
                 max_loaded_models = 1, loads_settled = true,
-                models = (batchModels ? new[] { "denied", "batch-ok", "first", "second", "previous" } :
+                models = (cancellationModel ? new[] { "cancel-me" } :
+                    batchModels ? new[] { "denied", "batch-ok", "first", "second", "previous" } :
                     new[] { "first", "second", "previous" }).Select(key => new
                 {
                     key, type = "llm", size_bytes = 64 * MiB, max_context_length = 512,
-                    loaded_instances = resident == key ? new[] { new { id = key, config = new { context_length = 512 } } } : []
+                    loaded_instances = resident == key ? new[] { new { id = key,
+                        busy = Volatile.Read(ref benchmarkActive) != 0, config = new { context_length = 512 } } } : []
                 })
             };
         });
@@ -593,6 +608,13 @@ internal static class ResourceChecks
         fixture.MapPost("/v1/chat/completions", async (HttpContext context) =>
         {
             var (count, speed) = await PromptAsync(context);
+            if (resident == "cancel-me")
+            {
+                Volatile.Write(ref benchmarkActive, 1);
+                benchmarkStarted.TrySetResult();
+                try { await Task.Delay(Timeout.Infinite, context.RequestAborted); }
+                finally { Volatile.Write(ref benchmarkActive, 0); }
+            }
             context.Response.ContentType = "text/event-stream";
             await context.Response.WriteAsync(speed
                 ? "data: {\"timings\":{\"predicted_per_second\":25}}\n\ndata: [DONE]\n\n"
@@ -634,6 +656,17 @@ internal static class ResourceChecks
             var successful = providers.View.Models.Single(model => model.Model.NativeId == "batch-ok");
             Check(resources.RouteTiming(successful, Chat.Operation).GenerationTokensPerSecond == 25,
                 "an engine refusal does not prevent the next missing benchmark");
+
+            cancellationModel = true;
+            await providers.RefreshAsync(endpoint.Id, deadline.Token);
+            await settings.UpdateAsync(value => value with { BenchmarkPolicy = BenchmarkPolicy.Now });
+            await benchmarkStarted.Task.WaitAsync(deadline.Token);
+            await settings.UpdateAsync(value => value with { BenchmarkPolicy = BenchmarkPolicy.Never });
+            while (providers.View.Models.Any(model => model.Instance is not null))
+                await Task.Delay(25, deadline.Token);
+            Check(resident is null, "cancelling a cold benchmark unloads the runtime it started");
+            cancellationModel = false;
+            await providers.RefreshAsync(endpoint.Id, deadline.Token);
         }
         finally
         {

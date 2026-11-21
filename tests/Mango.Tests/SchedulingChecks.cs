@@ -18,6 +18,7 @@ internal static class SchedulingChecks
     {
         await IndependentAndFifoAsync();
         await PriorityAsync();
+        await MemoryWaitAsync();
         await ScarcityAsync();
         await ChangedScarcityAsync(changeCatalog: true);
         await ChangedScarcityAsync(changeCatalog: false);
@@ -113,6 +114,23 @@ internal static class SchedulingChecks
         backend.Release("independent");
         backend.Release("higher");
         await Task.WhenAll(active, independent, higher).WaitAsync(Timeout);
+    }
+
+    private static async Task MemoryWaitAsync()
+    {
+        var backend = new Backend { MemoryWait = true };
+        await using var queue = new ServingQueue(backend);
+        var work = await Work("memory fallback", "small", tryOtherHost: true);
+        var retry = queue.SubmitAsync(work, default);
+        var result = await retry.WaitAsync(Timeout);
+        Check(result.State == AttemptState.Rejected && result.Retryable && !work.Payload.Submitted,
+            "a memory hold yields to a viable alternate before submitting inference");
+
+        using var cancel = new CancellationTokenSource();
+        var sole = queue.SubmitAsync(await Work("only host", "small"), cancel.Token);
+        Check(!sole.IsCompleted && queue.Counts.Waiting == 1, "a sole host retains its memory wait");
+        await cancel.CancelAsync();
+        await sole.WaitAsync(Timeout);
     }
 
     private static async Task ScarcityAsync()
@@ -221,7 +239,7 @@ internal static class SchedulingChecks
 
     private static async Task<ServingQueue.Work> Work(string name, string alias, KeyPriority priority = KeyPriority.Normal,
         Func<AlternateProbe, CancellationToken, Task<Guid?>>? alternate = null, Action<ServingQueue.Work, Guid>? advise = null,
-        Func<string>? digest = null, DateTimeOffset? arrived = null, DateTimeOffset? expires = null)
+        Func<string>? digest = null, DateTimeOffset? arrived = null, DateTimeOffset? expires = null, bool tryOtherHost = false)
     {
         var context = new DefaultHttpContext { TraceIdentifier = name };
         context.Request.ContentType = "application/json";
@@ -231,7 +249,8 @@ internal static class SchedulingChecks
         })));
         var payload = await InferenceRequest.ReadAsync(InferenceOperation.Chat, context.Request, default);
         var now = DateTimeOffset.UtcNow;
-        var ticket = new AttemptTicket(Guid.NewGuid(), Guid.NewGuid(), Key, alias, arrived ?? now, expires ?? now.AddSeconds(20), null, "test");
+        var ticket = new AttemptTicket(Guid.NewGuid(), Guid.NewGuid(), Key, alias, arrived ?? now, expires ?? now.AddSeconds(20),
+            null, "test", TryOtherHost: tryOtherHost);
         return new(Origin, ticket, payload, new(Key, "Fixture", [InferenceScope.Chat], priority, default), context,
             alternate ?? ((_, _) => Task.FromResult<Guid?>(null)), advise ?? ((_, _) => { }), (_, _) => Task.CompletedTask,
             digest ?? (() => "stable"));
@@ -254,6 +273,7 @@ internal static class SchedulingChecks
         private readonly ConcurrentDictionary<string, int> releaseCount = new();
         public ResourceProtection? Resources => null;
         public bool RetryBeforeSubmission { get; init; }
+        public bool MemoryWait { get; init; }
         public event Action? Changed { add { } remove { } }
         public event Action? AdmissionChanged;
 
@@ -274,6 +294,8 @@ internal static class SchedulingChecks
 
         public StartExecution TryStart(InferenceRequest request, string id)
         {
+            if (MemoryWait)
+                return new(AdmissionStatus.Wait, "Fixture memory hold.", MemoryWait: true);
             var group = Placement(request.Shape, id).Endpoint.Id;
             lock (sync)
                 if (!reserved.Add(group))

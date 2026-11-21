@@ -535,6 +535,13 @@ internal sealed class InferenceRequest(InferenceOperation operation, string alia
             OptionalPositive(payload["max_completion_tokens"]) ?? OptionalPositive(payload["max_tokens"]) ?? 0,
             media, OptionalPositive(payload["n"]) ?? 1, 1, null, null, CanCountPrompt: media == 0);
     }
+
+    public long EstimatedChatContext(Deployment deployment) => Shape.PromptUnits + OutputReserve(RequireContext(deployment)) +
+        MediaBudget(Shape.MediaItems, deployment);
+
+    private int OutputReserve(int context) => Shape.OutputUnits != 0 ? Shape.OutputUnits :
+        Math.Min(DefaultMaxOutput, Math.Max(1, context / 4));
+
     private async Task<(int, string)> PrepareChatAsync(JsonObject payload, Deployment deployment,
         ProviderAdapter adapter, CancellationToken cancellation)
     {
@@ -547,7 +554,7 @@ internal sealed class InferenceRequest(InferenceOperation operation, string alia
             throw new ProviderFailure(422, "This deployment does not support the requested chat inputs.");
         if (adapter.TransparentInference)
             return ((int)Math.Min(int.MaxValue, Shape.PromptUnits + MediaBudget(Shape.MediaItems, deployment)), "routing estimate");
-        var reserved = Shape.OutputUnits != 0 ? Shape.OutputUnits : Math.Min(DefaultMaxOutput, Math.Max(1, limit / 4));
+        var reserved = OutputReserve(limit);
         if (reserved >= limit)
             throw new ProviderFailure(422, "The reserved output tokens exceed the deployment's usable context.");
         adapter.Prepare(InferenceOperation.Chat, payload);
