@@ -1,10 +1,21 @@
 # Mango recorded decisions
 
-Requirements revision 2, November 11, 2026. The submitted questionnaire matches the original baseline digest. All 29 decisions have responses; none is blank. This revision records policy decisions, not an implementation plan.
+This document preserves the November 11, 2026 questionnaire answers and records later owner decisions. The dated serving boundary below supersedes the affected parts of the original answers.
 
 [Original answer export](decisions/2026-11-11-answers.json) preserves the exact submission and original source snapshot. The updated subject documents are the current requirements. Custom answers override conflicting old recommendations; a custom answer does not automatically accept every unrelated proposed default.
 
-## Main changes
+## Serving boundary — November 21, 2026
+
+The owner confirmed that Mango routes valid requests to model hosting programs. The provider determines whether it can serve a sole-model load or a valid request to an already loaded model. Mango retains its inference API, auth and scopes, explicit serving settings, priority, queue deadlines, current benchmark occupancy, and verified attempt ownership.
+
+- **User activity.** Sustained external CPU or GPU activity makes the node a leech until its quiet cooldown elapses. Mango's inference and benchmarks are excluded from the activity signal. The node yields local serving, including YOLO, and remains an ingress. RAM, VRAM, commit, missing telemetry, and earlier allocation failures do not trigger automatic withdrawal.
+- **Measured co-residency.** When the owner configures multiple non-YOLO models to reside together, check RAM and per-device VRAM before an additional load. Use comparable native or automatic benchmark evidence, or explicit owner overrides. Overrides control their supplied values. Count simultaneous requirements and load peaks without double-counting resident memory. If fit cannot be established, try an eligible alternate, or use the wait-and-swap sequence for an authorized local load.
+- **Model swaps and YOLO.** When legitimate work would wait for conflicting requests or require evicting a model, try an eligible alternate node first. If none can serve it, wait for the conflicting requests to complete, unload the necessary residents through authorized lifecycle calls, verify release, then load and serve the requested model. The sequence applies in both directions between YOLO and non-YOLO. Evict the resident YOLO group together after its last active request completes. Reload only the model being requested. Additional YOLO models load individually on demand alongside running YOLO models, without a Mango fit check, when the provider supports and accepts the load. Explicit stop, leech, and maintenance retain their lifecycle authority.
+- **Benchmarks and routing.** Running or settling benchmarks can occupy capacity. Missing, incomplete, or failed measurements do not block ordinary serving. Use actual provider capabilities, slot occupancy, and eligibility when distributing independent requests. An estimated fit or cache preference alone cannot park an independent request behind a busy worker while an eligible worker is idle.
+
+This decision supersedes Q13's completion prerequisite and context-estimate veto, scopes Q14 to checked co-residency, and supersedes Q15's immediate memory-pressure withdrawal and missing-attribution gate. Q15's sustained external-activity trigger, local controls, and quiet cooldown remain. The following questionnaire answers remain as originally submitted.
+
+## Main changes in the original questionnaire
 
 - Windows first; other peer operating systems later, with API clients unrestricted by operating system.
 - Trusted single-owner peers, eventual newest-wins configuration, request-carried hashes, and no quorum or routine online-map probes.
@@ -20,7 +31,7 @@ Requirements revision 2, November 11, 2026. The submitted questionnaire matches 
 - Q24 uses the explicitly offered four-mode split: Off, Sparse, Verbose inputs, Everything inputs and outputs.
 - Shared network concurrency/payload policy removes per-key quotas; it does not authorize a new distributed counter/consensus service. The scheduler still admits against actual local capacity.
 - Q06 defines full-reset behavior. The subsequent owner clarification resolves ordinary forgotten-password recovery: replace the master password using the recovery key without resetting inference keys. Preserve peers, configuration, benchmarks, and logs; invalidate old administrative sessions. Full reset remains a separate explicit operation.
-- Exact equal-time/clock-skew conflict ordering, unbenchmarked capacity estimates, generous queue/payload counts, default key expiry, and numerical unknown-key limits remain implementation parameters or proposals. They must not contradict the approved low-overhead policy.
+- Exact equal-time/clock-skew conflict ordering, generous queue/payload counts, default key expiry, and numerical unknown-key limits remain implementation parameters or proposals. These parameters must follow the approved low-overhead policy.
 - For Q28, one keyword applies to each request, never to the model’s whole capability profile. The broader future routing scaffolding remains documented; unaccepted tie-break/fallback details stay proposals.
 
 ## Submitted answers

@@ -1,18 +1,18 @@
 # Mango interface and operations requirements
 
-Every node provides a clear view of the network while keeping local resource protection under that machine's control. Logs and updates are network operations with explicit completion and failure states; an offline peer must never be reported as updated or cleared.
+Every node provides a view of the network. The owning machine controls activity withdrawal, cooldown, model residency, and provider lifecycle permissions. Logs and updates report each peer's actual outcome.
 
 ## GUI and settings ownership
 
 **UI-01 — C.** Provide a responsive, intuitive GUI on each machine. From any node, an authorized user can inspect the network, configure provider/model listening and registration settings, change aliases, assign capabilities and ratings, and see the result across the network.
 
-**UI-02 — C.** Activity monitoring, automatic withdrawal, cooldown, and RAM/VRAM safety margins can be changed only on the relevant machine. Remote access to shared model settings does not grant permission to disable another machine's protection.
+**UI-02 — C.** Activity monitoring, external CPU/GPU thresholds, cooldown, per-model YOLO, and RAM/VRAM fit settings for checked co-residency are local. Shared model edits cannot change them.
 
 **UI-03 — I.** Distinguish requested configuration, committed shared configuration, and effective host configuration. Show pending, applied, rejected, conflicted, and offline states. Do not display an optimistic save as completed when the owning node has not accepted it. Reconfiguring or disabling an endpoint must account for active work.
 
 **UI-04 — I.** First-run setup supports creating a network or joining an existing one, Tailscale connection checks, credential recovery/export, contributor or leech selection, provider registration, lifecycle permission, and benchmark permission. If an existing network is temporarily unreachable, explain the failure rather than steering the user into accidental duplicate initialization.
 
-**UI-05 — I.** The network view shows node identity and join order; contributor state and reason; reachability and metadata freshness; app/provider versions; models and aliases; effective context; resource limits; benchmark confidence; and loaded, running, queued, or unavailable status.
+**UI-05 — I.** The network view shows node identity, contributor state and reason, reachability and observation time, app/provider versions, aliases, reported context, provider or benchmark occupancy, and applicable co-residency measurements.
 
 **UI-06 — I.** Request diagnostics explain the chosen destination, wait reason, effective priority, model loading, reroutes, rejection, and local withdrawal. Expose timing estimates as estimates. Live views must not force persistent request logging when logging is off.
 
@@ -26,7 +26,7 @@ Every node provides a clear view of the network while keeping local resource pro
 
 **UI-11 — C, owner 2026-11-14.** Show network administration lock state at all times, with direct Unlock and real server-side Lock. Both Create and Join reuse the submitted password to establish the normal administration session and enter the new node's Serving workspace. Never replay successful enrollment when only sign-in failed.
 
-**UI-12 — C, owner 2026-11-14.** Make adding and preparing a model-serving node a primary workflow. One Serving workspace exposes provider and model fields without Edit modes or collapsed routine settings, with local qualification, lifecycle controls, and actionable host-derived readiness. Preserve local credential/process authority and requested-versus-applied network state.
+**UI-12 — C, owner 2026-11-14 and 2026-11-21.** One Serving workspace exposes provider and model settings, lifecycle controls, per-model YOLO, checked co-residency settings where applicable, and actionable readiness. Preserve local credential and lifecycle authority and distinguish requested from applied network state.
 
 ### Setting boundaries
 
@@ -36,7 +36,7 @@ Every node provides a clear view of the network while keeping local resource pro
 | Provider endpoint registration and model serving configuration | Shared requested settings; validated and applied by owning host |
 | Provider credential and process-control permission | Secret/local authority on provider host |
 | Activity monitoring, thresholds, cooldown, contributor override | Local machine only |
-| Memory safety margin and device-use constraints | Local machine only |
+| YOLO, checked co-residency policy, RAM/VRAM evidence and overrides | Local machine only |
 | Inference keys, membership, master/recovery changes | Network administration from any permitted node, subject to consistency policy |
 | Public ingress enablement, proxy binding, TLS material | Local host action, subject to network key policy |
 | Logging mode, retention, aggregation timezone, network clearing | Shared policy, administered from any authorized node |
@@ -61,7 +61,7 @@ Every node provides a clear view of the network while keeping local resource pro
 
 **LOG-08 — I.** Logging is bounded and must not block inference indefinitely. Show dropped, truncated, or failed records and disk exhaustion. A record missing bytes cannot be labeled an exact verbose capture. Temporary routing state is distinct from logging and must expire even when logging is off.
 
-**LOG-09 — C, Q15/Q24.** Operational changes may have their own independently disableable diagnostic log, including resource-pressure withdrawal and provider lifecycle failures. It is not a hidden request-payload log. Required configuration, revocations, deletion markers, and unfinished update state remain persisted operational state even when all logging is off.
+**LOG-09 — C, Q15/Q24.** Optional operational logs record activity-triggered leech, benchmark and provider lifecycle events, and failures without request payloads. Required configuration, revocations, deletion markers, and unfinished update state persist independently of logging.
 
 ## Daily collection and retention
 

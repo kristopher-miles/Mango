@@ -1,5 +1,7 @@
 # Phase 8 Windows packaging and release completion
 
+This phase records earlier design and qualification. The [November 21 serving boundary](../requirements/09-recorded-decisions.md#serving-boundary--november-21-2026) supersedes any conflicting guidance on execution admission, benchmarks, activity withdrawal, model eviction, or co-residency. See the [implementation and rollout plan](10-serving-boundary.md) for the current work.
+
 This records the original local packaging phase. GitHub publishing and protocol-cutoff updates were added later; see [release publishing](../releases.md) and [installation and updates](../windows-install.md).
 
 Deliver the complete non-deferred Windows application as a reproducible local package, with compatibility cutoffs, clear update unavailability, and bounded final qualification. Depends on phases 1–7. This is the final implementation phase, not permission to implement deferred features.

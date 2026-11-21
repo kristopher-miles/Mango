@@ -2,7 +2,7 @@
 
 Mango combines independently hosted inference services into one private network. Any enrolled peer can submit work, eligible peers can serve it, and the user can manage the shared model catalog from any node. The network should stay inexpensive while idle and yield compute promptly to the person using a contributing machine.
 
-This is requirements revision 2, incorporating the questionnaire returned on November 11, 2026. It records the requested product, necessary implications, research findings, and choices that still need an answer. It does not select an implementation stack, prescribe a development sequence, or authorize implementation.
+The requirements incorporate the November 11, 2026 questionnaire and later owner decisions, including the November 21 serving boundary. The subject requirements describe the approved target. Implementation and rollout are tracked separately.
 
 ## Reading order
 
@@ -13,7 +13,7 @@ Start with [Recorded decisions](09-recorded-decisions.md) and the revised subjec
 | [Product scope](00-product-scope.md) | Goals, terminology, boundaries, performance targets, and settled interpretations |
 | [Network and security](01-network-and-security.md) | Tailscale, joining, identities, credentials, replication, and public access |
 | [Providers and models](02-providers-and-models.md) | Adapters, protocols, discovery, aliases, context limits, and benchmarks |
-| [Resources and scheduling](03-resources-and-scheduling.md) | Activity response, memory safety, queues, priorities, routing, and affinity |
+| [Resources and scheduling](03-resources-and-scheduling.md) | Activity response, model co-residency, queues, priorities, routing, and affinity |
 | [Interface and operations](04-interface-and-operations.md) | GUI, settings ownership, logs, aggregation, retention, and updates |
 | [Future best model routing](05-future-best-routing.md) | The deferred decision-model feature and information it will need |
 | [Acceptance and coverage](06-acceptance-and-coverage.md) | Observable scenarios and coverage of the original specification |
@@ -36,6 +36,6 @@ Identifiers such as `NET-01` and `QUEUE-04` are stable references for later deci
 
 ## Current decision status
 
-All 29 questions received responses. The network uses trusted single-owner peers, lightweight eventual reconciliation, Windows-first delivery, the scarce-placement queue exception, and the updated logging and retry policies. Ordinary password recovery preserves issued keys; full reset is a separate operation. The [eight-phase implementation plan](../plan/00-shared-foundation.md) now records the implementation sequence and shared design.
+All 29 original questions received responses. The network uses trusted single-owner peers, lightweight eventual reconciliation, Windows-first delivery, the scarce-placement queue exception, and the updated logging and retry policies. Ordinary password recovery preserves issued keys. The [original phase plan](../plan/00-shared-foundation.md) records the earlier implementation sequence. The [serving boundary plan](../plan/10-serving-boundary.md) covers compliance and live rollout.
 
-Research retains its original date and recommendations as historical context; the owner’s recorded decisions and revised subject requirements take precedence. Performance figures are targets to qualify, not achieved results. Planning is complete; application implementation has not begun.
+Research and earlier phase plans preserve their historical results. The current subject requirements and [November 21 serving decision](09-recorded-decisions.md#serving-boundary--november-21-2026) take precedence. Performance figures remain qualification targets.

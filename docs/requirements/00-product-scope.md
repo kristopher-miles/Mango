@@ -1,6 +1,6 @@
 # Mango product scope
 
-Mango shares inference capacity across the user's machines without requiring a particular inference engine or a common local network. It routes whole requests to existing servers, protects each machine's local workload, and exposes a consistent catalog and access policy.
+Mango bridges independently hosted model servers. It routes whole requests, exposes a consistent catalog and access policy, and yields local inference when the owner is actively using a contributing machine. The hosting program decides whether it can execute a valid request.
 
 ## Product requirements
 
@@ -14,7 +14,7 @@ Mango shares inference capacity across the user's machines without requiring a p
 
 **PRODUCT-05 — C.** Prefer serving as many requests as possible with the available nodes, then request priority, then first in first out. Preserve the explicit low-priority rejection and queue eviction rules. Apply the accepted resource-specific purge and scarce-placement exception from Q16–Q18.
 
-**PRODUCT-06 — C.** Provide a responsive GUI on every machine. It can configure shared model endpoints, aliases, capabilities, and ratings across the network. Resource protection settings remain local to the machine they protect.
+**PRODUCT-06 — C.** Provide a responsive GUI on every machine. It can configure shared model endpoints, aliases, capabilities, and ratings across the network. Local activity and cooldown, YOLO, and measured co-residency settings belong to the owning machine.
 
 **PRODUCT-07 — C.** Support scoped, individually revocable inference keys; optional internet HTTPS serving; coordinated software updates; configurable logging; and daily or on-demand network log aggregation.
 
@@ -38,8 +38,8 @@ Mango shares inference capacity across the user's machines without requiring a p
 | Capability | A user-defined task label such as coding, writing, or classification. This differs from a technical feature such as image input or tool-call output. |
 | Rating | A user assessment of a deployment's strength at one capability; it is not a verified benchmark score. |
 | Modality | A type of input or output, such as text, image, audio, or embedding vectors. |
-| Eligible destination | A contributor satisfying the request's authorization, protocol, modalities, context, and resource requirements. |
-| Open capacity | Capacity available to admit execution now within safety limits, including the chosen policy for loading an unloaded model. It does not mean merely that a model is installed. |
+| Eligible destination | A contributor with an addressable provider deployment offering the requested protocol and features and permitted to take the work. |
+| Open capacity | A provider slot and an available serving path, including any needed model lifecycle operation. |
 | Affinity | A preference to return related requests to the same provider instance to reuse its cache or state. |
 | Queue | Work admitted to wait at a serving node. An ingress forwarding record is not a second execution queue. |
 
@@ -53,11 +53,11 @@ Mango shares inference capacity across the user's machines without requiring a p
 
 **SCOPE-04 — I.** A leech still receives client requests, control messages, and catalog updates. It must remain usable as an ingress and as a GUI. Shutting down inference does not mean shutting down Mango or Tailscale.
 
-**SCOPE-05 — I.** Model availability has several states: installed but not loaded; loading; loaded and available; loaded and busy; unloading; disabled; unreachable; and failed. A stale advertisement is a routing hint, not permission to exceed the serving node's current resources.
+**SCOPE-05 — I.** Model availability distinguishes installed, loading, loaded, busy, unloading, disabled, unreachable, and failed. Refresh stale catalog observations when needed. Use known native capabilities and busy state. Unknown resource measurements do not disqualify an addressable provider.
 
 **SCOPE-06 — I.** Aliases do not certify model quality, identical tokenization, identical embeddings, or shared caches. GGUF and MLX deployments can share a name while retaining separate measurements and provider identities.
 
-**SCOPE-07 — I.** Resource-driven relocation usually changes where queued work or the next request runs. Completing an active request before unloading, as in the supplied example, is distinct from aborting it because local user activity takes precedence.
+**SCOPE-07 — C, owner 2026-11-21.** Use checked RAM/VRAM fit only for an additional non-YOLO model load under the owner's co-residency policy. YOLO permits unchecked co-residency among YOLO models subject to provider acceptance. Follow the alternate-first model swap and user-activity rules in [Resources and scheduling](03-resources-and-scheduling.md).
 
 **SCOPE-08 — C, Q05.** Each network belongs to one user. Enrolled peers are trusted and assumed nonmalicious; stale state and failures remain expected. Avoid infrastructure designed to reach consensus among hostile peers. Public or unknown inference callers are outside this trust assumption. A serving peer necessarily sees the requests it serves.
 

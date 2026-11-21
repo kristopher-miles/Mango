@@ -1,13 +1,19 @@
 # Per-model YOLO mode
 
-YOLO is off by default. On the owning computer, open the model card and choose **Enable YOLO**. The option is local to that host's stable provider/deployment identity; aliases and remote registry edits do not enable it. All supported providers can use it.
+YOLO is a local per-model setting. Enable **YOLO** on the owning computer for models that may share native provider capacity. The [November 21 serving boundary](requirements/09-recorded-decisions.md#serving-boundary--november-21-2026) specifies the rollout policy.
 
-The provider owns capacity and input validation for an enabled model. Mango uses the adapter's existing native load action with no Mango context override; an unmanaged or non-loadable registration still requires loading in its provider. Mango preserves the complete inference payload apart from model routing and provider credentials. It returns native inference statuses and bodies, including capacity errors, with any Mango-generated instance ID replaced by the requested public model name.
+For a group of YOLO models, send additional loads through the provider's native lifecycle without a Mango RAM or VRAM fit check. The provider accepts or refuses each load and validates inference. An attached model must be loaded through its provider. Client-facing model names come from the provider or an owner alias.
 
-YOLO models share native provider capacity with other YOLO models on the host. When a protected model needs the host, Mango waits for work in the other mode to settle and uses managed unload to release the resident YOLO models. A later YOLO request can switch back once protected work has settled. Evicted models reload on demand through their normal provider lifecycle. A resident without a verified managed unload and reload path can block a switch.
+| Incoming request and current residency | What Mango does |
+| --- | --- |
+| YOLO request, only YOLO models resident and native capacity available | Load only the requested model if needed. Other YOLO models can keep generating while the provider accepts the load. |
+| YOLO request, non-YOLO model must leave | Try an eligible alternate. If none can serve, wait for conflicting work to finish, unload the required non-YOLO residents and verify release, then load and serve only the requested YOLO model. |
+| Non-YOLO request, YOLO models must leave | Try an eligible alternate. If none can serve, wait for the last running YOLO request to finish, unload all YOLO residents and verify release, then load and serve the requested non-YOLO model. |
 
-Automatic pressure withdrawal still preserves YOLO work. The model's real memory remains visible in telemetry, and the protected mode applies its usual headroom and workload checks after a switch. The local benchmark policy can take a short native sample from a resident YOLO chat, embedding, or decision model. Full memory qualification applies to protected models.
+If Mango lacks unload authority or cannot verify release, reroute or wait. Subsequent YOLO models load individually as requests arrive. When the provider accepts an additional YOLO load alongside another YOLO model, that other model stays loaded and may keep generating.
 
-Authentication, inference scopes, routing capability selection, body/transport bounds, cancellation tracking, verified lifecycle settlement, provider identity checks, explicit serving disable, contributor pause, provider unload and stop remain in effect. An uncertain request/load still must settle before it can be reused. Disabling YOLO restores ordinary resource checks without changing native settings or saved qualification budgets.
+Sustained external CPU or GPU activity makes the whole node a leech, including YOLO. The quiet cooldown and authorized managed release apply. The node remains available as an ingress. Native benchmark measurements can still be collected when scheduled.
 
-The existing authenticated local control surface also accepts `PUT /api/local/providers/models/{deployment}/yolo` with `{"enabled":true,"revision":<current model options revision>}`. A stale revision or busy provider is rejected. The option and its state are exposed in the local model card and peer model observation. Peers that predate YOLO may hide the model while its host has a resource hold; they need the compatible general build to route in that condition.
+YOLO preserves key scopes, transport bounds, queue priority, deadlines, provider slots, contribution and cooldown, and attempt settlement. If you disable YOLO, a new additional load uses checked co-residency where configured. A sole-model load or valid inference on a loaded model still goes to the provider for the capacity decision.
+
+The authenticated local API accepts `PUT /api/local/providers/models/{deployment}/yolo` with `{"enabled":true,"revision":<model options revision>}`. The setting belongs to the local deployment, independent of its public alias.

@@ -1,5 +1,7 @@
 # Mango WebUI repair verification
 
+This is a historical verification record. For current dashboard and serving behavior requirements, see the [November 21 serving boundary](../requirements/09-recorded-decisions.md#serving-boundary--november-21-2026).
+
 Implementation follows [the repair plan](../plan/09-webui-redesign.md) and [F01–F20 in the critical review](2026-11-14-webui-critical-review.md). This records exercised behavior, rather than treating the visual direction board as a finished UI.
 
 ## Sidebar follow-up

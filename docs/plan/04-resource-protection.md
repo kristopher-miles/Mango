@@ -1,5 +1,7 @@
 # Phase 4 Benchmarks and local resource protection
 
+This phase records earlier design and qualification. The [November 21 serving boundary](../requirements/09-recorded-decisions.md#serving-boundary--november-21-2026) supersedes any conflicting guidance on execution admission, benchmarks, activity withdrawal, model eviction, or co-residency. See the [implementation and rollout plan](10-serving-boundary.md) for the current work.
+
 Deliver safe local admission and automatic withdrawal when the owner needs the machine. This phase owns resource truth; network scheduling must call it rather than reproduce its logic. Depends on phases 1–3.
 
 Read the shared foundation, BENCH-01–06, RESOURCE-01–07 and MEMORY-01–06. Windows telemetry is implemented here; other operating-system collectors are deferred.

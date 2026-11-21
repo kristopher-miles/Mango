@@ -1,5 +1,7 @@
 # Mango WebUI redesign implementation plan
 
+This phase records earlier design and qualification. The [November 21 serving boundary](../requirements/09-recorded-decisions.md#serving-boundary--november-21-2026) supersedes any conflicting guidance on execution admission, benchmarks, activity withdrawal, model eviction, or co-residency. See the [implementation and rollout plan](10-serving-boundary.md) for the current work.
+
 Date: November 14, 2026. Status: implemented; see [verification and limitations](../design/2026-11-14-webui-verification.md). Governing critique: [Mango WebUI critical design review](../design/2026-11-14-webui-critical-review.md). Visual direction: [Mango design board](../design/mango-redesign-direction.svg).
 
 Owner's subsequent correction supersedes the top-header layout below: the sidebar alone contains branding, navigation, host identity, and administration controls beside contribution status at its bottom. Remove the reserved top-header row. Narrow screens use bottom navigation and status controls. The original design board and initial screenshots predate this correction.

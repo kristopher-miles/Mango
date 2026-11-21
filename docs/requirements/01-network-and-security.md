@@ -28,7 +28,7 @@ Tailscale supplies private connectivity. Mango supplies enrollment, resource acc
 
 **SYNC-04 — C, Q05/Q07.** Use lightweight eventual reconciliation. Master-authorized configuration changes use newest-wins conflict resolution; independent changes should merge where possible. Do not require a majority, all peers online, a consensus coordinator, or large receipt histories for durable writes. Key creation/revocation has the separate one-other-online-peer rule in KEY-09. Define deterministic equal-time ordering and clock-skew handling in the implementation plan; a hash alone cannot order conflicting versions.
 
-**SYNC-05 — I.** Model observations and local resource withdrawal remain owned by the reporting machine and take effect there immediately, including without a majority. Shared requested configuration and locally observed operational state must be distinguishable. A remote edit cannot overwrite a newer local safety state.
+**SYNC-05 — I.** The reporting machine owns its model observations, local contribution state, and activity-triggered leech. Those decisions take effect there immediately. Distinguish shared requested configuration from local operational state. Shared edits cannot override local contribution or residency policy.
 
 **SYNC-06 — C, Q05/Q22.** Prefer events and compact config hash/revision timestamps carried with real peer requests. A mismatch triggers targeted reconciliation; an ordinary request without a mismatch does not trigger a general refresh. No proactive probing solely to track online membership. Idle provider inventory fallback is at most hourly. Every running node attempts reconciliation daily, even if contribution is disabled. Enrollment, settings changes, and routing real work are exempt from the idle cadence.
 

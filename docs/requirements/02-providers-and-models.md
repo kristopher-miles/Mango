@@ -52,25 +52,25 @@ Mango routes requests through existing serving infrastructure. Each adapter must
 
 **CONTEXT-01 — C.** Detect the maximum context actually served by a configured instance, not only the model's theoretical training limit. Store theoretical and effective limits separately when both are known. Recheck effective limits after reloads and server configuration changes.
 
-**CONTEXT-02 — I.** For generation, fit the encoded prompt, template and system overhead, tool definitions, multimodal tokens, and reserved output into the effective context. Count with the destination's tokenizer or an authoritative provider count when available. Different deployments under one alias may tokenize the same input differently.
+**CONTEXT-02 — C, owner 2026-11-21.** The hosting program validates context, tokenizer and template costs, tool declarations, media tokens, and output limits. Use reported limits or authoritative counts as routing evidence. A Mango estimate or default output reserve cannot reject an otherwise valid request.
 
-**CONTEXT-03 — I.** Do not fill the entire context with input and then expect output to fit. A full-context benchmark means total input plus its reserved output reaches the usable limit. For embedding and media endpoints, use the appropriate input, batch, duration, resolution, or output limits rather than forcing a text context concept onto them.
+**CONTEXT-03 — I.** A full-context benchmark measures input plus output in the provider's usable limit. Use the relevant input and output metrics for embeddings and media operations.
 
-**CONTEXT-04 — C, Q13.** If an adapter cannot discover a reliable effective limit, require a user-supplied served limit or a bounded verification procedure before advertising that capacity. Mark its provenance as reported, measured, or user-configured. Token estimates must be conservative, and the serving node retains final validation. Never silently truncate a request to make it fit.
+**CONTEXT-04 — C, Q13 as amended.** Record whether context is reported, measured, configured, or unknown. Use verified or configured values to advertise known capacity. Unknown context is allowed for an addressable compatible provider. Preserve client input and let the provider validate it.
 
 ## Benchmarking and resource profiles
 
-**BENCH-01 — C.** Measure short, approximately half-context, and full-served-context requests for text-like models where those tests make sense. Measure system resource use during model loading and execution so the scheduler can judge safe overlap. Do not apply these three prompt lengths indiscriminately to image or audio endpoints.
+**BENCH-01 — C.** Benchmark representative native workloads and measure startup and resident RAM and VRAM where policy permits. Use short, approximately half-context, and full-context text samples where useful. Select representative workloads for other modalities.
 
 **BENCH-02 — I.** Record load time, prompt processing time or rate where exposed, time to first token, generation rate, completion time, peak RAM, peak VRAM per device, and configuration. Distinguish cold loading, warm execution, and actual cache reuse. Record unsupported or unobserved metrics as unknown, never zero.
 
-**BENCH-03 — I.** A model's resource cost includes weights, context/KV cache, concurrency, temporary buffers, media encoders or projectors, runtime overhead, and transient load peaks. Record the request size and simultaneous work used for each measurement. One isolated load is insufficient evidence that two models at full context can safely overlap.
+**BENCH-03 — I.** For checked co-residency, capture model weights, configured cache, runtime buffers, and transient peaks under the actual provider configuration. Record the workloads and overlap observed. An isolated load is weak evidence of simultaneous peaks.
 
-**BENCH-04 — C, Q13.** At enrollment, select a local benchmark policy: Never, Now, or When convenient. The choice also covers later models/providers without another consent prompt. Now blocks all serving on that node until required benchmarks finish; failures remain visible until resolved or the owner changes policy. When convenient starts a benchmark after five minutes without client work on that node, independent of network-wide activity; any incoming client request interrupts it. Never skips automatic benchmarking and uses conservative resource profiles. Retain synthetic workloads, progress, cancellation, and short/middle/full tests where applicable. A local policy change is allowed without reenrollment.
+**BENCH-04 — C, Q13 as amended.** Benchmark policy is local. Never skips automatic benchmarks, Run now schedules a benchmark, and When convenient starts after five locally idle minutes and yields to client work. Only actual running or settling benchmark work can occupy capacity. Missing, incomplete, or failed measurements do not stop ordinary serving.
 
 **BENCH-05 — I.** Bind measurements to the artifact, quantization, runtime version, device configuration, context size, cache configuration, concurrency, and relevant adapter version. Material changes invalidate affected confidence. Rebenchmark on relevant changes or user request, not every startup.
 
-**BENCH-06 — P, Q14.** Allow overlapping deployments only with adequate resource evidence and a current admission check. Use conservative non-overlap for unmeasured combinations; permit a local owner to configure a qualified profile. Do not benchmark every possible combination combinatorially, and do not extrapolate a small-context peak into a claim of full-context safety.
+**BENCH-06 — C, owner 2026-11-21.** Use comparable benchmark or native evidence for checked additional loads. An explicit owner override controls the supplied RAM/VRAM value. Keep unknown evidence visible and avoid generic estimates as fit authorities. YOLO co-residency goes to the provider for acceptance.
 
 ## Required catalog information
 

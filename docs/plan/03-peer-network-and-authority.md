@@ -1,5 +1,7 @@
 # Phase 3 Peer network and authority
 
+This phase records earlier design and qualification. The [November 21 serving boundary](../requirements/09-recorded-decisions.md#serving-boundary--november-21-2026) supersedes any conflicting guidance on execution admission, benchmarks, activity withdrawal, model eviction, or co-residency. See the [implementation and rollout plan](10-serving-boundary.md) for the current work.
+
 Deliver joining and reconnecting Windows peers over installed Tailscale, shared metadata convergence, inference keys, and the two distinct recovery operations. This phase publishes the catalog but does not yet distribute execution; routing arrives in phase 5. Depends on phases 1–2.
 
 Read the shared foundation and [Network and security](../requirements/01-network-and-security.md), especially NET, SYNC, AUTH and KEY requirements. Public listener setup belongs to phase 6.

@@ -1,5 +1,7 @@
 # Mango shared implementation foundation
 
+This phase records earlier design and qualification. The [November 21 serving boundary](../requirements/09-recorded-decisions.md#serving-boundary--november-21-2026) supersedes any conflicting guidance on execution admission, benchmarks, activity withdrawal, model eviction, or co-residency. See the [implementation and rollout plan](10-serving-boundary.md) for the current work.
+
 This is the common contract for eight implementation phases. Read this document and the current phase; consult only the requirement sections that phase names. The subject requirements and recorded owner decisions govern. Historical questionnaire recommendations do not override them. This plan does not implement Mango.
 
 ## Delivery order

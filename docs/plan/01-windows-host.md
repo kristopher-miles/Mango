@@ -1,5 +1,7 @@
 # Phase 1 Windows host and local settings
 
+This phase records earlier design and qualification. The [November 21 serving boundary](../requirements/09-recorded-decisions.md#serving-boundary--november-21-2026) supersedes any conflicting guidance on execution admission, benchmarks, activity withdrawal, model eviction, or co-residency. See the [implementation and rollout plan](10-serving-boundary.md) for the current work.
+
 Deliver a small Windows background application with a local browser UI, tray entry, and reliable settings persistence. This establishes the owner process for later features, without pretending it already serves inference.
 
 Read [Shared foundation](00-shared-foundation.md), PRODUCT-03/06, SCOPE-04, NFR-02/04/05, and UI-02/07/08. No previous phase is required.

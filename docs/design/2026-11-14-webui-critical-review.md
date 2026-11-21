@@ -1,5 +1,7 @@
 # Mango WebUI critical design review
 
+This is a historical design review. For current dashboard and serving behavior requirements, see the [November 21 serving boundary](../requirements/09-recorded-decisions.md#serving-boundary--november-21-2026).
+
 Date: November 14, 2026. Scope: the current working checkout, including the in-progress generic-provider changes. This review precedes redesign implementation.
 
 ## Verdict

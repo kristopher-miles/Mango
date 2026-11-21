@@ -1,5 +1,7 @@
 # Phase 5 Scheduling and routing
 
+This phase records earlier design and qualification. The [November 21 serving boundary](../requirements/09-recorded-decisions.md#serving-boundary--november-21-2026) supersedes any conflicting guidance on execution admission, benchmarks, activity withdrawal, model eviction, or co-residency. See the [implementation and rollout plan](10-serving-boundary.md) for the current work.
+
 Deliver concurrent inference across peers, local execution queues, the accepted priority/scarcity policy, useful cache affinity, and bounded failure retry. Depends on phases 2–4.
 
 Read the shared foundation and QUEUE, ROUTE, AFFINITY and MOVE in [Scheduling requirements](../requirements/03-resources-and-scheduling.md). Reuse phase 4 admission and phase 3 cached authority/catalog state.

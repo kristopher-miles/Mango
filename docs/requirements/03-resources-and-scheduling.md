@@ -1,44 +1,46 @@
 # Mango resources and scheduling requirements
 
-The serving node is the final authority over its resources. Other nodes use its advertisements to select candidates, then request admission. This permits simultaneous clients without treating a replicated catalog as a reservation system.
+The hosting program decides whether it can serve a valid request. Mango coordinates provider slots, local contribution, benchmarks, and queue ownership. Peer advertisements are routing hints. The serving node checks the current facts when the work arrives.
 
 ## Local activity and contributor state
 
 **RESOURCE-01 — C.** Nodes support contributor and leech roles. Switching to leech withdraws local inference availability, aborts active inference, and unloads models or shuts down the inference servers under Mango's control. Requests can still enter the network through that node.
 
-**RESOURCE-02 — C.** Detect high system activity not caused by monitored inference processes. When detected, become a leech until the configured cooldown has elapsed. Activity monitoring, thresholds, enablement, and cooldown are local-only settings. Five minutes is the user's example default, not yet a measured optimum.
+**RESOURCE-02 — C.** Sustained external CPU or GPU activity makes the whole node a leech, including YOLO deployments. Local serving yields to the user's workload and ingress remains available. Activity monitoring, thresholds, and cooldown are local-only settings.
 
-**RESOURCE-03 — I.** Track the managed inference process tree, including workers, when attributing load. CPU, GPU, RAM pressure, and device memory matter. Do not assume aggregate GPU utilization minus one process counter is a reliable measure on every operating system. Missing attribution must be visible.
+**RESOURCE-03 — I.** Attribute provider inference and benchmarks to Mango using provider process and worker evidence. Only sustained attributable external CPU or GPU activity can start the activity cooldown. Surface missing attribution as a diagnostic.
 
-**RESOURCE-04 — C, Q15.** Use local observations at no more than one sample every two seconds; owners may choose a lower frequency, meaning a longer interval. Cutoff percentages and cooldown are configurable per node. Retain the initial 10-second sustained-load trigger and five-minute quiet cooldown as defaults, restarting quiet time on renewed load. Memory pressure immediately triggers withdrawal/cooldown. Record its cause, observations, and whether managed inference was loading/running in the separately disableable operational log.
+**RESOURCE-04 — C, Q15 as amended.** Sample at intervals of at least two seconds. Keep the default ten-second sustained-use trigger and five-minute quiet cooldown. Renew quiet time on renewed external activity. Log activity withdrawals separately when enabled. RAM, VRAM, and Windows commit observations are advisory outside the additional-load fit check.
 
-**RESOURCE-05 — I.** Manual leech mode persists until the user changes it. An automatic cooldown cannot undo manual withdrawal, maintenance, a resource fault, or disabled contribution. Restarting or resuming the computer must not silently clear those constraints.
+**RESOURCE-05 — I.** Manual leech mode persists until the owner changes it. Cooldown expiry cannot undo manual withdrawal, maintenance, disabled contribution, or an unresolved managed lifecycle operation. Legacy memory-pressure holds cannot block serving.
 
-**RESOURCE-06 — I.** Withdraw admission before beginning cancellation. Notify ingresses of queued and active request outcomes, cancel provider work, then verify resource release. Publish failure if a server refuses to stop or memory remains allocated. Do not advertise a successful return of resources merely because a stop command was sent.
+**RESOURCE-06 — I.** On a leech transition, withdraw local admission, report queued and active outcomes to ingresses, cancel managed inference, and verify the authorized release. Report unresolved provider work or release failure. Continue routing from the ingress.
 
-**RESOURCE-07 — C, Q09/Q15.** Allow a short adapter-specific cancellation deadline, then terminate only an explicitly managed process if necessary. Unknown telemetry or an unsupported shutdown path defaults to refusing automatic contribution until the owner selects a safe local policy. Attached-only endpoints may still be used with an explicit limitation, but cannot promise automatic reclamation.
+**RESOURCE-07 — C, Q09/Q15 as amended.** Use a bounded provider-specific cancellation deadline. Terminate only a process Mango is authorized to manage and can identify. Attached endpoints retain their own lifecycle authority. Missing telemetry and missing unload permission on an attached provider do not block ordinary forwarding.
 
 | State | Local inference behavior | Exit condition |
 | --- | --- | --- |
 | Manual leech | No admissions; cancel and release managed inference | Explicit local owner action |
-| Contributor idle or busy | Admit within current measured limits | User activity, manual withdrawal, maintenance, or failure |
+| Contributor idle or busy | Forward eligible work within queue and provider slot rules | User activity, manual withdrawal, or maintenance |
 | Withdrawing | Refuse admissions; cancel work and release resources | Release verified or fault identified |
-| Automatic cooldown | No inference; routing and GUI remain available | Full quiet period plus safe health and resource checks |
-| Resource fault | No unsafe new work; report the cause | Recovery and revalidation |
+| Automatic cooldown | Local serving is dormant, with routing and GUI available | Configured quiet period and any pending release settled |
+| Unresolved provider lifecycle | Hold work that would conflict with the unresolved operation and report its cause | Provider settlement or verified recovery |
 
-## Memory and execution admission
+## Model residency and memory fit
 
-**MEMORY-01 — C.** Do not schedule beyond the node's configured RAM/VRAM safety margin. If two needed models will not fit together, wait for one request to finish and its model to unload before admitting the next load.
+**MEMORY-01 — C, owner 2026-11-21.** Check RAM and per-device VRAM before an additional non-YOLO model load would leave multiple models resident under the owner's co-residency policy. That is the only RAM/VRAM fit check. Forward a sole-model load and valid inference to a loaded model to the host program for its capacity decision.
 
-**MEMORY-02 — I.** Check actual free memory and reserve the expected peak before loading or starting work. Concurrent admissions on one host must not each allocate the same free capacity. Count loading, running, and retained caches; release a reservation only after cancellation or completion is settled and the resource state is known.
+**MEMORY-02 — I.** For a checked additional load, compare actual headroom and simultaneous model requirements, including the load peak and already committed loads. Count resident allocations once. Serialize or reserve checked loads so two admissions cannot spend the same headroom. If co-residency cannot be established, use the alternate-first wait-and-swap path in MOVE-01.
 
 **MEMORY-03 — I.** Treat host RAM, each discrete GPU's VRAM, and unified memory appropriately. Do not add separate GPU memories as if any model could use the sum. Do not count Apple unified memory twice as independent RAM and VRAM. Respect the backend's actual sharding and device placement.
 
-**MEMORY-04 — C, Q14.** Default reserved host RAM is 15 percent, clamped between 2 GiB and 5 GiB; default reserved VRAM is a flat 1 GiB per discrete GPU. Local owners may lower a reserve to zero. Before first accepting a below-default setting on a node, explain possible instability or shutdown and record consent; do not repeatedly prompt on that node afterward. Honor the chosen reserve. Unified memory remains one shared pool, not separately counted RAM plus VRAM.
+**MEMORY-04 — C, Q14 as amended.** Apply owner-configured memory margins only to checked co-residency. Default host RAM margin is 15 percent clamped from 2 GiB to 5 GiB. Default VRAM margin is 1 GiB per discrete GPU. The owner may set either as low as zero after the one-time local acknowledgement. Count unified memory as a single pool.
 
-**MEMORY-05 — I.** Resource admission includes measured execution concurrency and request size, not only whether weights fit. A provider with one proven slot gets one execution at a time. Provider internal queues must not hide Mango's ordering or continue running work Mango believes canceled.
+**MEMORY-05 — I.** Use provider slot and lifecycle facts for execution scheduling. Track ownership until request completion or cancellation is settled. CPU/GPU utilization informs user-activity detection. It does not take part in a model-fit calculation.
 
-**MEMORY-06 — I.** If an allocation fails, refresh observations, invalidate the unsafe profile, and stop retrying the same placement repeatedly. Surface a meaningful resource failure. A drop in free memory may require withdrawal even when the activity detector cannot identify its owner.
+**MEMORY-06 — C, owner 2026-11-21.** Use comparable native requirements or automatic benchmark measurements for checked co-residency. Explicit owner RAM/VRAM overrides take precedence. Surface native allocation failures and refresh affected evidence. An allocation failure does not withdraw the node or blacklist ordinary serving.
+
+**MEMORY-07 — C, owner 2026-11-21.** Additional YOLO models load individually on demand alongside resident YOLO models without a Mango fit check or waiting for their requests to finish, when the provider supports and accepts the load. When a switch requires evicting YOLO residents, wait until the last active request on the group finishes, then unload the entire resident group and verify release. Load only the requested model. Use MOVE-01 in both directions between YOLO and non-YOLO.
 
 ## Requests and queue ownership
 
@@ -52,9 +54,9 @@ The serving node is the final authority over its resources. Other nodes use its 
 
 **QUEUE-05 — C, Q16/Q17.** A higher-priority arrival displaces lower-priority queued work competing for the same resources, except an admitted scarce request protected by ROUTE-03 when the flexible higher-priority work can be routed elsewhere. Return displaced requests to ingress for bounded rerouting or overload. Independent resource sets continue working.
 
-**QUEUE-06 — C, Q16/Q17.** Apply queue rejection and eviction to competing resource sets, not the whole node. Independent GPU/CPU work may proceed if it does not delay reserved work. The scarcity exception is part of admission and must survive ordinary priority purging.
+**QUEUE-06 — C, Q16/Q17.** Apply priority conflicts to actual slot, lifecycle, residency, and benchmark contention. Independent work may proceed if it cannot delay reserved work. Preserve the scarcity exception.
 
-**QUEUE-07 — C, Q18.** Ordinary higher-priority arrivals do not abort active requests. They reorder or displace waiting work. Active aborts are reserved for local resource protection, explicit cancellation, security revocation, failures, or a separately approved preemption policy. Idle loaded models may be unloaded; loading work that has not begun inference may be canceled safely when appropriate.
+**QUEUE-07 — C, Q18.** Ordinary priority reorders waiting work and does not interrupt active inference. Active cancellation is reserved for user-activity or explicit leech, explicit cancellation, maintenance, credential revocation, failures, or separately approved preemption. Request-driven eviction follows MOVE-01 and waits for conflicting requests to finish.
 
 **QUEUE-08 — C, Q08/Q21/Q29.** Use bounded in-memory queues. Maximum queue residence is a master-controlled network setting defaulting to five minutes. Remove the proposed eight-per-key limit and 120-second deadline. Choose generous count/byte limits for plausible contexts and media rather than artificially restricting trusted clients. The former 64-request count is not an approved cap. No disk queue or crash resume is required; a still-connected ingress may retry failed serving work under MOVE-04/05.
 
@@ -64,17 +66,17 @@ The serving node is the final authority over its resources. Other nodes use its 
 
 ## Routing and priority order
 
-**ROUTE-01 — C.** When an alias has multiple eligible deployments, use another endpoint for simultaneous independent work when that increases served requests. Avoid placing a small embedding job on the only large-model machine merely because the large machine is faster.
+**ROUTE-01 — C.** For independent requests on a shared alias, try an eligible idle worker before queueing behind a busy one. Use native capabilities to identify alternatives. Unknown or estimated fit cannot justify leaving a usable worker idle. Preserve scarce placements for requests that need them.
 
 **ROUTE-02 — C, Q17.** A scarce request may outrank a more flexible higher-priority request when the latter has another eligible destination for its next work. This improves the number of requests served by the network without preempting the ongoing request. Otherwise priority and FIFO apply normally.
 
-**ROUTE-03 — C, Q17.** Permit a lower-priority request with only one eligible destination to queue behind active higher-priority work if that higher-priority work can move to another eligible destination for subsequent requests. Let the active request finish, reserve the scarce request, and advise the original ingress to route future flexible work elsewhere. Apply safety, context, modalities, and actual alternate eligibility before granting this exception. If no alternate exists, ordinary lower-priority rejection applies.
+**ROUTE-03 — C, Q17.** Permit a lower-priority scarce request to wait behind active higher-priority work when that work has another eligible destination for later requests. Let active work finish, reserve the scarce request, and advise the original ingress. Verify authorization, provider capabilities, and actual alternate eligibility before granting the exception.
 
-**ROUTE-04 — I.** Eligibility includes the whole request: required protocol, features, modalities, context and output reserve, device safety, contribution state, and authorization. A model that fits its weights on another machine but cannot handle this request's context is not an alternate destination.
+**ROUTE-04 — I.** Eligibility includes authorization, contribution, provider protocol and features, addressable deployment identity, actual slot or lifecycle status, and any additional-load rule that applies. Use provider-reported context as a routing signal. Host programs decide whether valid requests fit. Missing measurements do not disqualify an otherwise eligible worker.
 
-**ROUTE-05 — C, Q05.** Use cached model hosts and probe/admit directly against likely destinations when real requests arrive. If no known host can be found, perform bounded full-network discovery to find newly joined hosts, with a shared per-node cooldown initially ten seconds. Coalesce simultaneous discoveries. Do not maintain a live peer map by continuous probing or broadcast request bodies. The serving node validates current resource admission.
+**ROUTE-05 — C, Q05.** Probe likely destinations when requests arrive. If none are known, use bounded full-network discovery with a shared cooldown initially set to ten seconds. Coalesce simultaneous discoveries. Avoid a continuously probed live map and send the body only to the selected serving node. Check current authorization, queue, provider, and applicable load constraints there.
 
-**ROUTE-06 — P, Q18/Q21.** Prevent load/unload thrashing by retaining useful loaded models until they obstruct better admissions, and by reserving an admitted scarce request's next feasible start. Stop backfilling conflicting work when it would postpone that reservation. Any backfill must fit without delaying it. Outside the explicit scarcity exception, priority can starve low-priority work; do not silently age it into a higher priority.
+**ROUTE-06 — P, Q18/Q21.** Retain useful residents and reserve an admitted scarce request's next start. Stop conflicting backfill when it would postpone that reservation. Use MOVE-01 and MEMORY-07 for residency switches.
 
 **ROUTE-07 — I.** Routing must terminate. Track attempted destinations and request deadlines, reject loops, use retry backoff, and retain FIFO age during a legitimate reroute without trusting client-supplied timestamps. FIFO is defined by admission order for equal contenders at the serving node, not a perfectly synchronized global arrival clock.
 
@@ -88,11 +90,11 @@ The serving node is the final authority over its resources. Other nodes use its 
 
 **AFFINITY-04 — I.** Cache affinity is tied to the real provider instance, model/tokenizer/configuration, and usable cached prefix. The same alias does not make caches interchangeable. Invalidate hints after unloading, restart, relevant reconfiguration, or loss of state. An adapter that cannot confirm cache behavior may advertise only a best-effort preference.
 
-**AFFINITY-05 — C, Q19.** Bound cache waiting by the client's deadline and an estimated cache benefit. Prefer waiting only when expected wait plus cached execution is better than the alternative. Make uncertainty visible in diagnostics; cache preference never overrides safety, scope, context fit, or the accepted queue priority rules.
+**AFFINITY-05 — C, Q19.** Bound cache waiting by the client's deadline and estimated cache benefit. Consider bounded waiting for a related continuation only when its expected completion is better than the alternative. Affinity follows authorization, provider eligibility, priority, and ROUTE-01 for independent requests.
 
 ## Relocation and failures
 
-**MOVE-01 — C.** When a larger model needs a machine occupied by smaller models, finish appropriate active requests, unload the smaller models, and look up alternate hosts from saved catalog knowledge. If another host can serve them, tell their ingress to route future work there. Avoid a whole-network search for every displacement.
+**MOVE-01 — C, owner 2026-11-21.** If local work would wait for conflicting requests or require a model swap, first try an eligible alternate node. If none can serve it, wait for the conflicting work to finish, unload the required residents through authorized lifecycle operations, verify release, then load and serve the requested model. Apply the same sequence in both directions between YOLO and non-YOLO and unload YOLO residents as a group. Keep later work from extending an admitted switch indefinitely under the queue rules. Missing unload authority or unresolved release blocks that local switch.
 
 **MOVE-02 — I.** Internal route advice goes to the Mango ingress, not a mandatory HTTP redirect to the external client. The ingress preserves the client's URL, credentials, and stream. Advice is a hint that still requires current admission checks.
 
@@ -106,13 +108,13 @@ The serving node is the final authority over its resources. Other nodes use its 
 
 | Situation | Required or proposed outcome |
 | --- | --- |
-| Two independent requests, alias available on two idle nodes | Run on both where safe; do not serialize merely because the key is the same. |
+| Two independent requests, alias available on two eligible nodes | Use both workers concurrently when supported, even when the requests share a key. |
 | Agent continuation on a busy instance with useful cache | Consider a bounded wait under AFFINITY-05; reroute if the benefit is absent or deadline is at risk. |
 | High-priority small embedding request and scarce large-model request | Place embeddings on the smaller compatible machine; priority does not entitle it to the fastest GPU. |
 | Low-priority request behind high-priority work | Admit the scarcity exception if an alternate can host subsequent flexible work; otherwise reject. |
 | High-priority request admitted behind active normal work | Under Q18's recommendation, let active work finish; displace lower-priority waiting competitors. |
 | Normal request arrives while low-priority work waits | Evict affected low-priority queued work and attempt bounded rerouting. |
-| Small models on the large machine; a large model is requested | Finish active work as permitted, reserve the large request, unload, and advise ingresses about alternatives. |
+| A model swap is needed and no alternate can serve | Wait for conflicting work to finish, unload the required residents, verify release, then load only the requested model. Evict resident YOLO models together. |
 | Owner starts a game | Withdraw, abort managed inference, release resources, and enter the local cooldown. |
 | Two ingresses simultaneously see one free slot | Only one admission succeeds; the other gets a queue decision or reroute/rejection. |
-| Lower-priority work can use an independent GPU | Under Q16's recommendation, admit it if it cannot delay higher-priority reservations. |
+| Lower-priority work can use an independent provider slot | Admit it if it cannot delay reserved work. |

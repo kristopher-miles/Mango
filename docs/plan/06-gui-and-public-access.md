@@ -1,5 +1,7 @@
 # Phase 6 Network GUI and optional public access
 
+This phase records earlier design and qualification. The [November 21 serving boundary](../requirements/09-recorded-decisions.md#serving-boundary--november-21-2026) supersedes any conflicting guidance on execution admission, benchmarks, activity withdrawal, model eviction, or co-residency. See the [implementation and rollout plan](10-serving-boundary.md) for the current work.
+
 Deliver the complete administration experience and optional internet inference, using the working host, adapters, peer state, resource gate, and scheduler. Depends on phases 3–5. Extend the existing local UI rather than introducing a second application.
 
 Read the shared foundation, UI-01–08, the settings-ownership table, PUBLIC-01–04, and KEY-01–11. Logging views are completed in phase 7; update availability is completed in phase 8.

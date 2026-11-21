@@ -1,5 +1,7 @@
 # Phase 2 Provider integration and model catalog
 
+This phase records earlier design and qualification. The [November 21 serving boundary](../requirements/09-recorded-decisions.md#serving-boundary--november-21-2026) supersedes any conflicting guidance on execution admission, benchmarks, activity withdrawal, model eviction, or co-residency. See the [implementation and rollout plan](10-serving-boundary.md) for the current work.
+
 Deliver usable local inference through Unsloth, LM Studio, and llama.cpp, with accurate model identity and management capability. This is the adapter boundary used by every later phase. Depends on phase 1.
 
 Read the shared foundation and PROVIDER-01–07, API-01–05, MODEL-01–08, and CONTEXT-01–04 in [Provider requirements](../requirements/02-providers-and-models.md). Benchmark execution belongs to phase 4.

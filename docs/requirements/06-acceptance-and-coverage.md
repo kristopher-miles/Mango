@@ -1,6 +1,6 @@
 # Mango acceptance and specification coverage
 
-These are future acceptance scenarios, not tests that have already run. Confirmed and inferred behavior can guide later test design. Scenarios containing proposed policy remain conditional on the referenced decision. No live providers, GPUs, public ingress, or multi-machine topology were exercised while preparing these documents.
+These are acceptance scenarios. Qualification requires recorded results on the relevant providers and hardware. The serving-boundary scenarios track the November 21, 2026 decision.
 
 ## Acceptance scenarios
 
@@ -24,11 +24,11 @@ These are future acceptance scenarios, not tests that have already run. Confirme
 | AC-16 | Alias GGUF and MLX variants together. Matching modalities are accepted despite different quality; conflicting modalities are rejected. A feature unsupported by one deployment is routed only to an eligible one. | MODEL-01–05; C/I/P Q12 |
 | AC-17 | A shared embedding alias has incompatible dimensions or different vector spaces. Apply the approved output-contract/pinning policy and show the limitation without pretending to assess intelligence. | MODEL-06; P Q12 |
 | AC-18 | The model's theoretical context exceeds its served context. Requests just within the served total budget succeed; those above it are rejected or use a different eligible deployment. Include template, tools, output reserve, and multimodal overhead. | CONTEXT-01–04; C/I/P Q13 |
-| AC-19 | Exercise Never, Now, and When convenient benchmark policies, including a model added later. Now blocks node serving until complete; convenient waits five locally idle minutes and yields to any client request without new consent prompts. | BENCH-01–06; C/I Q13 |
-| AC-20 | Two models' weights fit but their simultaneous context peaks do not. Admission serializes them. Two racing admissions cannot reserve the same remaining RAM or VRAM. Include unified-memory and multi-GPU cases. | MEMORY-01–06, BENCH-03/06; C/I/P Q14 |
-| AC-21 | Mango inference is busy without external load. It does not trigger its own user-activity withdrawal. Start a non-LLM workload: admission closes, active inference aborts, memory release is verified, and cooldown follows local settings. | RESOURCE-01–07; C/I/P Q09/Q15 |
-| AC-22 | Manual leech mode survives a restart and an expired automatic cooldown. Other peers cannot disable the host's activity protection or change its memory margin. | RESOURCE-05, UI-02; C/I |
-| AC-23 | Submit independent requests from several ingresses to an alias on two machines. Capacity is used concurrently and each attempt has exactly one execution owner; ambiguity does not cause blind duplicate starts. | QUEUE-01–03, ROUTE-01; C/I |
+| AC-19 | A running or settling benchmark can occupy its slot. When convenient waits five locally idle minutes and yields to client work. An idle host with missing, incomplete, or failed profiles still forwards valid requests. | BENCH-01–06; Q13 as amended |
+| AC-20 | Try an additional non-YOLO load whose simultaneous RAM or per-device VRAM requirement exceeds the available pool. Verify reroute, or wait for conflicting work and release the required residents before loading. Exercise matching measurements, explicit overrides, unknown evidence, unified memory, separate GPUs, and racing loads. | MEMORY-01–06, MOVE-01; Q14 as amended |
+| AC-21 | Mango inference, benchmarks, and memory pressure alone leave contribution active. Sustained attributable user activity suspends local serving including YOLO, releases managed inference, and keeps ingress routing. Activity during cooldown renews the quiet interval. | RESOURCE-01–07; Q15 as amended |
+| AC-22 | Manual leech survives restart and an expired automatic cooldown. Peer edits cannot change the owner's external activity settings, YOLO, or checked co-residency settings. | RESOURCE-05, UI-02 |
+| AC-23 | Run two independent long requests for the same alias while one worker is generating and an eligible worker is idle. Verify overlapping native executions on different hosts, even with different context windows and missing qualification on the idle worker. Retry only after safe ownership settlement. | QUEUE-01–03, ROUTE-01 |
 | AC-24 | Submit related agent follow-ups and unrelated work under the same key. Follow-ups may reuse cache; unrelated work can run elsewhere. Unloading invalidates affinity, and retained routing state expires. | AFFINITY-01–05; C/I/P Q19 |
 | AC-25 | A low-priority request has no alternate placement while higher-priority active work can move elsewhere next time. Allow the scarce request to queue without interrupting execution. Without that alternate, reject under normal priority rules. | QUEUE-04, ROUTE-02/03; C Q17 |
 | AC-26 | Admit higher-priority work. Evict only conflicting lower-priority queued work; preserve the explicit scarcity exception and independent-resource work. Reroute evictions or return overload. | QUEUE-05–07; C Q16/Q17/Q18 |
@@ -46,10 +46,13 @@ These are future acceptance scenarios, not tests that have already run. Confirme
 | AC-37 | While idle, no periodic full-peer online-map probes occur; local inventory fallback is no more than hourly. Each running node attempts daily reconciliation even when contribution is disabled. | SYNC-06, NFR-03; C Q01/Q22 |
 | AC-38 | Request hashes match: no generic config refresh. A mismatch triggers targeted reconciliation; missing known model hosts trigger coalesced full discovery no more than once per ten-second cooldown. | SYNC-06, ROUTE-05; C Q05 |
 | AC-39 | In a multi-node network with no reachable peer, refuse key issuance/revocation; allow it with one reachable peer, or in a known singleton. Merge independent key changes and preserve revocations. | KEY-02/09; C Q07 |
-| AC-40 | Verify RAM reserve clamps at 2 and 5 GiB and VRAM defaults to flat 1 GiB. Accept a zero reserve after one recorded local warning and do not ask again on that node. | MEMORY-04; C Q14 |
+| AC-40 | Verify the RAM and VRAM margins apply only to an additional checked load, honor an owner override, and record below-default acknowledgement once per node. | MEMORY-04; Q14 as amended |
 | AC-41 | Submit ten requests with one key. Apply actual resource capacity and shared network policy rather than an eight-per-key quota. Queue residence defaults to five minutes and changes under master authority. | KEY-02, QUEUE-08; C Q08/Q21 |
 | AC-42 | A future model has several task ratings, while each classified request chooses exactly one configured task keyword. No model loses other ratings when one task is selected. | BEST-08; F Q28 |
-| AC-43 | Recover a forgotten master password with the recovery credential. Existing inference keys, peer enrollment, configuration, benchmarks, and logs survive; old administrative sessions end. Full reset remains a separate explicit action. | AUTH-01/05/07; C owner clarification |
+| AC-43 | Recover a forgotten master password with the recovery credential. Existing inference keys, peer enrollment, configuration, benchmarks, and logs survive. Old administrative sessions end. Full reset remains a separate explicit action. | AUTH-01/05/07 |
+| AC-44 | Load a sole model and forward a valid request under low observed headroom, missing telemetry, stale allocation-failure data, and absent benchmarks. The provider receives the request and its real success or refusal is observable. | MEMORY-01/06, CONTEXT-02/04 |
+| AC-45 | Load YOLO model B while YOLO model A is generating. On a provider that supports both residents, verify B loads without waiting, evicting A, or consulting Mango fit, and both run. With a conflicting non-YOLO resident, verify a YOLO request uses an eligible alternate before any local eviction. | MEMORY-07, MOVE-01 |
+| AC-46 | With no eligible alternate, send non-YOLO C while YOLO A and B are resident and generating. Verify both outputs finish, the entire YOLO group unloads, release is verified, and only C loads. Send A while C is generating. Verify C completes and unloads, only A loads, then B can join on demand while A generates. Test later queued work, unavailable unload authority, and unresolved release. | MEMORY-07, QUEUE-07, MOVE-01 |
 
 ## Coverage of the original specification
 
@@ -71,7 +74,7 @@ These are future acceptance scenarios, not tests that have already run. Confirme
 | Concurrent clients and per-serving-node queues | QUEUE-01–03 |
 | Alternate destinations and cache-aware follow-ups | ROUTE-01; AFFINITY-01–05 |
 | Temporary request state and unrelated parallel work | AFFINITY-02–03 |
-| Measured overlap, RAM/VRAM margin, serialized model loads | MEMORY-01–06; BENCH-03/06 |
+| Measured co-residency, RAM/VRAM fit, and YOLO group eviction | MEMORY-01–07, MOVE-01, BENCH-03/06 |
 | Relocation, unloading small models, ingress route advice | MOVE-01–05; ROUTE-06 |
 | Scarce-destination preference and low network traffic | ROUTE-02–05; Q17 |
 | Low-priority rejection and higher-priority queue purging | QUEUE-04–07; Q16/Q18 |
@@ -86,7 +89,7 @@ These are future acceptance scenarios, not tests that have already run. Confirme
 
 ## Status before implementation planning
 
-All 29 responses and the password-recovery clarification are recorded in [Recorded decisions](09-recorded-decisions.md). The subject requirements and these scenarios reflect those decisions. The [eight-phase plan](../plan/00-shared-foundation.md) identifies implementation ownership and the small checks needed at each stage. Hardware behavior still requires live qualification; application implementation has not begun.
+See [Recorded decisions](09-recorded-decisions.md) for the questionnaire and the November 21 boundary. Use the [serving boundary plan](../plan/10-serving-boundary.md) for the implementation and live qualification sequence.
 
 
 ## WebUI repair acceptance, 2026-11-14

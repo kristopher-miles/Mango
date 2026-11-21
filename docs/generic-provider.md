@@ -8,7 +8,7 @@ Run the provider independently on the Windows machine that owns the models. Bind
 
 In Mango, open **Providers and models**, choose **Generic endpoint**, enter the origin and any bearer token, then choose **Managed** and save. **Attached** permits inventory and inference on loaded models. The hosting program owns its process and exposes model load and unload over HTTP.
 
-Serving and scheduling also use Mango's normal node settings. Enable **Contributor** and set per-model load and execution limits in **Resource protection**. Mango uses current measured resource headroom when available; a missing sample produces a warning while native provider checks continue. With activity monitoring enabled, run the provider listener on the owning node and keep its workers in the listener's process tree so Windows can attribute their memory and activity. For chat, embedding, and decision models, set **Workload units** to at least the served context. Set **Fallback served context** on those models if Mango should load them on demand. This setting gives the scheduler a usable limit while the model is cold and becomes the requested context on load. Once loaded, the instance's reported context takes precedence.
+Under the [serving boundary](requirements/09-recorded-decisions.md#serving-boundary--november-21-2026) pending rollout, the provider owns capacity for lone-model startup and valid inference. Enable **Contributor** on the owning node. Use **Fallback served context** to request a native context at load when needed. Report the actual effective context for routing. Keep local workers attributable to the provider when possible so Mango can distinguish inference and benchmarks from the user's other activity.
 
 Before inference, Mango revalidates the selected Generic instance against current inventory. If it has retired or changed, Mango releases the old reservation and keeps the admitted request resident while refreshing and scheduling again within its original admission deadline. Requests already submitted to inference are never replayed through this recovery path.
 
@@ -65,7 +65,7 @@ Serve a complete, current snapshot on every successful inventory request. Keep r
 
 Serialize changes to resident state with inference admission. Reject a load when capacity is full or an unload when the instance is active with `409`. Use `404` for unknown keys or instance IDs, `400` or `422` for invalid settings, and `507` if the engine cannot allocate model memory. Repeated requests must be safe. In particular, never unload a replacement using a retired instance ID, and never silently evict a model to honor a new load. If a control request disconnects, cancel the transition or finish it and keep inventory authoritative about the resulting state.
 
-Mango allows up to five minutes for each lifecycle response and then polls inventory for up to 40 seconds to confirm the change. A successful command response alone leaves the new state unconfirmed. If a single-slot host has A loaded and a request needs B, Mango's scheduler can unload A when idle, observe the unload, check resource availability, load B, observe B's instance, then submit inference. For a manual swap in the UI, choose **Unload model** on A and **Load model** on B. Use **Refresh catalog** after changes made directly in the hosting program.
+Mango allows up to five minutes for each lifecycle response, then polls inventory for up to 40 seconds to confirm the result. A full single-slot provider can make work reroute or wait. The [YOLO residency policy](yolo.md) governs request-driven unloads. An explicit swap can use **Unload model** followed by **Load model**. Use **Refresh catalog** after direct provider changes.
 
 ## Serve inference by instance ID
 
@@ -80,7 +80,7 @@ Mango accepts the provider model identifier or a user-set alias from the client 
 | `transcription` | `POST /v1/audio/transcriptions`. Accept a multipart `file` and `model` instance ID, plus supported language, response format, and timestamp options. Return the requested text or structured transcription. |
 | `speech` | `POST /v1/audio/speech`. Accept text `input`, a supported `voice`, and the requested `response_format`. Return the audio bytes with the matching content type. |
 
-The three media types use the same inventory and lifecycle operations. Leave **Fallback served context** blank for these deployments. In **Resource protection**, use pixels for image workload units, input bytes for transcription, and input characters for speech. Give each independently loadable operation its own model key, even when two operations share the same weights.
+The three media types use the same inventory and lifecycle operations. Leave **Fallback served context** blank for them. The provider enforces its image and audio capacity. Give each independently loadable operation its own model key, even when two operations share weights.
 
 Only advertise features that work on the corresponding inference route. Set `capabilities.vision` or `has_vision_adapter` for inline image input, `capabilities.trained_for_tool_use` for client-executed function calls, and `capabilities.structured_output` for structured chat output. For chat benchmarks, include usage with `prompt_tokens` and `completion_tokens` when requested with `stream_options.include_usage`. [Chat completions](https://lmstudio.ai/docs/developer/openai-compat/chat-completions), [embeddings](https://lmstudio.ai/docs/developer/openai-compat/embeddings), [System One](https://lmstudio.ai/docs/developer/jev-compat/systemone)
 
@@ -92,7 +92,7 @@ From the repository root, run the [loopback fixture](../tests/Mango.Tests/Generi
 dotnet run --project tests/Mango.Tests -c Release -- --generic-provider-fixture
 ```
 
-To try a scheduled swap in Mango, set **Fallback served context** and **Workload units** to 4096 for both sample models. In **Resource protection**, use one item per request, 64 MiB load RAM, and 16 MiB additional execution RAM for this fixture. Load `sample-a` in Mango, then send a chat request for `sample-b` to Mango's `/v1/chat/completions` using the local session credential. The second model should answer and be the only resident model.
+To exercise a scheduled swap on the single-slot fixture, configure the two sample models with a 4096-token native served context. Load `sample-a`, then send a request for `sample-b` to Mango's `/v1/chat/completions`. With no eligible alternate, the request waits for active work on `sample-a` to finish, confirms its unload, and loads only `sample-b`. Use a scoped key or the authorized local session.
 
 To exercise the HTTP contract directly, substitute the printed origin for `<origin>` and run this against a fresh fixture.
 
