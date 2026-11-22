@@ -111,9 +111,8 @@ internal static partial class PeerChecks
                 "both overlapping streams finish");
         }
 
-        foreach (var secondIngress in new[] { small, large })
+        async Task CheckSplit(Host secondIngress, string pair)
         {
-            var pair = secondIngress == small ? "one ingress" : "two ingresses";
             var leftPrompt = "compressible left " + pair + new string('a', 220_000);
             var rightPrompt = "compressible right " + pair + new string('b', 220_000);
             Hold(leftPrompt);
@@ -142,6 +141,9 @@ internal static partial class PeerChecks
             Check((await leftBody.ReadToEndAsync()).Contains("[DONE]") && (await rightBody.ReadToEndAsync()).Contains("[DONE]"),
                 "both simultaneously submitted streams complete");
         }
+
+        await CheckSplit(small, "one ingress");
+        await CheckSplit(large, "two ingresses");
 
         Hold("draw blocker");
         Hold("queued first");
@@ -184,6 +186,30 @@ internal static partial class PeerChecks
         await drawing;
         Check(Served(await waitingLong) == largeId, "after image work finishes, the pending long request runs on the only fitting host");
         Check(calls.Values.All(call => call.Task.IsCompletedSuccessfully), "all provider calls settle");
+
+        // Keep the stale catalog visible at ingress while the other enrolled listener is down.
+        var largePort = new Uri(large.TailAddress).Port;
+        await large.DisposeAsync();
+        var outageStart = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        async Task<JsonElement> OutageChat(string prompt)
+        {
+            Hold(prompt);
+            await outageStart.Task;
+            return await Chat(prompt);
+        }
+        var outageLeft = OutageChat("outage left");
+        var outageRight = OutageChat("outage right");
+        outageStart.SetResult();
+        try
+        {
+            await Eventually(() => JsonSerializer.SerializeToElement(small.Network.SchedulingView(), Json)
+                .GetProperty("waiting").GetInt32() == 1, "the surviving worker queues the second simultaneous request");
+        }
+        finally { Release("outage left"); Release("outage right"); }
+        Check((await Task.WhenAll(outageLeft, outageRight)).All(response => Served(response) == smallId),
+            "both outage requests finish on the surviving worker");
+        await using var restored = await Host.StartAsync(Path.Combine(root, "alias-large"), status, largePort);
+        await CheckSplit(small, "fresh requests after listener restart");
 
         async Task<HttpResponseMessage> OpenStream(string prompt, Host ingress)
         {

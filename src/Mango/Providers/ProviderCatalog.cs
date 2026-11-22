@@ -29,7 +29,7 @@ internal sealed record ServingPlacement(Deployment Model, EndpointStatus Endpoin
 internal sealed record ExecutionResult(bool Settled, ProviderFailure? Failure, ProviderExecution? Timing,
     bool RetryBeforeSubmission = false);
 internal sealed record StartExecution(AdmissionStatus Status, string? Reason,
-    Func<HttpContext, CancellationToken, Task<ExecutionResult>>? Execute = null, string? Epoch = null, bool MemoryWait = false);
+    Func<HttpContext, CancellationToken, Task<ExecutionResult>>? Execute = null, string? Epoch = null, bool MemoryWait = false, bool OperationInProgress = false);
 
 internal sealed class ProviderCatalog(string directory, ResourceProtection? resources = null) : IAsyncDisposable, IServingBackend
 {
@@ -869,7 +869,7 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
     public StartExecution TryStart(InferenceRequest payload, string id)
     {
         if (!operation.Wait(0))
-            return new(AdmissionStatus.Wait, "A provider operation is in progress.");
+            return new(AdmissionStatus.Wait, "A provider operation is in progress.", OperationInProgress: true);
         try
         {
             var placement = Placement(payload.Shape, id);

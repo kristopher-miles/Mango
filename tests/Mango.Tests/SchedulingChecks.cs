@@ -19,6 +19,7 @@ internal static class SchedulingChecks
         await IndependentAndFifoAsync();
         await PriorityAsync();
         await MemoryWaitAsync();
+        await ColdLoadWithAlternateAsync();
         await ScarcityAsync();
         await ChangedScarcityAsync(changeCatalog: true);
         await ChangedScarcityAsync(changeCatalog: false);
@@ -114,6 +115,17 @@ internal static class SchedulingChecks
         backend.Release("independent");
         backend.Release("higher");
         await Task.WhenAll(active, independent, higher).WaitAsync(Timeout);
+    }
+
+    private static async Task ColdLoadWithAlternateAsync()
+    {
+        var backend = new Backend { ColdLoad = true };
+        await using var queue = new ServingQueue(backend);
+        var pending = queue.SubmitAsync(await Work("cold after restart", "small", tryOtherHost: true), default);
+        backend.Release("cold after restart");
+        var result = await pending.WaitAsync(Timeout);
+        Check(result.State == AttemptState.Completed && backend.Releases("cold after restart") == 1,
+            "a cold request owns its load through settlement even when the catalog reports the instance early");
     }
 
     private static async Task MemoryWaitAsync()
@@ -274,6 +286,10 @@ internal static class SchedulingChecks
         public ResourceProtection? Resources => null;
         public bool RetryBeforeSubmission { get; init; }
         public bool MemoryWait { get; init; }
+        public bool ColdLoad { get; init; }
+        private volatile bool visible, prepared;
+        private int firstAdmissionAfterLoad;
+        public bool NeedsPreparation(ServingPlacement placement) => ColdLoad && !visible;
         public event Action? Changed { add { } remove { } }
         public event Action? AdmissionChanged;
 
@@ -294,6 +310,13 @@ internal static class SchedulingChecks
 
         public StartExecution TryStart(InferenceRequest request, string id)
         {
+            if (ColdLoad && !prepared)
+                return new(AdmissionStatus.Wait, "The provider is still preparing this model.");
+            if (ColdLoad && Interlocked.Increment(ref firstAdmissionAfterLoad) == 1)
+            {
+                AdmissionChanged?.Invoke();
+                return new(AdmissionStatus.Wait, "Catalog refresh holds the provider lock.", OperationInProgress: true);
+            }
             if (MemoryWait)
                 return new(AdmissionStatus.Wait, "Fixture memory hold.", MemoryWait: true);
             var group = Placement(request.Shape, id).Endpoint.Id;
@@ -323,8 +346,14 @@ internal static class SchedulingChecks
             });
         }
 
-        public Task PreparePlacementAsync(ServingPlacement placement, Func<string, Task> displaced, CancellationToken cancellation) =>
-            throw new InvalidOperationException("The fake provider is already loaded.");
+        public async Task PreparePlacementAsync(ServingPlacement placement, Func<string, Task> displaced, CancellationToken cancellation)
+        {
+            if (!ColdLoad) throw new InvalidOperationException("The fake provider is already loaded.");
+            visible = true;
+            AdmissionChanged?.Invoke();
+            await Task.Delay(100, cancellation);
+            prepared = true;
+        }
 
         public Task Started(string name) => Gate(started, name).Task.WaitAsync(Timeout);
         public bool DidStart(string name) => Gate(started, name).Task.IsCompleted;

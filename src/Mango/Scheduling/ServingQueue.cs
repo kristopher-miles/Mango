@@ -380,6 +380,12 @@ internal sealed class ServingQueue : IAsyncDisposable
                 Finish(entry, Expiration(entry));
                 continue;
             }
+            // The catalog can publish the loaded instance before this entry's provider operation releases its lock.
+            if (entry.LoadingAt is not null)
+            {
+                blocked.Add(entry);
+                continue;
+            }
             if (entry.Rechecking)
             {
                 WaitingReason(entry, "Rechecking whether alternate hosts can take competing work.");
@@ -407,6 +413,7 @@ internal sealed class ServingQueue : IAsyncDisposable
                     }
                 }
                 if (start.Status == AdmissionStatus.Unavailable || work.Ticket.TryOtherHost &&
+                    !(start.OperationInProgress && entry.LoadMilliseconds is not null) &&
                     (start.MemoryWait || !providers.NeedsPreparation(placement) || providers.WouldDisplace(placement)))
                 {
                     Finish(entry, Rejected(start.Reason ?? "The local deployment is unavailable.") with { Deferred = start.Status == AdmissionStatus.Wait });
