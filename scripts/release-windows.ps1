@@ -73,9 +73,11 @@ try {
     if ($BuildOnly) { return }
 
     if (-not $PublisherKey) {
+        $desktopDirectory = [Environment]::GetFolderPath('DesktopDirectory')
         $PublisherKey = @(
             (Join-Path $env:LOCALAPPDATA 'Mango.Release/publisher-key.dpapi')
             (Join-Path $env:LOCALAPPDATA 'Packages/OpenAI.Codex_2p2nqsd0c76g0/LocalCache/Local/Mango.Release/publisher-key.dpapi')
+            if ($desktopDirectory) { Join-Path $desktopDirectory 'Mango-publisher-key.dpapi' }
         ) | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
         if (-not $PublisherKey) { throw 'Pass -PublisherKey with the existing DPAPI-protected Mango publisher key.' }
     }
