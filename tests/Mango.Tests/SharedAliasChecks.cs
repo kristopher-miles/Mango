@@ -110,15 +110,37 @@ internal static partial class PeerChecks
                 "both overlapping streams finish");
         }
 
-        Hold("race small ingress");
-        Hold("race large ingress");
-        var left = Chat("race small ingress");
-        var right = Chat("race large ingress", large);
-        var raced = await Task.WhenAll(Started("race small ingress"), Started("race large ingress"));
-        Check(raced.Distinct().Count() == 2, "two simultaneous ingresses cannot pile onto one conflicted host while another can serve");
-        Release("race small ingress");
-        Release("race large ingress");
-        await Task.WhenAll(left, right);
+        foreach (var secondIngress in new[] { small, large })
+        {
+            var pair = secondIngress == small ? "one ingress" : "two ingresses";
+            var leftPrompt = "compressible left " + pair + new string('a', 220_000);
+            var rightPrompt = "compressible right " + pair + new string('b', 220_000);
+            Hold(leftPrompt);
+            Hold(rightPrompt);
+            var start = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            async Task<HttpResponseMessage> Race(string prompt, Host ingress)
+            {
+                await start.Task;
+                return await OpenStream(prompt, ingress);
+            }
+            var left = Race(leftPrompt, small);
+            var right = Race(rightPrompt, secondIngress);
+            start.SetResult();
+            using var leftResponse = await left;
+            using var rightResponse = await right;
+            using var leftBody = new StreamReader(await leftResponse.Content.ReadAsStreamAsync());
+            using var rightBody = new StreamReader(await rightResponse.Content.ReadAsStreamAsync());
+            try
+            {
+                var outputs = await Task.WhenAll(leftBody.ReadLineAsync(), rightBody.ReadLineAsync());
+                Check(outputs.All(line => line?.Contains("generating") == true) &&
+                    await Started(leftPrompt) != await Started(rightPrompt),
+                    $"simultaneous requests through {pair} generate on different workers before either is released");
+            }
+            finally { Release(leftPrompt); Release(rightPrompt); }
+            Check((await leftBody.ReadToEndAsync()).Contains("[DONE]") && (await rightBody.ReadToEndAsync()).Contains("[DONE]"),
+                "both simultaneously submitted streams complete");
+        }
 
         Hold("draw blocker");
         Hold("queued first");
