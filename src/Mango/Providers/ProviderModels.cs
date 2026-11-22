@@ -126,6 +126,8 @@ internal static class ProviderIdentity
 {
     internal const int InternalInstanceLength = 70;
 
+    public static bool IsInstanceUuid(string value) => Guid.TryParseExact(value, "N", out _) || Guid.TryParseExact(value, "D", out _);
+
     public static bool PublicIdentifier(string? value) => ValidIdentifier(value) &&
         !(value!.Length == InternalInstanceLength && value.StartsWith("mango-", StringComparison.OrdinalIgnoreCase) &&
             value.AsSpan(6).IndexOfAnyExcept("0123456789abcdefABCDEF") < 0);

@@ -24,12 +24,13 @@ internal static partial class PeerChecks
         const string smallId = "fixture-text";
         var legacyInstance = "mango-" + new string('7', 64);
         const string largeId = "fixture-vision";
+        var runtimeId = Guid.NewGuid().ToString("N");
         const string imageId = "fixture-draw";
         using var http = new HttpClient(new HttpClientHandler { UseProxy = false }) { Timeout = TimeSpan.FromSeconds(18) };
         var calls = new ConcurrentDictionary<string, TaskCompletionSource<string>>(StringComparer.Ordinal);
         var holds = new ConcurrentDictionary<string, TaskCompletionSource>(StringComparer.Ordinal);
         await using var smallProvider = await StartAliasProviderAsync(smallId, 200_000, false, imageId, calls, holds, legacyInstance);
-        await using var largeProvider = await StartAliasProviderAsync(largeId, 262_144, true, imageId, calls, holds);
+        await using var largeProvider = await StartAliasProviderAsync(largeId, 262_144, true, imageId, calls, holds, runtimeId);
         await using var small = await Host.StartAsync(Path.Combine(root, "alias-small"), status, Port(address));
         await using var large = await Host.StartAsync(Path.Combine(root, "alias-large"), status, Port(address));
         var created = await Local(http, small, "network/create", new { name = "Alias small", password = Password, benchmarkPolicy = BenchmarkPolicy.Never });
@@ -53,8 +54,8 @@ internal static partial class PeerChecks
         var catalogue = await Request(http, HttpMethod.Get, small.LocalAddress + "/v1/models", small.Session);
         var listed = catalogue.GetProperty("data").EnumerateArray().Single(item => item.GetProperty("id").GetString() == alias);
         Check(listed.GetProperty("context_size").GetInt32() == 262_144, "a shared alias advertises the largest observed context");
-        Check(!catalogue.GetProperty("data").EnumerateArray().Any(item => item.GetProperty("id").GetString() == legacyInstance),
-            "the model list hides Mango-generated instance IDs");
+        Check(!catalogue.GetProperty("data").EnumerateArray().Any(item => new[] { legacyInstance, runtimeId }.Contains(item.GetProperty("id").GetString())),
+            "the model list uses stable names for both legacy Mango and native UUID instances");
         var ordinary = await Chat("ordinary text", large);
         Check(Served(ordinary) == smallId && ordinary.GetProperty("model").GetString() == alias,
             "a forwarded legacy instance returns only the requested public alias");
@@ -133,7 +134,7 @@ internal static partial class PeerChecks
             try
             {
                 var outputs = await Task.WhenAll(leftBody.ReadLineAsync(), rightBody.ReadLineAsync());
-                Check(outputs.All(line => line?.Contains("generating") == true) &&
+                Check(outputs.All(line => line?.Contains("generating") == true && line.Contains($"\"model\":\"{alias}\"")) &&
                     await Started(leftPrompt) != await Started(rightPrompt),
                     $"simultaneous requests through {pair} generate on different workers before either is released");
             }
@@ -239,7 +240,7 @@ internal static partial class PeerChecks
             if (body.RootElement.TryGetProperty("stream", out var stream) && stream.GetBoolean())
             {
                 web.Response.ContentType = "text/event-stream";
-                var chunk = JsonSerializer.Serialize(new { model = native, choices = new[] { new { delta = new { content = "generating" } } } });
+                var chunk = JsonSerializer.Serialize(new { model = instanceId ?? native, choices = new[] { new { delta = new { content = "generating" } } } });
                 await web.Response.WriteAsync($"data: {chunk}\n\n", web.RequestAborted);
                 await web.Response.Body.FlushAsync(web.RequestAborted);
                 await Record(text, native, web.RequestAborted);

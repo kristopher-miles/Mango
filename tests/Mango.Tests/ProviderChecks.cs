@@ -281,6 +281,22 @@ internal static class ProviderChecks
             await output.CompleteAsync(default);
             Check(ReadBody(context) == expected, "legacy IDs stay private across every SSE transport split");
         }
+        var handle = Guid.NewGuid().ToString("N");
+        var original = JsonSerializer.Serialize(new { choices = new[] { new { model = handle, content = handle } }, model = handle });
+        var canonical = JsonSerializer.Serialize(new { choices = new[] { new { model = handle, content = handle } }, model = "public-alias" });
+        var raw = Encoding.UTF8.GetBytes($"data: {original}\n\ndata: [DONE]\n\n");
+        for (var split = 0; split <= raw.Length; split++)
+        {
+            var responseContext = new DefaultHttpContext();
+            responseContext.Response.Body = new MemoryStream();
+            responseContext.Response.ContentType = "text/event-stream";
+            var output = new InferenceOutput(responseContext, InferenceOperation.Chat, "public-alias", handle);
+            await output.WriteAsync(raw.AsMemory(0, split), default);
+            await output.WriteAsync(raw.AsMemory(split), default);
+            await output.CompleteAsync(default);
+            Check(ReadBody(responseContext) == $"data: {canonical}\n\ndata: [DONE]\n\n",
+                "an echoed runtime UUID is replaced only in the top-level model field across every transport split");
+        }
     }
 
     private static async Task CheckLmStudioSharedLoadAsync(ProviderEndpoint endpoint)

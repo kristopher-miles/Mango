@@ -69,7 +69,7 @@ Mango allows up to five minutes for each lifecycle response, then polls inventor
 
 ## Serve inference by instance ID
 
-Mango accepts the provider model identifier or a user-set alias from the client and sends the loaded instance's `id` as the request's `model`. Resolve that exact instance. Return an HTTP error if it is gone, busy, or incompatible. Keep just-in-time loading and automatic eviction disabled on these routes, and stop active inference promptly when its HTTP connection is cancelled. Keep provider-executed tools, web access, and MCP execution disabled for these requests.
+Mango accepts the provider model identifier or a user-set alias from the client and sends the loaded instance's `id` as the request's `model`. Resolve that exact instance. If a provider echoes a UUID for a loaded instance in the response model field, Mango returns the requested alias or native model name to the client. Return an HTTP error if it is gone, busy, or incompatible. Keep just-in-time loading and automatic eviction disabled on these routes, and stop active inference promptly when its HTTP connection is cancelled. Keep provider-executed tools, web access, and MCP execution disabled for these requests.
 
 | Inventory `type` | Inference contract |
 | --- | --- |

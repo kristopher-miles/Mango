@@ -299,7 +299,8 @@ internal sealed class InferenceRequest(InferenceOperation operation, string alia
         target.StatusCode = (int)response.StatusCode;
         target.ContentType = response.Content.Headers.ContentType?.ToString() ?? "application/octet-stream";
         target.Headers.CacheControl = "no-store";
-        var output = new InferenceOutput(context, operation, Alias);
+        var handle = instance.Id != deployment.Model.NativeId && ProviderIdentity.IsInstanceUuid(instance.Id) ? instance.Id : null;
+        var output = new InferenceOutput(context, operation, Alias == handle ? deployment.Model.NativeId : Alias, handle);
         TimeSpan? firstOutput = null;
         var statistics = context.Items.ContainsKey(typeof(LogConfiguration)) ? new OutputMetrics(operation, send,
             response.Content.Headers.ContentType?.MediaType) : null;

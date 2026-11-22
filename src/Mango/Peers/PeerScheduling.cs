@@ -494,8 +494,10 @@ internal sealed partial class PeerNetwork
 
     private static IEnumerable<string> RoutingNames(ObservedDeployment model, HashSet<string> native)
     {
-        foreach (var identifier in model.ProviderIdentifiers ?? [])
-            if (ProviderIdentity.PublicIdentifier(identifier))
+        var identifiers = model.ProviderIdentifiers ?? [];
+        foreach (var identifier in identifiers)
+            if (ProviderIdentity.PublicIdentifier(identifier) && (identifier == identifiers[0] ||
+                identifier == model.EffectiveAlias || !ProviderIdentity.IsInstanceUuid(identifier)))
                 yield return identifier;
         if (model.EffectiveAlias is { } alias && ProviderIdentity.PublicIdentifier(alias) && !native.Contains(alias))
             yield return alias;
