@@ -473,7 +473,11 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
             if (load && (benchmark.HasValue ? HasUnsettledWork(endpoint) : !uncertainModels.IsEmpty))
                 throw new ProviderFailure(409, "Mango has not confirmed that the prior request stopped.");
             if (load)
+            {
+                if (adapter is LlamaAdapter llama)
+                    llama.CheckLaunchFiles();
                 await PrepareResidencyAsync(model, displaced, cancellation, loading, operationKind, allowCapacitySwap: scheduled);
+            }
             if (!load && (model.Busy || model.Model.Instances.Any(instance => instance.Busy)) || load && HasUnsettledWork(endpoint))
                 throw new ProviderFailure(409, "Work on this provider must settle before changing model state.");
             if (load && resources is not null)

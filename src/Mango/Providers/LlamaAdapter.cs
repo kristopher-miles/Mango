@@ -174,8 +174,7 @@ internal sealed class LlamaAdapter(HttpClient http, ProviderEndpoint endpoint) :
         }
         if (OwnedProcessId.HasValue)
             throw new ProviderFailure(409, "Mango's llama-server is already running.");
-        if (!File.Exists(Endpoint.Executable) || !File.Exists(Endpoint.ModelFile))
-            throw new ProviderFailure(409, "The authorized executable or GGUF file is missing.");
+        CheckLaunchFiles();
         if (!await IsLaunchPortFreeAsync(cancellation))
             throw new ProviderFailure(409, "A process already occupies the configured llama-server address.");
 
@@ -209,6 +208,12 @@ internal sealed class LlamaAdapter(HttpClient http, ProviderEndpoint endpoint) :
                 Volatile.Write(ref allocationFailure, 1);
         };
         owned.BeginErrorReadLine();
+    }
+
+    internal void CheckLaunchFiles()
+    {
+        if (CanLaunch && (!File.Exists(Endpoint.Executable) || !File.Exists(Endpoint.ModelFile)))
+            throw new ProviderFailure(409, "The authorized executable or GGUF file is missing.", code: "load_rejected");
     }
 
     internal async Task<bool> IsLaunchPortFreeAsync(CancellationToken cancellation)

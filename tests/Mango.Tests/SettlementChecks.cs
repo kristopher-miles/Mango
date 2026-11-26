@@ -1,8 +1,11 @@
 using System.Net;
+using System.Net.Sockets;
 using System.Text;
+using System.Text.Json;
 using Mango.Host;
 using Mango.Peers;
 using Mango.Providers;
+using Mango.Resources;
 using Mango.Scheduling;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
@@ -13,9 +16,127 @@ internal static class SettlementChecks
 {
     public static async Task RunAsync(string root)
     {
+        await CheckLoadBoundariesAsync(root);
         await CheckAsync(root, unload: false);
         await CheckAsync(root, unload: true);
         Console.WriteLine("Cancellation settlement and distinct foreground admission checks passed.");
+    }
+
+    private static async Task CheckLoadBoundariesAsync(string root)
+    {
+        var directory = Directory.CreateDirectory(Path.Combine(root, "load-boundaries")).FullName;
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        listener.Stop();
+        var gguf = Path.Combine(directory, "removed-fixture.gguf");
+        var executable = Path.Combine(directory, "llama-server.exe");
+        await File.WriteAllTextAsync(gguf, "fixture inventory only");
+        await File.WriteAllTextAsync(executable, "fixture never executed");
+
+        var yoloLoaded = false;
+        var yoloLoads = 0;
+        var yoloUnloads = 0;
+        var removeDuringUnload = false;
+        var submitted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var builder = WebApplication.CreateSlimBuilder();
+        builder.Logging.ClearProviders();
+        builder.WebHost.ConfigureKestrel(server => server.Listen(IPAddress.Loopback, 0));
+        await using var fixture = builder.Build();
+        fixture.MapGet("/api/v1/models", () => new { models = new object[] {
+            new { key = "yolo-fixture", type = "llm", loaded_instances = yoloLoaded
+                ? new[] { new { id = "yolo-fixture", config = new { context_length = 4096 } } } : [] },
+            new { key = "ordinary-fixture", type = "llm", loaded_instances = Array.Empty<object>() }
+        } });
+        fixture.MapPost("/api/v1/models/load", async (HttpContext context) =>
+        {
+            using var body = await JsonDocument.ParseAsync(context.Request.Body, cancellationToken: context.RequestAborted);
+            if (body.RootElement.GetProperty("model").GetString() == "yolo-fixture")
+            {
+                yoloLoaded = true;
+                Interlocked.Increment(ref yoloLoads);
+                return Results.Ok();
+            }
+            submitted.TrySetResult();
+            await Task.Delay(Timeout.Infinite, context.RequestAborted);
+            return Results.Ok();
+        });
+        fixture.MapPost("/api/v1/models/unload", () =>
+        {
+            yoloLoaded = false;
+            Interlocked.Increment(ref yoloUnloads);
+            if (removeDuringUnload)
+                File.Delete(gguf);
+            return Results.Ok();
+        });
+        await fixture.StartAsync();
+
+        const long gib = 1024L * 1024 * 1024;
+        var settings = new SnapshotFile<LocalSettings>(Path.Combine(directory, "local-settings.json"), LocalSettings.Validate);
+        await settings.LoadAsync(new LocalSettings { Role = LocalRole.Contributor, BenchmarkPolicy = BenchmarkPolicy.Never });
+        ResourceObservation Sample() => new(DateTimeOffset.UtcNow, 16 * gib, 12 * gib, 0, 0, [], "fixture", [], true, null);
+        using var resources = new ResourceProtection(directory, settings, (_, _) => Sample(),
+            () => ((ulong)(16 * gib), (ulong)(12 * gib)));
+        await resources.InitializeAsync();
+        await using var providers = new ProviderCatalog(directory, resources);
+        await providers.InitializeAsync();
+        var local = await providers.ConfigureAsync(new(null, ProviderProfile.LlamaSingle, ProviderMode.Managed,
+            $"http://127.0.0.1:{port}", null, false, executable, gguf), default);
+        var managed = await providers.ConfigureAsync(new(null, ProviderProfile.Generic, ProviderMode.Managed,
+            fixture.Urls.Single(), null, false, null, null), default);
+        resources.ApplyObservation(Sample());
+        var removed = providers.View.Models.Single(model => model.EndpointId == local.Id);
+        var yolo = providers.View.Models.Single(model => model.Model.NativeId == "yolo-fixture");
+        var ordinary = providers.View.Models.Single(model => model.Model.NativeId == "ordinary-fixture");
+        Check(removed.Model.Installed && local.CanLoad, "startup inventory can race a removed GGUF");
+        await providers.SetYoloAsync(yolo.Id, new(true, yolo.Options.Revision), default);
+        await providers.ManageAsync(yolo.Id, true, default);
+
+        async Task RejectMissingFilesAsync()
+        {
+            try
+            {
+                await providers.ManageAsync(removed.Id, true, default, benchmark: InferenceOperation.Chat);
+                throw new InvalidOperationException("Missing GGUF unexpectedly launched.");
+            }
+            catch (ProviderFailure error) when (error.Status == 409 && error.Code == "load_rejected") { }
+            Check(!providers.HasUnsettled(removed.Id) && !resources.HasWork(local.Id),
+                "a definite prelaunch rejection leaves no unsettled load or reservation");
+        }
+
+        File.Delete(gguf);
+        await RejectMissingFilesAsync();
+        Check(Volatile.Read(ref yoloUnloads) == 0 && providers.View.Models.Single(model => model.Id == yolo.Id).Instance is not null,
+            "known missing files reject before evicting the healthy group");
+
+        await File.WriteAllTextAsync(gguf, "fixture inventory only");
+        removeDuringUnload = true;
+        await RejectMissingFilesAsync();
+        removeDuringUnload = false;
+        Check(Volatile.Read(ref yoloUnloads) == 1, "final prelaunch check covers a file disappearing during group release");
+        await providers.ManageAsync(yolo.Id, true, default);
+        Check(Volatile.Read(ref yoloLoads) == 2, "the other group can reload after a definite rejection");
+        await providers.ManageAsync(yolo.Id, false, default);
+
+        using var cancel = new CancellationTokenSource();
+        var load = providers.ManageAsync(ordinary.Id, true, cancel.Token);
+        try { await submitted.Task.WaitAsync(TimeSpan.FromSeconds(10)); }
+        finally { await cancel.CancelAsync(); }
+        try
+        {
+            await load;
+            throw new InvalidOperationException("The submitted load unexpectedly settled.");
+        }
+        catch (OperationCanceledException) when (cancel.IsCancellationRequested) { }
+        Check(providers.HasUnsettledLoad(ordinary.Id) && resources.HasWork(managed.Id),
+            "an ambiguous submitted load retains its settlement fence");
+        try
+        {
+            await providers.ManageAsync(yolo.Id, true, default);
+            throw new InvalidOperationException("YOLO load bypassed an ambiguous opposite-group load.");
+        }
+        catch (ProviderFailure error) when (error.Status == 409 && error.Code is null) { }
+        Check(Volatile.Read(ref yoloLoads) == 2, "an ambiguous submission still fences the other group");
     }
 
     private static async Task CheckAsync(string root, bool unload)
