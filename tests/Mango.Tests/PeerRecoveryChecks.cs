@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Net.Sockets;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using Mango.Host;
 using Mango.Peers;
@@ -16,7 +17,58 @@ internal static partial class PeerChecks
     {
         await TestListenerRecoveryAsync(Path.Combine(root, "late-tailnet"));
         await TestPeerAddressRecoveryAsync(Path.Combine(root, "changed-tailnet"));
+        await TestRetiredServingEpochAsync(Path.Combine(root, "retired-serving-epoch"));
         Console.WriteLine("Offline peer address recovery checks passed.");
+    }
+
+    private static async Task TestRetiredServingEpochAsync(string directory)
+    {
+        Directory.CreateDirectory(directory);
+        var settings = new SnapshotFile<LocalSettings>(Path.Combine(directory, "local-settings.json"), LocalSettings.Validate);
+        await settings.LoadAsync(new LocalSettings());
+        await using var providers = new ProviderCatalog(directory);
+        await providers.InitializeAsync();
+        await using var network = new PeerNetwork(directory, 0, providers, settings, _ => Task.FromResult(TailnetStatus.Waiting));
+        await network.InitializeAsync();
+        var builder = WebApplication.CreateSlimBuilder(new WebApplicationOptions { Args = [] });
+        builder.WebHost.UseUrls("http://127.0.0.1:0");
+        await using var fixture = builder.Build();
+        // Exercise the attempt routes after the transport and peer authentication boundary.
+        network.MapAttemptRoutes(fixture.MapGroup("/peer"));
+        await fixture.StartAsync();
+        using var lifetime = new CancellationTokenSource();
+        var worker = network.RunAsync(lifetime.Token);
+        try
+        {
+            await Eventually(() => network.Ready, "new Mango process has completed startup");
+            using var client = new HttpClient(new HttpClientHandler { UseProxy = false }) { BaseAddress = new(fixture.Urls.Single()) };
+            var retiredEpoch = Guid.NewGuid().ToString("N");
+            var attempt = Guid.NewGuid();
+            using var control = await client.PostAsJsonAsync("/peer/inference/control",
+                new AttemptControl(attempt, 1000, retiredEpoch), lifetime.Token);
+            var result = await control.Content.ReadFromJsonAsync<AttemptReply>(Json, lifetime.Token);
+            Check(result is { State: AttemptState.Uncertain, Retryable: false },
+                "a restarted serving process does not authorize retry of an ambiguous old attempt");
+
+            using var replay = new HttpRequestMessage(HttpMethod.Post, "/peer/inference/Chat")
+            {
+                Content = new StringContent("not an inference body")
+            };
+            replay.Headers.Add("Mango-Attempt", Convert.ToBase64String(JsonSerializer.SerializeToUtf8Bytes(new
+            {
+                request = Guid.NewGuid(), attempt, key = Guid.NewGuid(), deployment = "fixture",
+                ageMilliseconds = 0, remainingMilliseconds = 1000, servingEpoch = retiredEpoch
+            }, Json)));
+            using var response = await client.SendAsync(replay, lifetime.Token);
+            var refused = await response.Content.ReadFromJsonAsync<AttemptReply>(Json, lifetime.Token);
+            Check(refused is { State: AttemptState.Rejected, Status: 503, Reason: "The serving Mango process changed before submission." },
+                "an old-epoch submission is refused before its body reaches the provider");
+        }
+        finally
+        {
+            await lifetime.CancelAsync();
+            await worker;
+        }
     }
 
     private static async Task TestListenerRecoveryAsync(string directory)

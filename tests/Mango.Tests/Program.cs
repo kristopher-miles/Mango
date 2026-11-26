@@ -63,8 +63,10 @@ try
     if (args is ["--shared-alias-checks"]) { await PeerChecks.RunSharedAliasAsync(directory); return; }
     if (args is ["--peer-recovery-checks"]) { await PeerChecks.RunRecoveryAsync(directory); return; }
     if (args is ["--provider-recovery-checks"]) { await ProviderRecoveryChecks.RunAsync(directory); return; }
+    if (args is ["--startup-recovery-checks"]) { await StartupRecoveryChecks.RunAsync(directory); return; }
     await PeerChecks.RunRecoveryAsync(directory);
     await ProviderRecoveryChecks.RunAsync(directory);
+    await StartupRecoveryChecks.RunAsync(directory);
     await SettlementChecks.RunAsync(directory);
     TestDefaults();
     await WebUiChecks.RunAsync(directory);

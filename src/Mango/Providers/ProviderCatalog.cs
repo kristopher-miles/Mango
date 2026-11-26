@@ -33,11 +33,11 @@ internal sealed record ExecutionResult(bool Settled, ProviderFailure? Failure, P
 internal sealed record StartExecution(AdmissionStatus Status, string? Reason,
     Func<HttpContext, CancellationToken, Task<ExecutionResult>>? Execute = null, string? Epoch = null, bool MemoryWait = false, bool OperationInProgress = false);
 
-internal sealed class ProviderCatalog(string directory, ResourceProtection? resources = null, TimeProvider? time = null)
+internal sealed partial class ProviderCatalog(string directory, ResourceProtection? resources = null, TimeProvider? time = null)
     : IAsyncDisposable, IServingBackend
 {
     private sealed record Observation(ProviderInventory Inventory, string? Error, DateTimeOffset ObservedAt,
-        bool AllocationFailed = false, bool CredentialNeeded = false);
+        bool AllocationFailed = false, bool CredentialNeeded = false, bool ConnectionRefused = false);
 
     private readonly SnapshotFile<ProviderSettings> store = new(Path.Combine(directory, "providers.json"), Validate);
     private readonly HttpClient http = new(new SocketsHttpHandler
@@ -139,13 +139,14 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
         Publish();
     }
 
-    public async Task RunAsync(CancellationToken stopping)
+    public async Task RunAsync(CancellationToken stopping, bool refreshInventory = true)
     {
         using var reachabilityLifetime = CancellationTokenSource.CreateLinkedTokenSource(stopping);
         var reachability = RunReachabilityAsync(reachabilityLifetime.Token);
         try
         {
-            await RefreshAsync(null, stopping);
+            if (refreshInventory)
+                await RefreshAsync(null, stopping);
             var idleCheckInterval = TimeSpan.FromSeconds(10);
             var lastIdleCheck = Stopwatch.GetTimestamp();
             while (!stopping.IsCancellationRequested)
@@ -476,8 +477,11 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
             {
                 if (adapter is LlamaAdapter llama)
                     llama.CheckLaunchFiles();
+                CheckStartupWork(model, View, load: true);
                 await PrepareResidencyAsync(model, displaced, cancellation, loading, operationKind, allowCapacitySwap: scheduled);
             }
+            else if (!switching)
+                CheckStartupWork(model, View, load: false);
             if (!load && (model.Busy || model.Model.Instances.Any(instance => instance.Busy)) || load && HasUnsettledWork(endpoint))
                 throw new ProviderFailure(409, "Work on this provider must settle before changing model state.");
             if (load && resources is not null)
@@ -632,6 +636,7 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
     }
 
     private const string AttachedStrataBlocker = "Unload the attached provider's model or let Mango manage that provider before starting Strata.";
+    internal const string ReleaseDeadline = "Mango could not settle and release every managed provider before the cancellation deadline.";
 
     private static bool DifferentLocalMode(Deployment first, Deployment second) =>
         first.Yolo != second.Yolo && first.Model.Origin != ModelOrigin.LmLink && second.Model.Origin != ModelOrigin.LmLink;
@@ -640,7 +645,10 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
         snapshot.Models.Any(model => model.Instance is not null && DifferentLocalMode(model, target));
 
     private bool OtherModeHasWork(CatalogView snapshot, Deployment target) =>
-        snapshot.Models.Any(model => DifferentLocalMode(model, target) && (model.Busy || HasUnsettled(model.Id)));
+        snapshot.Models.Any(model => DifferentLocalMode(model, target) &&
+            (activeModels.ContainsKey(model.Id) || HasUnsettled(model.Id) || model.Model.Instances.Any(instance => instance.Busy) ||
+                startupWork.GetValueOrDefault(model.EndpointId)?.ReachableOrObserved == true &&
+                StartupBlocker(model, snapshot, load: false) is not null));
 
     internal const string ModeSwitchWait = "Waiting for the other resource mode to release its resident models.";
 
@@ -690,7 +698,7 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
                     throw new ProviderFailure(503, $"Mango cannot swap {resident.Model.DisplayName} because its provider cannot unload and reload it.",
                         code: "mode_switch_lifecycle");
                 if (resident.Busy || resident.Model.Instances.Any(instance => instance.Busy) ||
-                    HasUnsettledWork(owner) ||
+                    HasUnsettledWork(owner) || startupWork.ContainsKey(owner.Id) ||
                     await adapters[owner.Id].CheckIdleAsync(resident.Model, cancellation) == false)
                     throw new ProviderFailure(503, ModeSwitchWait, capacityWait: true);
             }
@@ -897,6 +905,11 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
                 return new(AdmissionStatus.Unavailable, "The local deployment cannot serve this request.");
             var model = placement.Model;
             var snapshot = View;
+            if (StartupBlocker(model, snapshot, load: false) is { } startup)
+            {
+                SignalRefresh(startup);
+                return new(AdmissionStatus.Wait, StartupWorkWait);
+            }
             var otherModeBusy = OtherModeHasWork(snapshot, model);
             if (model.Instance?.Busy == true || otherModeBusy) SignalRefresh(model.EndpointId);
             if (NeedsModeSwitch(snapshot, model) || otherModeBusy)
@@ -1053,6 +1066,7 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
 
     private bool WorkInProgress(Guid endpoint, bool includeUncertain = true) =>
         activeModels.Values.Any(item => item.Endpoint == endpoint) ||
+        includeUncertain && startupWork.ContainsKey(endpoint) ||
         (includeUncertain ? resources?.HasWork(endpoint) : resources?.HasRunning(endpoint)) == true;
 
     private void MarkActive(Deployment model, bool active)
@@ -1093,6 +1107,8 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
                     var owned = ownedPid.HasValue && (includeYolo || !View.Models.Any(model => model.EndpointId == endpoint.Id && model.Yolo));
                     if (!owned)
                         await RefreshOneAsync(endpoint.Id, deadline.Token);
+                    if (!owned && startupWork.ContainsKey(endpoint.Id))
+                        return new(released.ToArray(), StartupWorkWait, AwaitingStop: true);
                     while (!owned && uncertainModels.Any(item => item.Value == endpoint.Id && (includeYolo || !IsYolo(item.Key)) &&
                         uncertainLoads.ContainsKey(item.Key) &&
                         !View.Models.Any(model => model.Id == item.Key && model.Instance is not null)))
@@ -1147,13 +1163,15 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
                     await RefreshOneAsync(endpoint, deadline.Token);
                 if (uncertainModels.Where(item => includeYolo || !IsYolo(item.Key)).Select(item => item.Value).Except(released.Select(item => item.Id)).Any())
                     return new(released.ToArray(), "An attached provider has not confirmed that its request stopped.", AwaitingStop: true);
+                if (!startupWork.IsEmpty)
+                    return new(released.ToArray(), StartupWorkWait, AwaitingStop: true);
                 return new(released.ToArray());
             }
             finally { ReleaseOperation(); }
         }
         catch (Exception error) when (error is ProviderFailure or IOException or OperationCanceledException or System.ComponentModel.Win32Exception)
         {
-            return new(released.ToArray(), "Mango could not settle and release every managed provider before the cancellation deadline.");
+            return new(released.ToArray(), ReleaseDeadline);
         }
     }
 
@@ -1261,7 +1279,7 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
         }
     }
 
-    private async Task RefreshOneAsync(Guid id, CancellationToken cancellation, bool settleOwnedExit = true)
+    private async Task RefreshOneAsync(Guid id, CancellationToken cancellation, bool settleOwnedExit = true, bool startupScan = false)
     {
         try
         {
@@ -1269,6 +1287,8 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
             var result = await adapter.InspectAsync(cancellation);
             reachabilityRetries.TryRemove(id, out _);
             observations[id] = new(result, null, DateTimeOffset.UtcNow);
+            if (startupScan || startupWork.ContainsKey(id))
+                await CheckStartupInventoryAsync(id, adapter, result, startupScan, cancellation);
             if (adapter is StrataAdapter { Reserved: false })
                 SettleReleased(id);
             if (adapter is LlamaAdapter { HasInventoryEvents: true } llama && !watchers.ContainsKey(id))
@@ -1301,7 +1321,8 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
                     adapter.OwnedProcessId.HasValue, adapter.OwnedProcessId)
                 : previous ?? new ProviderInventory(null, [], false, false, false);
             observations[id] = new(fallback, error.Message, DateTimeOffset.UtcNow, error.AllocationFailure,
-                error.Status is 401 or 403);
+                error.Status is 401 or 403, error.ConnectionRefused);
+            CheckFailedStartupInventory(id, adapter, error);
             if (adapter is not StrataAdapter && settleOwnedExit && fallback.CanLoad && !adapter.OwnedProcessId.HasValue && previous?.CanStop == true &&
                 (resources?.Observation?.Workers.GetValueOrDefault(id)?.Processes.All(pid => !WindowsObservation.ProcessExists(pid)) ?? true))
                 foreach (var key in uncertainModels.Where(pair => pair.Value == id).Select(pair => pair.Key).ToArray())
@@ -1360,7 +1381,11 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
                     configuration, epoch));
             }
         }
-        Volatile.Write(ref view, new(endpoints.ToArray(), models.ToArray(), value.Selected, store.RecoveryWarning));
+        var next = new CatalogView(endpoints.ToArray(), models.ToArray(), value.Selected, store.RecoveryWarning);
+        if (!startupWork.IsEmpty)
+            next = next with { Models = next.Models.Select(model => !model.Busy && StartupBlocker(model, next, load: false) is not null
+                ? model with { Busy = true, PlacementEpoch = null } : model).ToArray() };
+        Volatile.Write(ref view, next);
         Changed?.Invoke();
     }
 

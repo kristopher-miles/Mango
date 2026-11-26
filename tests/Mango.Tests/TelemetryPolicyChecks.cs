@@ -44,7 +44,9 @@ internal static class TelemetryPolicyChecks
             () => throw new Win32Exception(), clock))
         {
             await held.InitializeAsync();
-            await held.SampleAndApplyAsync(() => providers.View, default);
+            await using var heldProviders = new ProviderCatalog(heldDirectory, held);
+            await heldProviders.InitializeAsync();
+            await held.InspectStartupAsync(heldProviders, default);
             if (held.Status.State != ContributionState.Fault || held.ServingAllowed)
                 failures.Add("Unavailable observation cleared a persisted hard hold.");
         }

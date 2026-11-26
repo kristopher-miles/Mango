@@ -127,9 +127,8 @@ internal static class Program
         var web = new LocalWeb();
         try
         {
-            resources?.InitializeAsync().GetAwaiter().GetResult();
+            resources?.InitializeAsync(requireStartupInspection: true).GetAwaiter().GetResult();
             providers.InitializeAsync().GetAwaiter().GetResult();
-            resources?.RestoreUnsettled(providers);
             peers.InitializeAsync().GetAwaiter().GetResult();
             if (options.Join is { } join)
             {
@@ -174,9 +173,8 @@ internal static class Program
         SnapshotFile<LocalSettings> settings, LocalWeb web, ProviderCatalog providers, PeerNetwork peers, ManagedUpdates updates,
         int? unavailableLoopbackPort)
     {
-        var inventory = providers.Resources is null ? Task.CompletedTask : providers.RunAsync(app.Lifetime.ApplicationStopping);
+        var localCapacity = RunLocalCapacityAsync(providers, app.Lifetime.ApplicationStopping);
         var network = peers.RunAsync(app.Lifetime.ApplicationStopping, refreshTransport: false);
-        var protection = providers.Resources?.RunAsync(providers, app.Lifetime.ApplicationStopping) ?? Task.CompletedTask;
         var updateChecks = updates.RunAsync(app.Lifetime);
         try
         {
@@ -226,8 +224,17 @@ internal static class Program
         finally
         {
             app.Lifetime.StopApplication();
-            Task.WhenAll(inventory, network, protection, updateChecks).GetAwaiter().GetResult();
+            Task.WhenAll(localCapacity, network, updateChecks).GetAwaiter().GetResult();
         }
+    }
+
+    private static async Task RunLocalCapacityAsync(ProviderCatalog providers, CancellationToken stopping)
+    {
+        if (providers.Resources is not { } protection)
+            return;
+        try { await protection.InspectStartupAsync(providers, stopping); }
+        catch (OperationCanceledException) when (stopping.IsCancellationRequested) { return; }
+        await Task.WhenAll(providers.RunAsync(stopping, refreshInventory: false), protection.RunAsync(providers, stopping));
     }
 
     internal static string? ReadSecret(string label)

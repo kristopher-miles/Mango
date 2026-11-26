@@ -306,16 +306,16 @@ internal static class ResourceChecks
         await resumed.InitializeAsync();
         await using var resumedProviders = new ProviderCatalog(directory, resumed);
         await resumedProviders.InitializeAsync();
-        resumed.RestoreUnsettled(resumedProviders);
-        resumed.ApplyObservation(Sample(clock.GetUtcNow()));
-        await resumed.AdvanceWithdrawalAsync(resumedProviders, default);
-        await FinishWithdrawalAsync(ContributionState.Fault);
-        Check(!resumed.ServingAllowed, "shutdown keeps attached work unavailable while cancellation is unconfirmed");
+        await resumed.InspectStartupAsync(resumedProviders, default);
+        Check(resumed.ServingAllowed && !resumed.HasWork(endpoint.Id) &&
+            resumedProviders.View.Models.Single(item => item.Id == model.Id).Busy,
+            "startup leaves fresh busy attached work fenced without restoring its reservation");
         providerIdle = true;
-        clock.Advance(1);
-        resumed.ApplyObservation(Sample(clock.GetUtcNow()));
+        await resumedProviders.RefreshAsync(endpoint.Id, default);
         await resumed.AdvanceWithdrawalAsync(resumedProviders, default);
-        await FinishWithdrawalAsync(ContributionState.Contributor);
+        Check(resumed.ServingAllowed && resumedProviders.StartupEvidence.Length == 0 &&
+            resumedProviders.View.Models.Single(item => item.Id == model.Id) is { Busy: false, Instance: not null },
+            "confirmed idle work releases the fence and retains its resident");
         Console.WriteLine("Resource admission and benchmark checks passed.");
 
         async Task CheckPoolsAsync()
@@ -376,16 +376,6 @@ internal static class ResourceChecks
             }
         }
 
-        async Task FinishWithdrawalAsync(ContributionState expected)
-        {
-            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-            while (resumed.Status.State == ContributionState.Withdrawing)
-            {
-                await resumed.AdvanceWithdrawalAsync(resumedProviders, deadline.Token);
-                await Task.Delay(25, deadline.Token);
-            }
-            Check(resumed.Status.State == expected, $"withdrawal should reach {expected}");
-        }
     }
 
     private static async Task CheckLoadedLmStudioBenchmarkAsync(string root)

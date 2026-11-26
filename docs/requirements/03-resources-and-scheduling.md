@@ -36,7 +36,7 @@ The hosting program decides whether it can serve a valid request. Mango coordina
 
 **MEMORY-04 — C, Q14 as amended.** Apply owner-configured memory margins only to checked co-residency. Default host RAM margin is 15 percent clamped from 2 GiB to 5 GiB. Default VRAM margin is 1 GiB per discrete GPU. The owner may set either as low as zero after the one-time local acknowledgement. Count unified memory as a single pool.
 
-**MEMORY-05 — I.** Use provider slot and lifecycle facts for execution scheduling. Track ownership until request completion or cancellation is settled. CPU/GPU utilization informs user-activity detection. It does not take part in a model-fit calculation.
+**MEMORY-05 — I.** Use provider slot and lifecycle facts for execution scheduling. Track ownership until request completion or cancellation is settled. Reservations expire with the Mango process. On startup, observe actual provider residency and work before admitting conflicting requests. Treat saved pending entries as evidence to recheck, retain verified idle residents, and acquire reservations only for new admissions. CPU/GPU utilization informs user-activity detection. It does not take part in a model-fit calculation.
 
 **MEMORY-06 — C, owner 2026-11-21.** Use comparable native requirements or automatic benchmark measurements for checked co-residency. Explicit owner RAM/VRAM overrides take precedence. Surface native allocation failures and refresh affected evidence. An allocation failure does not withdraw the node or blacklist ordinary serving.
 

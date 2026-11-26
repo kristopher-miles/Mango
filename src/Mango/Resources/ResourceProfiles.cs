@@ -45,7 +45,7 @@ internal sealed partial class ResourceProtection
         get
         {
             lock (sync)
-                return status.State == ContributionState.Contributor && settings.Value.Role == LocalRole.Contributor &&
+                return !startupInspectionPending && status.State == ContributionState.Contributor && settings.Value.Role == LocalRole.Contributor &&
                     Volatile.Read(ref stopping) == 0;
         }
     }

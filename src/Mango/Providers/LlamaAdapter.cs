@@ -216,6 +216,30 @@ internal sealed class LlamaAdapter(HttpClient http, ProviderEndpoint endpoint) :
             throw new ProviderFailure(409, "The authorized executable or GGUF file is missing.", code: "load_rejected");
     }
 
+    internal bool HasPossibleLocalRuntime()
+    {
+        if (!CanLaunch)
+            return false;
+        var found = false;
+        Process[] processes;
+        try { processes = Process.GetProcessesByName(Path.GetFileNameWithoutExtension(Endpoint.Executable)!); }
+        catch (System.ComponentModel.Win32Exception) { return true; }
+        foreach (var process in processes)
+        {
+            using (process)
+            {
+                try
+                {
+                    found |= !process.HasExited && (process.MainModule?.FileName is not { } file ||
+                        string.Equals(file, Endpoint.Executable, StringComparison.OrdinalIgnoreCase));
+                }
+                catch (InvalidOperationException) { }
+                catch (System.ComponentModel.Win32Exception) { found = true; }
+            }
+        }
+        return found;
+    }
+
     internal async Task<bool> IsLaunchPortFreeAsync(CancellationToken cancellation)
     {
         if (!CanLaunch || OwnedProcessId.HasValue)

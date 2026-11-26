@@ -12,6 +12,8 @@ internal sealed partial class ResourceProtection : IDisposable
     private const string DedicatedMemoryPressure = "Dedicated memory pressure on ";
     private const string HostMemoryPressure = "Host RAM is below the reserve or above its pressure cutoff.";
     private const string CommitPressure = "Windows commit headroom is too low to keep the Strata runtime loaded.";
+    private const string ShutdownSettlement = "A provider was still settling during shutdown.";
+    private const string LegacySettlement = "Verifying unfinished provider work.";
     private readonly object sync = new();
     private readonly SnapshotFile<LocalSettings> settings;
     private readonly SnapshotFile<ResourceData> store;
@@ -27,6 +29,7 @@ internal sealed partial class ResourceProtection : IDisposable
     private long sampleNumber;
     private int settlementSample;
     private bool telemetryWarning;
+    private bool startupInspectionPending;
     private ResourceObservation? hardwareObservation;
     private ResourceObservation? CurrentObservation => observed is { } value &&
         clock.GetUtcNow() - value.At <= TimeSpan.FromSeconds(settings.Value.SampleSeconds + 5) ? value : null;
@@ -65,9 +68,10 @@ internal sealed partial class ResourceProtection : IDisposable
     public ResourceObservation? Observation { get { lock (sync) return observed; } }
     public ResourceEvent? LastEvent { get { lock (sync) return lastEvent; } }
 
-    public async Task InitializeAsync()
+    public async Task InitializeAsync(bool requireStartupInspection = false)
     {
         await store.LoadAsync(ResourceData.Empty);
+        startupInspectionPending = requireStartupInspection;
         lastClient = clock.GetUtcNow();
         unsafePlacements.UnionWith(store.Value.Unsafe);
         policy = settings.Value.BenchmarkPolicy;
@@ -76,7 +80,7 @@ internal sealed partial class ResourceProtection : IDisposable
             hold.Reason.StartsWith(DedicatedMemoryPressure, StringComparison.Ordinal)))
         {
             hold = hold.Pending is { Length: > 0 }
-                ? hold with { State = ContributionState.Withdrawing, Reason = "Verifying unfinished provider work." }
+                ? hold with { State = ContributionState.Withdrawing, Reason = LegacySettlement }
                 : null;
             await store.UpdateAsync(data => data with { Hold = hold });
         }
@@ -85,17 +89,43 @@ internal sealed partial class ResourceProtection : IDisposable
             status = new(hold.State, hold.Reason, null);
         else if (settings.Value.Role == LocalRole.Contributor)
             status = new(ContributionState.Contributor, null, null);
-        if (hold?.State == ContributionState.Withdrawing ||
+        if (hold?.State == ContributionState.Withdrawing && !IsStartupHistory(hold) ||
             hold?.State != ContributionState.Fault && settings.Value.Role == LocalRole.Leech)
             BeginWithdrawal(hold?.Reason ?? "Local leech mode is enabled.");
         settings.Changed += SettingsChanged;
     }
 
-    public void RestoreUnsettled(ProviderCatalog providers)
+    private static bool IsStartupHistory(ResourceHold? hold) =>
+        hold is { State: ContributionState.Withdrawing, Cause: WithdrawalCause.Safety,
+            Reason: ShutdownSettlement or LegacySettlement };
+
+    internal async Task InspectStartupAsync(ProviderCatalog providers, CancellationToken cancellation)
     {
-        foreach (var pending in store.Value.Hold?.Pending ?? [])
-            if (pending.OwnedProcesses.Length == 0 || pending.OwnedProcesses.Any(WindowsObservation.ProcessExists))
-                providers.RestoreUnsettled(pending.Endpoint, pending.Deployment, pending.Loading);
+        var hold = store.Value.Hold;
+        var missingLoads = await providers.InspectStartupAsync(hold?.Pending ?? [], cancellation);
+        await SampleAndApplyAsync(() => providers.ResourceView, cancellation);
+        bool replaceHistoricalHold;
+        lock (sync)
+        {
+            replaceHistoricalHold = !withdraw && settings.Value.Role == LocalRole.Contributor && (IsStartupHistory(hold) ||
+                missingLoads && providers.StartupEvidence.Length == 0 &&
+                hold is { State: ContributionState.Fault, Cause: WithdrawalCause.Safety, Reason: ProviderCatalog.ReleaseDeadline });
+            if (replaceHistoricalHold)
+                SetStatus(new(ContributionState.Contributor, null, null));
+        }
+        if (replaceHistoricalHold)
+            await SaveHoldAsync(StartupHistory(providers));
+        lock (sync)
+            startupInspectionPending = false;
+        Changed?.Invoke();
+    }
+
+    private static ResourceHold? StartupHistory(ProviderCatalog providers)
+    {
+        var evidence = providers.StartupEvidence;
+        return evidence.Length == 0 ? null :
+            new(ContributionState.Withdrawing, ShutdownSettlement, evidence.OrderBy(item => item.Deployment, StringComparer.Ordinal)
+                .ThenBy(item => item.Endpoint).Take(ProviderLimits.MaxModels).ToArray());
     }
 
     private void SettingsChanged()
@@ -173,6 +203,7 @@ internal sealed partial class ResourceProtection : IDisposable
             if (!model.Online) return State("offline", "The provider is unreachable. Check its address, credential, and process.", "provider");
             if (!model.Model.Installed) return State("installation", "Install this model in its provider, then refresh the inventory.", "provider");
             if (settings.Value.Role != LocalRole.Contributor) return State("contribution", "Turn on contribution for this computer to serve network requests.", "contribution");
+            if (startupInspectionPending) return State("protection", "Checking which provider work survived startup.");
             if (modeSwitch && available)
                 return State("modeSwitch", ProviderCatalog.ModeSwitchWait, "provider");
             if (exclusiveBlocker is not null) return State("busy", exclusiveBlocker, "provider");
@@ -383,6 +414,7 @@ internal sealed partial class ResourceProtection : IDisposable
                 {
                     Interlocked.Exchange(ref settlementSample, 0);
                     await SampleAndApplyAsync(() => providers.ResourceView, cancellation);
+                    providers.RefreshObservedStartupWork();
                     sampled = now;
                     nextSample = sampled + interval;
                 }
@@ -413,9 +445,16 @@ internal sealed partial class ResourceProtection : IDisposable
             }
             catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { }
             var pending = Pending(providers);
-            if (withdraw || pending.Length != 0)
+            if (withdraw)
                 await SaveHoldAsync(new(ContributionState.Withdrawing,
-                    withdrawalReason ?? "A provider was still settling during shutdown.", pending, withdrawalCause));
+                    withdrawalReason ?? ShutdownSettlement, pending, withdrawalCause));
+            else if (pending.Length != 0)
+            {
+                var current = Status;
+                await SaveHoldAsync(current.State is ContributionState.Fault or ContributionState.Cooldown
+                    ? new(current.State, current.Reason!, pending, withdrawalCause)
+                    : new(ContributionState.Withdrawing, ShutdownSettlement, pending));
+            }
         }
     }
 
@@ -587,10 +626,12 @@ internal sealed partial class ResourceProtection : IDisposable
         var current = Status;
         var prior = store.Value.Hold;
         var hold = current.State is ContributionState.Cooldown or ContributionState.Fault
-            ? new ResourceHold(current.State, current.Reason!, current.State == ContributionState.Fault ? Pending(providers) : null, withdrawalCause) : null;
+            ? new ResourceHold(current.State, current.Reason!, current.State == ContributionState.Fault ? Pending(providers) :
+                StartupHistory(providers)?.Pending, withdrawalCause)
+            : StartupHistory(providers);
         if (!withdraw && (prior?.State != hold?.State || prior?.Reason != hold?.Reason || prior?.Cause != hold?.Cause ||
-                !(prior?.Pending ?? []).Select(item => (item.Deployment, item.Loading))
-                    .SequenceEqual((hold?.Pending ?? []).Select(item => (item.Deployment, item.Loading)))))
+                !(prior?.Pending ?? []).Select(item => (item.Deployment, item.Loading, Pids: string.Join(",", item.OwnedProcesses)))
+                    .SequenceEqual((hold?.Pending ?? []).Select(item => (item.Deployment, item.Loading, Pids: string.Join(",", item.OwnedProcesses))))))
             await SaveHoldAsync(hold);
     }
 
@@ -609,17 +650,20 @@ internal sealed partial class ResourceProtection : IDisposable
         lock (sync)
         {
             var endpoints = providers.View.Endpoints;
+            var startup = providers.StartupEvidence.ToDictionary(item => (item.Endpoint, item.Deployment));
             var pending = reservations.Where(item => !item.Settled).Select(item => (item.Endpoint, item.Deployment))
-                .Concat(providers.Unsettled).Distinct().OrderBy(item => item.Deployment, StringComparer.Ordinal);
+                .Concat(providers.Unsettled).Concat(startup.Values.Select(item => (item.Endpoint, item.Deployment)))
+                .Distinct().OrderBy(item => item.Deployment, StringComparer.Ordinal).Take(ProviderLimits.MaxModels);
             return pending.Select(item =>
             {
                 var root = endpoints.FirstOrDefault(endpoint => endpoint.Id == item.Endpoint)?.OwnedProcessId;
-                var prior = store.Value.Hold?.Pending?.FirstOrDefault(value => value.Deployment == item.Deployment);
+                var prior = startup.GetValueOrDefault(item) ??
+                    store.Value.Hold?.Pending?.FirstOrDefault(value => value.Deployment == item.Deployment);
                 var tree = root is { } pid
                     ? (observed?.Workers.GetValueOrDefault(item.Endpoint)?.Processes ?? []).Append(pid).Distinct().Take(256).ToArray()
                     : prior?.OwnedProcesses ?? [];
                 return new PendingRelease(item.Endpoint, item.Deployment, tree,
-                    providers.HasUnsettledLoad(item.Deployment) || reservations.Any(reservation =>
+                    providers.HasUnsettledLoad(item.Deployment) || startup.GetValueOrDefault(item)?.Loading == true || reservations.Any(reservation =>
                         reservation.Deployment == item.Deployment && reservation.Work == ResourceWork.Load && !reservation.Settled));
             }).ToArray();
         }
