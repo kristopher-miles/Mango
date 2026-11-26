@@ -283,12 +283,19 @@ internal sealed partial class PeerNetwork
     private async Task ReconcileAsync(CancellationToken cancellation, bool gate)
     {
         await reconciliation.WaitAsync(cancellation);
-        if (gate)
-            ready = false;
+        long revision = -1;
         var synchronized = 0;
         var incomplete = 0;
         try
         {
+            await transport.WaitAsync(cancellation);
+            try
+            {
+                revision = transportRevision;
+                if (gate)
+                    ready = false;
+            }
+            finally { transport.Release(); }
             using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellation, stopping.Token);
             var current = Snapshot;
             var others = current.Others.ToArray();
@@ -318,7 +325,6 @@ internal sealed partial class PeerNetwork
                             CancellationToken = deadline.Token
                         }, async (peer, token) => await ContactAsync(peer, token));
                     }
-                    await UpdateAddressAsync(deadline.Token);
                 }
                 catch (OperationCanceledException) when (!cancellation.IsCancellationRequested) { }
             }
@@ -331,7 +337,16 @@ internal sealed partial class PeerNetwork
         finally
         {
             if (gate && !cancellation.IsCancellationRequested)
-                ready = Snapshot.Self is null || (!needsPeerConfirmation && (synchronized > 0 || incomplete == 0));
+            {
+                await transport.WaitAsync();
+                try
+                {
+                    // A newer bind needs its own reconciliation before reopening admission.
+                    if (revision == transportRevision)
+                        ready = Snapshot.Self is null || (!needsPeerConfirmation && (synchronized > 0 || incomplete == 0));
+                }
+                finally { transport.Release(); }
+            }
             SignalNetwork();
             reconciliation.Release();
         }
@@ -373,10 +388,12 @@ internal sealed partial class PeerNetwork
         }
     }
 
-    private async Task UpdateAddressAsync(CancellationToken cancellation)
+    private async Task<bool> PersistAddressAsync(CancellationToken cancellation)
     {
-        if (bound.Length == 0)
-            return;
+        var snapshot = Snapshot;
+        if (bound.Length == 0 || snapshot.Self is not { } local || DeviceChanged(snapshot) ||
+            bound.Any(ip => Tailnet.Origin(ip, port) == local.Address))
+            return false;
         var (before, after) = await ChangeAsync(current =>
         {
             if (current.Self is not { } self || DeviceChanged(current))
@@ -391,7 +408,7 @@ internal sealed partial class PeerNetwork
             });
             return current.Disk with { Records = records };
         }, cancellation);
-        await PushChangesAsync(before, after, cancellation);
+        return before.Digest != after.Digest;
     }
 
     public static bool ValidVersions(RecordVersion[]? versions) => versions is { Length: <= PeerLimits.Versions } &&

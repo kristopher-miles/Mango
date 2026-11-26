@@ -6,7 +6,8 @@ using System.Text.Json;
 
 namespace Mango.Peers;
 
-internal sealed record TailnetStatus(string? Device, IPAddress[] LocalAddresses, TailnetCandidate[] Candidates, string Message)
+internal sealed record TailnetStatus(string? Device, IPAddress[] LocalAddresses, TailnetCandidate[] Candidates, string Message,
+    IPAddress[]? InterfaceAddressesOnReadFailure = null)
 {
     public static readonly TailnetStatus Waiting = new(null, [], [], "Checking Tailscale.");
 }
@@ -80,7 +81,7 @@ internal static class Tailnet
             start.ArgumentList.Add("--json");
             using var process = Process.Start(start);
             if (process is null)
-                return new(null, [], [], "Tailscale status could not start.");
+                return ReadFailure("Tailscale status could not start.");
             string json;
             try
             {
@@ -99,19 +100,13 @@ internal static class Tailnet
             using var document = JsonDocument.Parse(json);
             var root = document.RootElement;
             var state = String(root, "BackendState");
+            if (state is null)
+                return ReadFailure("Tailscale status did not report a backend state.");
             if (state != "Running")
                 return new(null, [], [], "Tailscale is disconnected. Sign in or reconnect before enrolling.");
             if (!root.TryGetProperty("Self", out var self) || String(self, "ID") is not { Length: > 0 } device)
-                return new(null, [], [], "Tailscale did not report this device's identity.");
-            var bound = NetworkInterface.GetAllNetworkInterfaces()
-                .Where(item => windows
-                    ? item.OperationalStatus == OperationalStatus.Up &&
-                        (item.Name.Equals("Tailscale", StringComparison.OrdinalIgnoreCase) ||
-                         item.Description.Contains("Tailscale", StringComparison.OrdinalIgnoreCase))
-                    : (mac ? item.Name.StartsWith("utun", StringComparison.Ordinal) : item.Name == "tailscale0") &&
-                        item.OperationalStatus is OperationalStatus.Up or OperationalStatus.Unknown)
-                .SelectMany(item => item.GetIPProperties().UnicastAddresses.Select(entry => entry.Address))
-                .ToHashSet();
+                return ReadFailure("Tailscale did not report this device's identity.");
+            var bound = InterfaceAddresses();
             var local = Addresses(root).Where(bound.Contains).ToArray();
             var candidates = root.TryGetProperty("Peer", out var peers) && peers.ValueKind == JsonValueKind.Object
                 ? peers.EnumerateObject().Select(peer => new TailnetCandidate(String(peer.Value, "ID") ?? "",
@@ -122,13 +117,36 @@ internal static class Tailnet
         }
         catch (OperationCanceledException) when (!stopping.IsCancellationRequested)
         {
-            return new(null, [], [], "Tailscale status timed out.");
+            return ReadFailure("Tailscale status timed out.");
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or
             System.ComponentModel.Win32Exception or JsonException or NetworkInformationException)
         {
-            return new(null, [], [], "Tailscale status is unavailable. Check the client and this user's permissions.");
+            return ReadFailure("Tailscale status is unavailable. Check the client and this user's permissions.");
         }
+    }
+
+    private static IPAddress[] InterfaceAddresses()
+    {
+        var windows = OperatingSystem.IsWindows();
+        var mac = OperatingSystem.IsMacOS();
+        return NetworkInterface.GetAllNetworkInterfaces()
+            .Where(item => windows
+                ? item.OperationalStatus == OperationalStatus.Up &&
+                    (item.Name.Equals("Tailscale", StringComparison.OrdinalIgnoreCase) ||
+                     item.Description.Contains("Tailscale", StringComparison.OrdinalIgnoreCase))
+                : (mac ? item.Name.StartsWith("utun", StringComparison.Ordinal) : item.Name == "tailscale0") &&
+                    item.OperationalStatus is OperationalStatus.Up or OperationalStatus.Unknown)
+            .SelectMany(item => item.GetIPProperties().UnicastAddresses.Select(entry => entry.Address))
+            .ToArray();
+    }
+
+    private static TailnetStatus ReadFailure(string message)
+    {
+        IPAddress[] addresses;
+        try { addresses = InterfaceAddresses(); }
+        catch (NetworkInformationException) { addresses = []; }
+        return new(null, [], [], message, addresses);
     }
 
     private static string? String(JsonElement entry, string property) =>

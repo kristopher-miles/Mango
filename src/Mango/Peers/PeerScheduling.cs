@@ -218,7 +218,7 @@ internal sealed partial class PeerNetwork
         {
             var hint = affinity.Find(identity, payload.Shape, session, prefixes, arrived);
             var tried = new HashSet<Guid>();
-            var unreachable = new Dictionary<Guid, (string? Address, string Epoch)>();
+            var unreachable = new Dictionary<Guid, (Uri[] Origins, string Epoch)>();
             Guid? deferred = null;
             var attemptCount = 0;
             var choices = Candidates(payload.Shape);
@@ -252,7 +252,7 @@ internal sealed partial class PeerNetwork
                     choices = await ObserveRouteChoicesAsync(Candidates(payload.Shape), payload.Shape, access.KeyId, cancellation);
                     foreach (var candidate in choices)
                         if (unreachable.TryGetValue(candidate.Node, out var failed) &&
-                            (failed.Address != Snapshot.Nodes.GetValueOrDefault(candidate.Node)?.Address || failed.Epoch != candidate.ServingEpoch))
+                            (failed.Epoch != candidate.ServingEpoch || !failed.Origins.SequenceEqual(InferenceOrigins(candidate.Node))))
                             tried.Remove(candidate.Node);
                     continue;
                 }
@@ -262,7 +262,7 @@ internal sealed partial class PeerNetwork
                 var elapsed = clock.GetElapsedTime(age);
                 var remaining = limit - elapsed;
                 var here = Snapshot.Self?.Id ?? Guid.Empty;
-                var address = Snapshot.Nodes.GetValueOrDefault(choice.Node)?.Address;
+                var origins = InferenceOrigins(choice.Node).ToArray();
                 var tryOtherHost = choices.Any(other => !tried.Contains(other.Node) && !other.Busy && !other.Displaces);
                 var ticket = new AttemptTicket(item.Id, attempt, access.KeyId, choice.Deployment,
                     clock.GetUtcNow() - elapsed, clock.GetUtcNow() + remaining, session, choice.ServingEpoch, source, logGeneration, tryOtherHost);
@@ -317,7 +317,7 @@ internal sealed partial class PeerNetwork
                 last = result;
                 if (result.Deferred && tryOtherHost) deferred ??= choice.Node;
                 if (result.Unreachable)
-                    unreachable[choice.Node] = (address, choice.ServingEpoch);
+                    unreachable[choice.Node] = (origins, choice.ServingEpoch);
                 if (!result.Retryable)
                     break;
                 suggested = result.SuggestedNode;

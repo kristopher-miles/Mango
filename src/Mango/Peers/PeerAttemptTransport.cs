@@ -38,7 +38,8 @@ internal sealed partial class PeerNetwork
 
         protected override Task SerializeToStreamAsync(Stream stream, TransportContext? context, CancellationToken cancellationToken)
         {
-            Volatile.Write(ref writing, 1);
+            if (Interlocked.Exchange(ref writing, 1) != 0)
+                throw new IOException("The forwarded inference body has already been submitted.");
             return body.CopyToAsync(stream, context, cancellationToken);
         }
 
@@ -192,33 +193,51 @@ internal sealed partial class PeerNetwork
         await context.Response.WriteAsJsonAsync(result, Json, context.RequestAborted);
     }
 
-    private async Task<AttemptReply> SubmitPeerAsync(Guid destination, AttemptTicket ticket, TimeSpan elapsed,
+    private IEnumerable<Uri> InferenceOrigins(Guid node) =>
+        Snapshot.Nodes.TryGetValue(node, out var peer) && !peer.Removed ? Origins(peer).Distinct() : [];
+
+    internal async Task<AttemptReply> SubmitPeerAsync(Guid destination, AttemptTicket ticket, TimeSpan elapsed,
         TimeSpan remaining, InferenceRequest payload, HttpContext context, CancellationToken cancellation)
     {
         var current = Snapshot;
-        if (!Ready || current.Self is not { } self || current.Records.Identity is not { } identity || current.Token is null ||
+        if (!Ready || current.Self is null || current.Records.Identity is null || current.Token is null ||
             DeviceChanged(current) || !current.Nodes.TryGetValue(destination, out var peer) || peer.Removed || Incompatible(destination))
             return new(AttemptState.Rejected, 503, "The selected peer is no longer eligible.");
-        var origin = Origins(peer).FirstOrDefault();
-        if (origin is null || remaining.TotalMilliseconds < 1)
-            return new(AttemptState.Rejected, 503, "The selected peer cannot be reached within the queue deadline.", Unreachable: origin is null);
+        var started = clock.GetTimestamp();
+        foreach (var origin in Origins(peer).Distinct())
+        {
+            var spent = clock.GetElapsedTime(started);
+            if ((remaining - spent).TotalMilliseconds < 1)
+                break;
+            if (await SubmitToOriginAsync(current, peer, origin, ticket, elapsed + spent, remaining - spent,
+                payload, context, cancellation) is { } result)
+                return result;
+        }
+        return new(AttemptState.Rejected, 503, "The selected peer could not be reached within the queue deadline.", Unreachable: true);
+    }
+
+    private async Task<AttemptReply?> SubmitToOriginAsync(PeerSnapshot current, PeerNode peer, Uri origin, AttemptTicket ticket,
+        TimeSpan elapsed, TimeSpan remaining, InferenceRequest payload, HttpContext context, CancellationToken cancellation)
+    {
         var metadata = new ForwardTicket(ticket.Request, ticket.Attempt, ticket.Key, ticket.Deployment,
             (int)elapsed.TotalMilliseconds, (int)remaining.TotalMilliseconds, ticket.Session, ticket.ServingEpoch, ticket.Source,
             ticket.LogGeneration, ticket.TryOtherHost);
-        var body = new TrackedSubmission(payload.CreateBody());
+        using var body = new TrackedSubmission(payload.CreateBody());
+        var receivedHeaders = false;
         try
         {
             using var request = new HttpRequestMessage(HttpMethod.Post, new Uri(origin, $"{PeerRoot}inference/{payload.Operation}")) { Content = body };
             request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", current.Token);
-            request.Headers.Add(NodeHeader, self.Id.ToString("N"));
-            request.Headers.Add(NetworkHeader, identity.Id.ToString("N"));
+            request.Headers.Add(NodeHeader, current.Self!.Id.ToString("N"));
+            request.Headers.Add(NetworkHeader, current.Records.Identity!.Id.ToString("N"));
             request.Headers.Add(DigestHeader, current.Digest);
             request.Headers.Add(RevisionHeader, current.Latest.ToString(System.Globalization.CultureInfo.InvariantCulture));
             request.Headers.Add(ReleaseHeader, Release.Wire);
             request.Headers.Add(AttemptHeader, Convert.ToBase64String(JsonSerializer.SerializeToUtf8Bytes(metadata, Json)));
             Interlocked.Increment(ref submissions);
             using var response = await inferenceHttp.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellation);
-            if (Header(response, NodeHeader) != destination.ToString("N") || Header(response, NetworkHeader) != identity.Id.ToString("N"))
+            receivedHeaders = true;
+            if (Header(response, NodeHeader) != peer.Id.ToString("N") || Header(response, NetworkHeader) != current.Records.Identity.Id.ToString("N"))
                 return await StopPeerAsync(current, peer, ticket, remaining);
             if (!ObserveRelease(peer.Id, Header(response, ReleaseHeader)))
                 return response.StatusCode == HttpStatusCode.UpgradeRequired
@@ -256,10 +275,12 @@ internal sealed partial class PeerNetwork
             await output.CompleteAsync(cancellation);
             return new(AttemptState.Completed, 200, Epoch: Header(response, EpochHeader));
         }
-        catch (Exception error) when (!body.WritingStarted && error is HttpRequestException or OperationCanceledException)
+        catch (Exception error) when (!receivedHeaders && !body.WritingStarted &&
+            error is (HttpRequestException or OperationCanceledException))
         {
             cancellation.ThrowIfCancellationRequested();
-            return new(AttemptState.Rejected, 503, "The selected peer could not be reached.", Unreachable: true);
+            // Only a failed send before body serialization can try another address.
+            return null;
         }
         catch (Exception error) when (error is HttpRequestException or IOException or JsonException or OperationCanceledException)
         {

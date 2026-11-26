@@ -12,7 +12,9 @@ namespace Mango.Peers;
 
 internal sealed partial class PeerNetwork(string directory, int port, ProviderCatalog providers,
     SnapshotFile<LocalSettings> settings, Func<CancellationToken, Task<TailnetStatus>>? inspectTailnet = null,
-    TimeProvider? time = null, MangoRelease? build = null) : IAsyncDisposable
+    TimeProvider? time = null, MangoRelease? build = null,
+    Func<IPAddress[], CancellationToken, Task<WebApplication>>? startListener = null,
+    HttpMessageHandler? peerHandler = null, TimeSpan? healthyTransportPollInterval = null) : IAsyncDisposable
 {
     private readonly SnapshotFile<PeerDisk> store = new(Path.Combine(directory, "network.json"), PeerValidation.Disk);
     private readonly byte[] credentialContext = SHA256.HashData(Encoding.UTF8.GetBytes(
@@ -21,14 +23,15 @@ internal sealed partial class PeerNetwork(string directory, int port, ProviderCa
     private readonly SemaphoreSlim transport = new(1);
     private readonly SemaphoreSlim reconciliation = new(1);
     private readonly SemaphoreSlim wake = new(0, 1);
+    private readonly SemaphoreSlim transportWake = new(0, 1);
     private readonly CancellationTokenSource stopping = new();
     private readonly ConcurrentDictionary<Guid, string> mismatches = new();
     private readonly ConcurrentDictionary<Guid, PeerContact> contacts = new();
-    private readonly HttpClient http = CreatePeerClient(8);
-    private readonly HttpClient inferenceHttp = CreatePeerClient(MaxIngress);
+    private readonly HttpClient http = CreatePeerClient(8, peerHandler);
+    private readonly HttpClient inferenceHttp = CreatePeerClient(MaxIngress, peerHandler);
     internal MangoRelease Release { get; } = build ?? MangoRelease.Current;
 
-    private static HttpClient CreatePeerClient(int connections) => new(new SocketsHttpHandler
+    private static HttpClient CreatePeerClient(int connections, HttpMessageHandler? handler) => new(handler ?? new SocketsHttpHandler
     {
         UseProxy = false,
         AllowAutoRedirect = false,
@@ -36,7 +39,7 @@ internal sealed partial class PeerNetwork(string directory, int port, ProviderCa
         MaxConnectionsPerServer = connections,
         ConnectTimeout = PeerLimits.CallTimeout,
         PooledConnectionLifetime = TimeSpan.FromMinutes(10)
-    }) { Timeout = Timeout.InfiniteTimeSpan, MaxResponseContentBufferSize = PeerLimits.ControlBytes };
+    }, disposeHandler: handler is null) { Timeout = Timeout.InfiniteTimeSpan, MaxResponseContentBufferSize = PeerLimits.ControlBytes };
 
     private PeerSnapshot snapshot = new(PeerDisk.Empty, null);
     private TailnetStatus tailnet = TailnetStatus.Waiting;
@@ -45,7 +48,8 @@ internal sealed partial class PeerNetwork(string directory, int port, ProviderCa
     private string? listenerError;
     private bool servicePortUnavailable;
     private volatile bool ready;
-    private int refreshInterface;
+    private long transportRevision;
+    private int reconcileTransport;
     private int refreshCatalog;
     private ReconciliationStatus lastReconciliation = new(null, false);
     private bool needsPeerConfirmation;
@@ -162,12 +166,15 @@ internal sealed partial class PeerNetwork(string directory, int port, ProviderCa
     {
         using var registration = hostStopping.Register(stopping.Cancel);
         var cancellation = stopping.Token;
+        using var transportLifetime = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
         Task? logs = null;
+        Task? transportWorker = null;
         NetworkChange.NetworkAddressChanged += AddressChanged;
         try
         {
             if (refreshTransport)
                 await RefreshTransportAsync(cancellation);
+            transportWorker = RunTransportAsync(transportLifetime.Token, refreshImmediately: !refreshTransport);
             await ReconcileAsync(cancellation, gate: true);
             for (var retry = 0; !Ready && retry < 3; retry++)
             {
@@ -184,10 +191,9 @@ internal sealed partial class PeerNetwork(string directory, int port, ProviderCa
                     await wake.WaitAsync(delay, cancellation);
                 try
                 {
-                    if (Interlocked.Exchange(ref refreshInterface, 0) != 0 || clock.GetUtcNow() >= daily)
+                    if (Interlocked.Exchange(ref reconcileTransport, 0) != 0 || clock.GetUtcNow() >= daily)
                     {
-                        var changed = await RefreshTransportAsync(cancellation);
-                        await ReconcileAsync(cancellation, gate: changed || !Ready);
+                        await ReconcileAsync(cancellation, gate: !Ready);
                         daily = NextDaily();
                     }
                     foreach (var item in mismatches.ToArray())
@@ -207,6 +213,9 @@ internal sealed partial class PeerNetwork(string directory, int port, ProviderCa
         finally
         {
             NetworkChange.NetworkAddressChanged -= AddressChanged;
+            await transportLifetime.CancelAsync();
+            if (transportWorker is not null)
+                await transportWorker;
             if (logs is not null)
                 await logs;
         }
@@ -214,10 +223,41 @@ internal sealed partial class PeerNetwork(string directory, int port, ProviderCa
 
     private DateTimeOffset NextDaily() => clock.GetUtcNow().AddHours(24).AddMinutes(-Random.Shared.Next(0, 31));
 
-    private void AddressChanged(object? sender, EventArgs args)
+    private void AddressChanged(object? sender, EventArgs args) => QueueTransportRefresh();
+
+    private void QueueTransportRefresh()
     {
-        Volatile.Write(ref refreshInterface, 1);
-        Wake();
+        try { transportWake.Release(); }
+        catch (SemaphoreFullException) { }
+    }
+
+    private async Task RunTransportAsync(CancellationToken cancellation, bool refreshImmediately)
+    {
+        try
+        {
+            while (!cancellation.IsCancellationRequested)
+            {
+                var interval = bound.Length == 0 || listenerError is not null
+                    ? TimeSpan.FromSeconds(3) : healthyTransportPollInterval ?? TimeSpan.FromMinutes(1);
+                var addressEvent = !refreshImmediately && await transportWake.WaitAsync(interval, cancellation);
+                refreshImmediately = false;
+                try
+                {
+                    var changed = await RefreshTransportAsync(cancellation);
+                    if (addressEvent || changed)
+                    {
+                        Volatile.Write(ref reconcileTransport, 1);
+                        Wake();
+                    }
+                }
+                catch (Exception error) when (error is IOException or UnauthorizedAccessException or PeerFailure)
+                {
+                    LogOperation("transport", "Mango could not persist the latest Tailscale address.");
+                    listenerError = "Mango could not persist the latest Tailscale address. Retrying.";
+                }
+            }
+        }
+        catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { }
     }
 
     private void QueueCatalog()
@@ -254,23 +294,31 @@ internal sealed partial class PeerNetwork(string directory, int port, ProviderCa
         {
             var previous = tailnet;
             var status = await (inspectTailnet ?? Tailnet.ReadAsync)(cancellation);
+            // Keep the last verified transport only while every bound address is still on the interface.
+            if (status.InterfaceAddressesOnReadFailure is { } stillPresent && bound.Length != 0 &&
+                bound.All(stillPresent.Contains))
+                return false;
             Volatile.Write(ref tailnet, status);
-            var changed = previous.Device != status.Device || !bound.SequenceEqual(status.LocalAddresses);
+            var rebind = bound.Length != status.LocalAddresses.Length || !bound.All(status.LocalAddresses.Contains);
+            var changed = previous.Device != status.Device || rebind && bound.Length != 0;
             if (changed && Snapshot.Self is not null)
                 ready = false;
-            if (!bound.SequenceEqual(status.LocalAddresses))
+            if (rebind)
             {
                 await StopListenerAsync();
                 if (status.LocalAddresses.Length != 0)
                 {
                     try
                     {
-                        listener = await PeerRoutes.StartAsync(this, status.LocalAddresses, port, cancellation);
+                        listener = await (startListener is { } start
+                            ? start(status.LocalAddresses, cancellation)
+                            : PeerRoutes.StartAsync(this, status.LocalAddresses, port, cancellation));
                         bound = status.LocalAddresses;
+                        changed = true;
                         listenerError = null;
                         Volatile.Write(ref servicePortUnavailable, false);
                     }
-                    catch (Exception error) when (error is IOException || PortBinding.IsUnavailable(error))
+                    catch (Exception error) when (error is IOException || PortBinding.IsUnavailable(error, addressMayChange: true))
                     {
                         listenerError = $"Mango could not bind the Tailscale service port {port}.";
                         Volatile.Write(ref servicePortUnavailable, PortBinding.IsUnavailable(error));
@@ -282,6 +330,20 @@ internal sealed partial class PeerNetwork(string directory, int port, ProviderCa
                 listenerError = null;
                 Volatile.Write(ref servicePortUnavailable, false);
             }
+            if (changed)
+            {
+                transportRevision++;
+                if (Snapshot.Self is not null)
+                    ready = false;
+            }
+            if (await PersistAddressAsync(cancellation))
+            {
+                transportRevision++;
+                ready = false;
+                changed = true;
+            }
+            if (bound.Length != 0)
+                listenerError = null;
             return changed;
         }
         finally { transport.Release(); }
