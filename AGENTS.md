@@ -2,6 +2,13 @@
 
 Mango is a bridge between model hosting programs. The hosting program decides whether it can serve a valid request. Mango owns the public API contract, authorization and key scopes, operator serving settings, queue priority and deadlines, benchmark occupancy, and attempt ownership. Provider capabilities inform routing. Try an eligible idle worker for an independent request before queueing it behind a busy alias worker. Preserve one execution owner and the client's original deadline across reroutes.
 
+## Agent workflow
+
+- Use simulated timers for all idle tests, including release qualification. Never run realtime idle tests.
+- Start Mango repairs without waiting for current network work to finish. Repairs take priority. Taking network clients offline is acceptable and preferred when it helps the repair proceed.
+- Work in the primary branch. Create another branch only when the user explicitly requests it.
+- Fix reported bugs in Mango itself. Use client-specific investigation to gather evidence for the product fix. A repair is complete after releasing the Mango fix and updating the affected client through Mango's ordinary update process.
+
 ## Host activity and model residency
 
 - Sustained external CPU or GPU activity makes a contributing node yield to the user and enter its configured quiet cooldown. Attribute provider inference and benchmarks to Mango where observable. CPU and GPU utilization drive activity detection. RAM, VRAM, and commit pressure do not cause withdrawal. Leech mode applies to the whole node, including YOLO deployments, while ingress still routes requests.
