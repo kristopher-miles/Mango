@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -93,9 +94,10 @@ internal abstract class ProviderAdapter(HttpClient http, ProviderEndpoint endpoi
         {
             return await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellation);
         }
-        catch (HttpRequestException)
+        catch (HttpRequestException error)
         {
-            throw new ProviderFailure(502, "Mango could not reach the configured provider.");
+            throw new ProviderFailure(502, "Mango could not reach the configured provider.",
+                connectionRefused: error.GetBaseException() is SocketException { SocketErrorCode: SocketError.ConnectionRefused });
         }
     }
 

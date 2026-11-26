@@ -1,5 +1,7 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Net;
+using System.Net.Sockets;
 using System.Text.Json.Serialization;
 using Mango.Host;
 using Mango.Resources;
@@ -31,7 +33,8 @@ internal sealed record ExecutionResult(bool Settled, ProviderFailure? Failure, P
 internal sealed record StartExecution(AdmissionStatus Status, string? Reason,
     Func<HttpContext, CancellationToken, Task<ExecutionResult>>? Execute = null, string? Epoch = null, bool MemoryWait = false, bool OperationInProgress = false);
 
-internal sealed class ProviderCatalog(string directory, ResourceProtection? resources = null) : IAsyncDisposable, IServingBackend
+internal sealed class ProviderCatalog(string directory, ResourceProtection? resources = null, TimeProvider? time = null)
+    : IAsyncDisposable, IServingBackend
 {
     private sealed record Observation(ProviderInventory Inventory, string? Error, DateTimeOffset ObservedAt,
         bool AllocationFailed = false, bool CredentialNeeded = false);
@@ -50,6 +53,10 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
     private readonly SemaphoreSlim input = new(16);
     private readonly SemaphoreSlim wake = new(0, 1);
     private readonly ConcurrentDictionary<Guid, byte> pendingRefreshes = new();
+    private readonly SemaphoreSlim reachabilityWake = new(0, 1);
+    private readonly ConcurrentDictionary<Guid, ReachabilityRetry> reachabilityRetries = new();
+    private readonly TimeProvider clock = time ?? TimeProvider.System;
+    private sealed record ReachabilityRetry(Uri Address, long CheckedAt, TimeSpan Delay);
     private readonly ConcurrentDictionary<Guid, ProviderAdapter> adapters = [];
     private readonly Dictionary<Guid, Observation> observations = [];
     private readonly Dictionary<Guid, (CancellationTokenSource Stop, Task Work)> watchers = [];
@@ -134,6 +141,8 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
 
     public async Task RunAsync(CancellationToken stopping)
     {
+        using var reachabilityLifetime = CancellationTokenSource.CreateLinkedTokenSource(stopping);
+        var reachability = RunReachabilityAsync(reachabilityLifetime.Token);
         try
         {
             await RefreshAsync(null, stopping);
@@ -148,20 +157,20 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
                     lastIdleCheck = Stopwatch.GetTimestamp();
                 }
                 var wait = reserved ? idleCheckInterval : ProviderLimits.InventoryInterval;
-                if (!await wake.WaitAsync(wait, stopping))
+                if (!await WaitForWakeAsync(wake, wait, stopping))
                 {
                     if (!reserved)
                         await RefreshAsync(null, stopping);
                     continue;
                 }
-                await Task.Delay(ProviderLimits.RefreshCoalesceInterval, stopping);
+                await Task.Delay(ProviderLimits.RefreshCoalesceInterval, clock, stopping);
                 foreach (var id in pendingRefreshes.Keys)
                 {
-                    if (!pendingRefreshes.TryRemove(id, out _))
-                        continue;
                     await operation.WaitAsync(stopping);
                     try
                     {
+                        if (!pendingRefreshes.TryRemove(id, out _))
+                            continue;
                         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(stopping);
                         timeout.CancelAfter(ProviderLimits.ControlTimeout);
                         try
@@ -176,6 +185,11 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
             }
         }
         catch (OperationCanceledException) when (stopping.IsCancellationRequested) { }
+        finally
+        {
+            await reachabilityLifetime.CancelAsync();
+            await reachability;
+        }
     }
 
     public async Task<EndpointStatus> ConfigureAsync(EndpointUpdate input, CancellationToken cancellation, Guid? registration = null,
@@ -224,6 +238,7 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
             }, cancellation);
             if (previous != endpoint)
             {
+                reachabilityRetries.TryRemove(endpoint.Id, out _);
                 await StopWatchAsync(endpoint.Id);
                 adapters[endpoint.Id] = CreateAdapter(endpoint);
                 observations.Remove(endpoint.Id);
@@ -262,6 +277,7 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
                 Selected = value.Selected is { } selected && modelIds.Contains(selected) ? null : value.Selected
             }, cancellation);
             adapters.TryRemove(id, out _);
+            reachabilityRetries.TryRemove(id, out _);
             observations.Remove(id);
             await StopWatchAsync(id);
             Publish();
@@ -1145,9 +1161,100 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
 
     private void SignalRefresh(Guid id)
     {
-        pendingRefreshes.TryAdd(id, 0);
+        if (!pendingRefreshes.TryAdd(id, 0))
+            return;
         try { wake.Release(); }
         catch (SemaphoreFullException) { }
+    }
+
+    private async Task<bool> WaitForWakeAsync(SemaphoreSlim signal, TimeSpan delay, CancellationToken stopping)
+    {
+        if (time is null)
+            return await signal.WaitAsync(delay, stopping);
+        using var timeout = new CancellationTokenSource(delay, clock);
+        using var wait = CancellationTokenSource.CreateLinkedTokenSource(stopping, timeout.Token);
+        try { await signal.WaitAsync(wait.Token); return true; }
+        catch (OperationCanceledException) when (!stopping.IsCancellationRequested) { return false; }
+    }
+
+    private TimeSpan RetryRemaining(ReachabilityRetry retry) => retry.Delay - clock.GetElapsedTime(retry.CheckedAt);
+
+    private async Task RunReachabilityAsync(CancellationToken stopping)
+    {
+        try
+        {
+            while (!stopping.IsCancellationRequested)
+            {
+                var retries = reachabilityRetries.ToArray();
+                if (retries.Length == 0)
+                {
+                    await reachabilityWake.WaitAsync(stopping);
+                    continue;
+                }
+                var (id, retry) = retries.MinBy(item => RetryRemaining(item.Value));
+                var wait = RetryRemaining(retry);
+                if (wait > TimeSpan.Zero)
+                {
+                    await WaitForWakeAsync(reachabilityWake, wait, stopping);
+                    continue;
+                }
+                await operation.WaitAsync(stopping);
+                try
+                {
+                    if (reachabilityRetries.GetValueOrDefault(id) != retry)
+                        continue;
+                    reachabilityRetries[id] = retry with
+                    {
+                        CheckedAt = clock.GetTimestamp(),
+                        Delay = TimeSpan.FromSeconds(Math.Min(retry.Delay.TotalSeconds * 2, 60))
+                    };
+                    if (!await AcceptsConnectionAsync(retry.Address, stopping))
+                        continue;
+                    // Only a reachable socket can trigger inventory, through the normal authenticated adapter.
+                    pendingRefreshes.TryRemove(id, out _);
+                    using var timeout = CancellationTokenSource.CreateLinkedTokenSource(stopping);
+                    timeout.CancelAfter(ProviderLimits.ControlTimeout);
+                    try { await RefreshOneAsync(id, timeout.Token); }
+                    catch (OperationCanceledException) when (!stopping.IsCancellationRequested)
+                    {
+                        reachabilityRetries.TryRemove(id, out _);
+                    }
+                }
+                finally { ReleaseOperation(); }
+            }
+        }
+        catch (OperationCanceledException) when (stopping.IsCancellationRequested) { }
+    }
+
+    private static async Task<bool> AcceptsConnectionAsync(Uri origin, CancellationToken stopping)
+    {
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(stopping);
+        timeout.CancelAfter(TimeSpan.FromSeconds(1));
+        using var socket = new Socket(SocketType.Stream, ProtocolType.Tcp);
+        // Resolve localhost explicitly so a readiness check can never contact a non-loopback address.
+        IPAddress[] addresses = IPAddress.TryParse(origin.DnsSafeHost, out var address) ? [address]
+            : Socket.OSSupportsIPv6 ? [IPAddress.IPv6Loopback, IPAddress.Loopback] : [IPAddress.Loopback];
+        try { await socket.ConnectAsync(addresses, origin.Port, timeout.Token); return true; }
+        catch (SocketException) { return false; }
+        catch (OperationCanceledException) when (!stopping.IsCancellationRequested) { return false; }
+    }
+
+    private void RecordReachabilityFailure(Guid id, ProviderFailure error)
+    {
+        var endpoint = store.Value.Endpoints.Single(endpoint => endpoint.Id == id);
+        var address = new Uri(endpoint.Address);
+        // On-demand owned runtimes can be intentionally stopped until the next authorized load.
+        if (!error.ConnectionRefused || !address.IsLoopback || endpoint.Executable is not null ||
+            endpoint.Profile == ProviderProfile.Strata)
+        {
+            reachabilityRetries.TryRemove(id, out _);
+            return;
+        }
+        if (reachabilityRetries.TryAdd(id, new(address, clock.GetTimestamp(), TimeSpan.FromSeconds(5))))
+        {
+            try { reachabilityWake.Release(); }
+            catch (SemaphoreFullException) { }
+        }
     }
 
     private async Task RefreshOneAsync(Guid id, CancellationToken cancellation, bool settleOwnedExit = true)
@@ -1156,6 +1263,7 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
         {
             var adapter = adapters[id];
             var result = await adapter.InspectAsync(cancellation);
+            reachabilityRetries.TryRemove(id, out _);
             observations[id] = new(result, null, DateTimeOffset.UtcNow);
             if (adapter is StrataAdapter { Reserved: false })
                 SettleReleased(id);
@@ -1179,6 +1287,7 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
         }
         catch (ProviderFailure error)
         {
+            RecordReachabilityFailure(id, error);
             var previous = observations.GetValueOrDefault(id)?.Inventory;
             var adapter = adapters[id];
             var fallback = adapter is LlamaAdapter { ConfiguredModel: { } configured }
@@ -1269,6 +1378,7 @@ internal sealed class ProviderCatalog(string directory, ResourceProtection? reso
         operation.Dispose();
         input.Dispose();
         wake.Dispose();
+        reachabilityWake.Dispose();
     }
 
     private async Task StopWatchAsync(Guid id)

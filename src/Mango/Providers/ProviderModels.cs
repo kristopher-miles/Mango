@@ -113,13 +113,14 @@ internal static class ProviderLimits
 }
 
 internal sealed class ProviderFailure(int status, string message, bool allocationFailure = false, bool capacityWait = false,
-    bool memoryWait = false, string? code = null) : Exception(message)
+    bool memoryWait = false, string? code = null, bool connectionRefused = false) : Exception(message)
 {
     public int Status { get; } = status;
     public string? Code { get; } = code;
     public bool AllocationFailure { get; } = allocationFailure;
     public bool CapacityWait { get; } = capacityWait;
     public bool MemoryWait { get; } = memoryWait;
+    public bool ConnectionRefused { get; } = connectionRefused;
 }
 
 internal static class ProviderIdentity
