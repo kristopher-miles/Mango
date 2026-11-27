@@ -1,6 +1,5 @@
 "use strict";
 
-const requestsStatus = document.querySelector("#requests-status");
 const publicForm = document.querySelector("#public-form");
 const publicState = document.querySelector("#public-state");
 const publicCheck = document.querySelector("#public-check");
@@ -42,17 +41,23 @@ function requestSource(source) {
   return `${prefix} ${source.address}`;
 }
 
-function renderRequests(view) {
-  document.querySelector("#overview-running").textContent = view.running;
-  document.querySelector("#overview-waiting").textContent = view.waiting;
-  const recent = [...view.ingress, ...[...view.recent].reverse()].slice(0, 4);
-  document.querySelector("#overview-activity").replaceChildren(...(recent.length ? recent.map(request => {
+let overviewRequestSignature;
+function renderOverviewRequests(view) {
+  if (route.page !== "overview" || view.running == null) return;
+  setText(document.querySelector("#overview-running"), String(view.running));
+  setText(document.querySelector("#overview-waiting"), String(view.waiting));
+  const recent = [...view.ingress, ...view.recent.slice(-4).reverse()].slice(0, 4).map(request => [
+    request.alias, `${operationNames[request.operation]} · ${request.finished ? "Finished" : request.attempts.at(-1)?.state || "Finding capacity"}${request.reason ? ` · ${request.reason}` : ""}`]);
+  const signature = JSON.stringify(recent);
+  if (overviewRequestSignature === signature) return;
+  overviewRequestSignature = signature;
+  document.querySelector("#overview-activity").replaceChildren(...(recent.length ? recent.map(([name, description]) => {
     const row = element("li");
-    row.append(element("strong", request.alias), element("p", `${operationNames[request.operation]} · ${request.finished ? "Finished" : request.attempts.at(-1)?.state || "Finding capacity"}${request.reason ? ` · ${request.reason}` : ""}`, "muted"));
+    row.append(element("strong", name), element("p", description, "muted"));
     return row;
   }) : [element("li", "No recent work.", "muted")]));
-  updateRequestActivity(view);
 }
+document.addEventListener("mango:route", () => renderOverviewRequests(activitySnapshot));
 
 async function watchDashboard() {
   if (dashboard || document.visibilityState !== "visible" || !token) return;
@@ -71,19 +76,23 @@ async function watchDashboard() {
     const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
     while (true) {
       const part = await reader.read();
-      if (part.done) break;
+      if (part.done) throw new Error("Live feed disconnected. Reconnecting…");
       pending += part.value;
       for (let end = pending.indexOf("\n"); end >= 0; end = pending.indexOf("\n")) {
         const frame = JSON.parse(pending.slice(0, end));
         pending = pending.slice(end + 1);
         if (frame.network) loadNetwork().catch(error => networkFeedback.textContent = error.message);
-        if (frame.requests) renderRequests(frame.requests);
+        if (frame.requests) {
+          updateRequestActivity(frame.requests);
+          renderOverviewRequests(frame.requests);
+        }
       }
     }
   } catch (error) {
     if (!controller.signal.aborted) {
       activityFeedError = error.message;
-      requestsStatus.textContent = activityFeedError;
+      updateActivityTimers();
+      requestActivityRender();
     }
   } finally {
     if (dashboard === controller) {

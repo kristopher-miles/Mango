@@ -69,6 +69,10 @@ function element(tag, content, className) {
   if (className) node.className = className;
   return node;
 }
+function setText(node, value) {
+  if (node.textContent !== value) node.textContent = value;
+}
+
 function glyph(name, label) {
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
   svg.setAttribute("class", "glyph");
@@ -338,20 +342,22 @@ document.querySelector("#update-share").addEventListener("click", event => perfo
   return result.needsOverride ? `Mango ${result.version}: no updates queued. Some peers could not verify eligibility. ${detail}` : `Mango ${result.version}: ${detail || "No other nodes are enrolled."}`;
 }));
 
-async function refreshPage() {
+async function refreshPage(polling = false) {
   if (localSessionEnded || document.hidden) return;
   const jobs = [];
   if (route.page === "overview" || route.group === "protection" || route.group === "serving") jobs.push(loadResources().catch(error => document.querySelector("#resource-feedback").textContent = error.message));
   if (route.group === "serving") jobs.push(loadProviders().catch(error => providerStatus.textContent = error.message));
   if (route.group === "network" || route.group === "serving") jobs.push(loadNetwork().catch(error => document.querySelector("#network-status").textContent = error.message));
   if (["system/startup", "system/ports", "system/updates"].includes(route.page)) jobs.push(loadRelease().catch(error => document.querySelector("#release-status").textContent = error.message));
-  if (["activity", "system/logging", "system/data"].includes(route.page)) jobs.push(loadLogs().catch(logError));
+  if (["activity", "system/logging", "system/data"].includes(route.page) &&
+      (!polling || !pendingLogReads && (route.page !== "activity" || performance.now() >= nextActivityLogPoll)))
+    jobs.push(loadLogs().catch(logError));
   await Promise.allSettled(jobs);
 }
 document.addEventListener("DOMContentLoaded", async () => {
   const jobs = [[loadSettings, showSessionError], [loadNetwork, e => document.querySelector("#network-status").textContent = e.message],
     [loadProviders, e => providerStatus.textContent = e.message], [loadResources, e => document.querySelector("#resource-feedback").textContent = e.message],
-    [loadPublic, e => document.querySelector("#public-state").textContent = e.message], [loadLogs, logError], [loadRelease, e => document.querySelector("#release-status").textContent = e.message]];
+    [loadPublic, e => document.querySelector("#public-state").textContent = e.message], [loadRelease, e => document.querySelector("#release-status").textContent = e.message]];
   await Promise.allSettled(jobs.map(([work, failure]) => work().catch(failure)));
   if (token) watchDashboard();
 });
@@ -360,4 +366,4 @@ document.addEventListener("mango:route", () => {
   refreshPage();
 });
 document.addEventListener("visibilitychange", () => { if (!document.hidden) { loadNetwork().catch(error => networkFeedback.textContent = error.message); loadSettings().catch(showSessionError); refreshPage(); } });
-setInterval(refreshPage, 5000);
+setInterval(() => refreshPage(true), 5000);

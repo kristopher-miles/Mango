@@ -42,3 +42,55 @@ test("old serving records, partials, estimates, misses and unavailable counters 
   assert.equal(activityCache(0, 120), "Miss");
   assert.equal(activityCache(56, null), "56 tok");
 });
+
+test("identical feed frames and history polls schedule no redraw, including after navigation", () => {
+  const fs = require("node:fs"), vm = require("node:vm");
+  const jobs = [];
+  const context = vm.createContext({
+    module: { exports: {} }, performance: { now: () => 1000 }, route: { page: "activity" },
+    document: { hidden: false }, requestAnimationFrame: callback => jobs.push(callback)
+  });
+  vm.runInContext(fs.readFileSync(require.resolve("../../src/Mango/wwwroot/activity.js"), "utf8"), context);
+  const history = { day: "2026-11-27", start: started, end: finished, settings: { timeZone: "UTC" }, entries: [] };
+  context.updateRequestActivity({ ...empty, observedAt: started });
+  context.updateActivityHistory(history, "", "");
+  assert.equal(jobs.length, 1, "coalesce the two initial inputs into one frame");
+  context.route.page = "overview";
+  jobs.pop()();
+  context.route.page = "activity";
+  context.updateRequestActivity({ ...empty, observedAt: finished });
+  context.updateActivityHistory(structuredClone(history), "", "");
+  assert.equal(jobs.length, 0);
+  context.updateRequestActivity({ ...empty, ingress: [active] });
+  assert.equal(jobs.length, 1);
+  context.document.hidden = true;
+  jobs.pop()();
+  context.updateActivityHistory(history, "filtered", "");
+  assert.equal(jobs.length, 0);
+});
+
+test("the elapsed clock stops for empty, hidden and disconnected activity", () => {
+  const fs = require("node:fs"), vm = require("node:vm");
+  const intervals = new Set();
+  const cell = { textContent: "" };
+  const context = vm.createContext({
+    module: { exports: {} }, document: { hidden: false }, route: { page: "activity" }, cell,
+    performance: { now: () => 0 }, setText: (node, value) => { node.textContent = value; },
+    setInterval: callback => { intervals.add(callback); return callback; }, clearInterval: handle => intervals.delete(handle)
+  });
+  vm.runInContext(fs.readFileSync(require.resolve("../../src/Mango/wwwroot/activity.js"), "utf8"), context);
+  context.updateActivityTimers();
+  assert.equal(intervals.size, 0);
+  vm.runInContext("activityObserved = 5000; activityReceived = 0; activityClocks.set(cell, 1000)", context);
+  context.updateActivityTimers();
+  context.updateActivityTimers();
+  assert.equal(intervals.size, 1);
+  assert.equal(cell.textContent, "4.00 s");
+  context.document.hidden = true;
+  context.updateActivityTimers();
+  assert.equal(intervals.size, 0);
+  context.document.hidden = false;
+  vm.runInContext('activityFeedError = "disconnected"', context);
+  context.updateActivityTimers();
+  assert.equal(intervals.size, 0);
+});

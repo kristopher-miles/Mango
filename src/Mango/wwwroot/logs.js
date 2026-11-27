@@ -8,7 +8,7 @@ const logCollect = document.querySelector("#logs-collect");
 const logExport = document.querySelector("#logs-export");
 let logViewVersion = 0;
 let logPolicyWriter, logFilterTimer;
-let logCollectionTimer;
+let logCollectionTimer, nextActivityLogPoll = 0, pendingLogReads = 0;
 let followToday = true;
 
 const coverageLabels = { received: "Received", unavailable: "Unavailable", off: "Request logging off",
@@ -43,7 +43,11 @@ function logDetail(entry) {
   return row;
 }
 
-function logRender(view) {
+let logPolicySignature, diagnosticsSignature, latestLogs;
+function renderLogPolicy(view) {
+  const signature = JSON.stringify([view.settings, view.canManage, view.clear]);
+  if (signature === logPolicySignature) return;
+  logPolicySignature = signature;
   logPolicyWriter = recordWriter("logging", { value: view.settings, label: "Logging policy", page: "system/logging",
     requiresAdmin: () => !!networkView?.identity,
     read: async () => (await api("logs")).settings,
@@ -64,6 +68,15 @@ function logRender(view) {
     : !view.clear.localApplied ? "Local deletion is pending."
       : view.clear.pending.length ? `Pending acknowledgement from ${view.clear.pending.map(peer => peer.name).join(", ")}.`
         : "All currently enrolled nodes acknowledged the clear.";
+}
+function renderLogDiagnostics(view) {
+  const events = view.entries.filter(entry => entry.kind === "benchmark" || entry.kind === "operation").slice(0, 80);
+  const { collectedAt, running, runningDay, error, sources } = view.collection;
+  const signature = JSON.stringify([view.day, view.settings.timeZone, view.store, collectedAt, running, runningDay, error,
+    sources.map(s => [s.name, s.coverage, s.shortened, s.dropped, s.fromCache]), view.byKey, view.bySource, events,
+    view.requests, view.attempts, view.capped]);
+  if (signature === diagnosticsSignature) return;
+  diagnosticsSignature = signature;
   document.querySelector("#logs-storage").textContent = [
     `${(view.store.bytes / 1048576).toFixed(2)} MiB stored.`,
     view.store.shortened ? "The byte cap shortened retention." : "",
@@ -82,15 +95,24 @@ function logRender(view) {
       source.dropped ? "Incomplete capture" : "", source.fromCache ? "Cached records available" : ""].filter(Boolean).join(" · ")));
   logList("#logs-keys", view.byKey, logUsage);
   logList("#logs-sources", view.bySource, logUsage);
-  updateActivityHistory(view, logQuery.elements.key.value, logQuery.elements.source.value);
-  logList("#logs-entries", view.entries.filter(entry => entry.kind === "benchmark" || entry.kind === "operation").slice(0, 80), logDetail);
+  logList("#logs-entries", events, logDetail);
   document.querySelector("#logs-count").textContent =
     `${logCount(view.requests, "client request")} · ${logCount(view.attempts, "serving attempt")}.${view.capped ? " View limited to 10,000 records. The download includes all available records." : ""}`;
-  logCollect.disabled = view.collection.running;
+}
+function logRender(view) {
+  renderLogPolicy(view);
+  latestLogs = view;
+  updateActivityHistory(view, logQuery.elements.key.value, logQuery.elements.source.value);
+  if (!document.querySelector("#log-diagnostics").hidden) renderLogDiagnostics(view);
+  if (logCollect.disabled !== view.collection.running) logCollect.disabled = view.collection.running;
   clearTimeout(logCollectionTimer);
   if (view.collection.running && !document.hidden)
     logCollectionTimer = setTimeout(() => loadLogs().catch(logError), 1500);
 }
+
+document.querySelector('[data-reveal="log-diagnostics"]').addEventListener("click", () => {
+  if (latestLogs) renderLogDiagnostics(latestLogs);
+});
 
 function logError(error) {
   logFeedback.classList.add("error");
@@ -103,10 +125,17 @@ async function loadLogs() {
   if (followToday) values.delete("day");
   const query = new URLSearchParams([...values].filter(([, value]) => value));
   query.set("limit", activityLimit);
-  const view = await api(`logs?${query}`);
-  if (version !== logViewVersion) return;
-  fillInput(logQuery.elements.day, view.day);
-  logRender(view);
+  pendingLogReads++;
+  nextActivityLogPoll = performance.now() + 60000;
+  try {
+    const view = await api(`logs?${query}`);
+    if (version !== logViewVersion) return;
+    if (logQuery.elements.day.value !== view.day) fillInput(logQuery.elements.day, view.day);
+    logRender(view);
+  } catch (error) {
+    if (version === logViewVersion) nextActivityLogPoll = 0;
+    throw error;
+  } finally { pendingLogReads--; }
 }
 
 logQuery.addEventListener("submit", event => {
