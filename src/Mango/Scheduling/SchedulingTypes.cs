@@ -29,11 +29,12 @@ internal sealed record AttemptTrace(Guid Attempt, Guid Node, string Deployment, 
 
 internal sealed record ServingActivity(Guid Request, Guid Attempt, Guid Origin, string Alias, string Deployment,
     KeyPriority Priority, InferenceSource Source, DateTimeOffset Arrived, DateTimeOffset? Finished, AttemptState State,
-    string? Reason, double QueueMilliseconds, double? LoadMilliseconds, bool Loading);
+    string? Reason, double QueueMilliseconds, double? LoadMilliseconds, bool Loading, RequestUsage Usage, string? KeyName);
 
 internal sealed class IngressRequest(Guid id, DateTimeOffset arrived, DateTimeOffset queueUntil, InferenceAccess access,
-    InferenceSource source, string alias, InferenceOperation operation)
+    InferenceSource source, string alias, InferenceOperation operation, InferenceRequest? payload = null)
 {
+    public RequestUsage? Usage => payload?.Usage;
     public Guid Id { get; } = id;
     public DateTimeOffset Arrived { get; } = arrived;
     public DateTimeOffset QueueUntil { get; } = queueUntil;

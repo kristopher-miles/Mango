@@ -355,7 +355,19 @@ internal static partial class PeerChecks
             var reenrolled = await Local(http, second, "network/join", join with { Password = Reset });
             Check(reenrolled.GetProperty("node").GetGuid() == secondId, "reenrollment preserves the host's reusable model identity");
             var view = await Local(http, first, "network");
-            var saved = await File.ReadAllTextAsync(Path.Combine(firstPath, "network.json"));
+            string saved = "";
+            await Eventually(() =>
+            {
+                // Reenrollment can atomically replace the snapshot while this assertion opens it on Windows.
+                try
+                {
+                    using var file = File.Open(Path.Combine(firstPath, "network.json"), FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+                    using var reader = new StreamReader(file);
+                    saved = reader.ReadToEnd();
+                    return true;
+                }
+                catch (IOException e) when ((e.HResult & 0xffff) == 32) { return false; }
+            }, "reenrolled snapshot readable after replacement");
             Check(!view.ToString().Contains("verifier", StringComparison.OrdinalIgnoreCase) &&
                 !view.ToString().Contains("protectedSecret", StringComparison.OrdinalIgnoreCase) &&
                 !saved.Contains(Reset) && !saved.Contains(preResetKey), "administration view and disk omit reusable plaintext credentials");

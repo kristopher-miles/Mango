@@ -9,7 +9,7 @@
 <script src="/network-catalog.js" defer></script>
 <script src="/enrollment.js" defer></script>
 <script src="/network.js" defer></script>
-<script src="/dashboard.js" defer></script>
+<script src="/activity.js" defer></script><script src="/dashboard.js" defer></script>
 <script src="/telemetry.js" defer></script><script src="/resources.js" defer></script>
 <script src="/logs.js" defer></script>
 </head><body>
@@ -17,13 +17,13 @@
 <header class="app-sidebar" aria-label="Mango workspace">
 <a class="brand" aria-label="Mango home" href="#/overview"><img src="/mango.svg" alt="" width="30" height="30"><span>Mango</span></a>
 <div class="host-identity"><strong id="sidebar-node">This computer</strong><span id="sidebar-network" class="muted">Local workspace</span></div>
-<nav id="primary-nav" class="primary-nav" aria-label="Main navigation"><a href="#/overview" aria-label="Overview"><svg class="glyph" aria-hidden="true"><use href="/glyphs.svg#overview"></use></svg><span>Overview</span></a><a href="#/serving" aria-label="Serving"><svg class="glyph" aria-hidden="true"><use href="/glyphs.svg#provider"></use></svg><span>Serving</span></a><a href="#/activity/live" aria-label="Activity"><svg class="glyph" aria-hidden="true"><use href="/glyphs.svg#activity"></use></svg><span>Activity</span></a><a href="#/network/nodes" aria-label="Network"><svg class="glyph" aria-hidden="true"><use href="/glyphs.svg#network"></use></svg><span>Network</span></a><a href="#/protection/activity" aria-label="Protection"><svg class="glyph" aria-hidden="true"><use href="/glyphs.svg#protection"></use></svg><span>Protection</span></a><a href="#/system/startup" aria-label="System"><svg class="glyph" aria-hidden="true"><use href="/glyphs.svg#system"></use></svg><span>System</span></a></nav>
+<nav id="primary-nav" class="primary-nav" aria-label="Main navigation"><a href="#/overview" aria-label="Overview"><svg class="glyph" aria-hidden="true"><use href="/glyphs.svg#overview"></use></svg><span>Overview</span></a><a href="#/serving" aria-label="Serving"><svg class="glyph" aria-hidden="true"><use href="/glyphs.svg#provider"></use></svg><span>Serving</span></a><a href="#/activity" aria-label="Activity"><svg class="glyph" aria-hidden="true"><use href="/glyphs.svg#activity"></use></svg><span>Activity</span></a><a href="#/network/nodes" aria-label="Network"><svg class="glyph" aria-hidden="true"><use href="/glyphs.svg#network"></use></svg><span>Network</span></a><a href="#/protection/activity" aria-label="Protection"><svg class="glyph" aria-hidden="true"><use href="/glyphs.svg#protection"></use></svg><span>Protection</span></a><a href="#/system/startup" aria-label="System"><svg class="glyph" aria-hidden="true"><use href="/glyphs.svg#system"></use></svg><span>System</span></a></nav>
 <div class="rail-status"><div class="contribution-status"><span class="muted">This computer</span><strong id="rail-contribution">Checking…</strong></div><div class="administration-actions"><button id="theme-toggle" type="button" class="quiet icon-control" aria-label="Switch to light mode" title="Switch to light mode"><svg class="glyph" aria-hidden="true"><use href="/glyphs.svg#sun"></use></svg></button><button id="admin-control" class="admin-control" type="button"><svg class="glyph" aria-hidden="true"><use href="/glyphs.svg#lock"></use></svg><span id="admin-label" class="sr-only">Not joined</span></button></div><button id="pending-edits" class="quiet" type="button" hidden>Unfinished changes</button></div>
 </header>
 <div id="admin-toast" class="lock-toast" hidden><span role="status"></span> <button type="button" class="quiet" id="toast-unlock">Unlock</button></div>
 <main id="main-content" tabindex="-1"><div class="page-heading"><div><h1 id="page-title" tabindex="-1">Overview</h1><p id="page-description" class="muted"></p></div><p id="status" role="status">Opening local session…</p></div>
 <nav id="page-tabs" class="page-tabs" aria-label="Page views"></nav><div id="workspace" hidden>
-<section data-page="overview" class="page " hidden><div class="overview-grid"><div><section class="panel resource-chart"><div class="panel-heading"><h2>Local resources</h2><span id="chart-freshness" class="muted">Waiting for observations</span></div><div id="resource-metrics" class="metric-grid"></div><label id="chart-device-label" class="compact" hidden>GPU memory device<select id="chart-device"></select></label><svg id="resource-chart" viewBox="0 0 800 220" role="img" aria-labelledby="chart-title chart-description"><title id="chart-title">Local resource usage over the last ten minutes</title><desc id="chart-description">No observations yet.</desc></svg><p id="chart-summary" class="muted">History starts when this view opens.</p><p id="chart-limitation" class="muted"></p></section><section class="panel"><div class="panel-heading"><h2>Recent work</h2><a href="#/activity/live" class="icon-control" aria-label="View activity" title="View activity"><svg class="glyph" aria-hidden="true"><use href="/glyphs.svg#chevron"></use></svg></a></div><ul id="overview-activity" class="work-list"><li>No recent work.</li></ul></section></div><aside>
+<section data-page="overview" class="page " hidden><div class="overview-grid"><div><section class="panel resource-chart"><div class="panel-heading"><h2>Local resources</h2><span id="chart-freshness" class="muted">Waiting for observations</span></div><div id="resource-metrics" class="metric-grid"></div><label id="chart-device-label" class="compact" hidden>GPU memory device<select id="chart-device"></select></label><svg id="resource-chart" viewBox="0 0 800 220" role="img" aria-labelledby="chart-title chart-description"><title id="chart-title">Local resource usage over the last ten minutes</title><desc id="chart-description">No observations yet.</desc></svg><p id="chart-summary" class="muted">History starts when this view opens.</p><p id="chart-limitation" class="muted"></p></section><section class="panel"><div class="panel-heading"><h2>Recent work</h2><a href="#/activity" class="icon-control" aria-label="View activity" title="View activity"><svg class="glyph" aria-hidden="true"><use href="/glyphs.svg#chevron"></use></svg></a></div><ul id="overview-activity" class="work-list"><li>No recent work.</li></ul></section></div><aside>
 <section class="panel computer-panel">
   <div class="panel-heading"><h2>This computer</h2><span class="contribution-current" role="img" aria-label="Contribution setting up to date" title="Contribution setting up to date"><svg class="glyph" aria-hidden="true"><use href="/glyphs.svg#check"></use></svg></span></div>
   <p id="resource-state" class="state-line">Checking contribution…</p>
@@ -111,8 +111,12 @@
 
         </form><p id="alias-feedback" class="field-status" role="status"></p></section></section>
 <section data-page="serving/measurements" class="page " hidden><section class="panel"><h2 id="measurement-title">Benchmark measurements</h2><p id="resource-benchmark" class="muted"></p><div class="actions"><button id="resource-benchmark-missing" type="button" class="secondary" disabled title="Force benchmarks for models without a valid sample on this host. Active local work will be interrupted.">Benchmark missing on this computer</button><span class="muted">Interrupts active local work.</span></div><p id="resource-missing-feedback" class="field-status" role="status"></p><div id="measurements-home"><div id="measurement-detail"><p id="measure-feedback" class="field-status" role="status"></p><p id="resource-profile" class="muted"></p><ul id="resource-passes" class="work-list"></ul><div class="actions" id="measurement-controls"><span class="muted">Forcing a benchmark interrupts active local work.</span><button id="resource-retry" type="button" class="secondary">Force benchmark</button></div></div></div><a href="#/serving">Back to Serving</a></section></section>
-<section data-page="activity/live" class="page " hidden><section class="panel"><div class="panel-heading"><h2>Live activity</h2><p id="requests-status" role="status" class="muted"></p></div><p id="requests-resources" class="muted"></p><div class="activity-columns"><div><h3>Received here</h3><ul id="ingress-activity" class="work-list"></ul></div><div><h3>Serving here</h3><ul id="serving-activity" class="work-list"></ul></div></div></section></section>
-<section data-page="activity/history" class="page " hidden><section class="panel"><form id="logs-query">
+<section data-page="activity" class="page" hidden><div class="panel request-feed">
+        <div class="request-band live-band"><h2>Live requests</h2><span id="requests-status" role="status" class="muted"></span></div>
+        <div class="request-head request-grid" aria-hidden="true"></div>
+        <div id="active-requests" class="active-requests" role="region" aria-label="Live requests"></div>
+        <div class="request-band"><h2>History <small id="history-day"></small></h2><button class="quiet" type="button" data-reveal="logs-query" aria-controls="logs-query" aria-expanded="false">Filters and export</button></div>
+        <form id="logs-query" hidden>
           <fieldset>
             <legend>View a day</legend>
             <div class="inputs">
@@ -126,21 +130,18 @@
               <button id="logs-export" type="button" class="quiet icon-control" aria-label="Download day" title="Download day"><svg class="glyph" aria-hidden="true"><use href="/glyphs.svg#download"></use></svg></button>
             </div>
           </fieldset>
-        </form><p id="logs-feedback" class="field-status" role="status"></p><p id="logs-count"></p>
-        <div class="log-table" tabindex="0" role="region" aria-label="Request and operation details">
-          <table>
-            <thead><tr><th scope="col">Time</th><th scope="col">Work</th><th scope="col">Destination and outcome</th><th scope="col">Timing</th></tr></thead>
-            <tbody id="logs-entries"></tbody>
-          </table>
-        </div>
-        <div class="pagination"><span id="logs-page" class="muted"></span><button id="logs-previous" class="quiet" type="button">Previous</button><button id="logs-next" class="quiet" type="button">Next</button></div><button type="button" class="quiet" data-reveal="log-diagnostics" aria-expanded="false" aria-controls="log-diagnostics">Usage and coverage</button><div id="log-diagnostics" hidden><p id="logs-coverage-note" class="muted"></p>
+        </form><p id="logs-feedback" class="field-status" role="status"></p>
+        <div class="request-head request-grid" aria-hidden="true"></div>
+        <div id="request-history" role="region" aria-label="Request history" tabindex="0"></div>
+        <div class="request-tools"><span id="history-count" class="muted"></span><button type="button" class="quiet" data-reveal="log-diagnostics" aria-expanded="false" aria-controls="log-diagnostics">Usage and coverage</button></div><div id="log-diagnostics" hidden><p id="logs-count"></p><p id="logs-coverage-note" class="muted"></p>
         <ul id="logs-coverage" class="activity-list"></ul>
         <p id="logs-storage" class="muted"></p>
         <div class="inputs">
           <div><h3>Usage by key name</h3><ul id="logs-keys" class="activity-list"></ul></div>
           <div><h3>Usage by client address</h3><ul id="logs-sources" class="activity-list"></ul></div>
         </div>
-        </div></section></section>
+        <h3>Benchmark and operational events</h3><div class="log-table"><table><thead><tr><th>Time</th><th>Work</th><th>Outcome</th><th>Timing</th></tr></thead><tbody id="logs-entries"></tbody></table></div>
+        </div></div></section>
 <div class="settings-layout" data-group-page="network/nodes" hidden>
 <section data-page="network/nodes" class="page " hidden><section class="panel">
   <div class="panel-heading network-computers-heading">

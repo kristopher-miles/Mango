@@ -18,8 +18,8 @@ internal sealed partial class PeerNetwork
     public void MapLocalLogs(RouteGroupBuilder local)
     {
         var routes = local.MapGroup("/logs");
-        routes.MapGet("", (DateOnly? day, string? key, string? source, HttpContext context) =>
-            PeerRoutes.HandleAsync(context, token => ReadLogViewAsync(context.Request, day, key, source, token)));
+        routes.MapGet("", (DateOnly? day, string? key, string? source, int? limit, HttpContext context) =>
+            PeerRoutes.HandleAsync(context, token => ReadLogViewAsync(context.Request, day, key, source, Math.Clamp(limit ?? 80, 1, 10000), token)));
         routes.MapPut("/settings", (LogSettingsUpdate update, HttpContext context) =>
             PeerRoutes.HandleAsync(context, token => SetLogPolicyAsync(context.Request, update, token)));
         routes.MapPost("/clear", (LogClearRequest input, HttpContext context) =>

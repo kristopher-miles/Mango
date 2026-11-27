@@ -18,9 +18,17 @@ internal static partial class PeerChecks
     private const string LogZone = "America/Los_Angeles";
     private const string TextBody = "{ \"model\": \"fixture-chat\", \"stream\": true, \"messages\": [ {\"role\":\"user\",\"content\":\"log fixture\"} ] }\n";
     private const string TextReply = "data: {\"choices\":[{\"delta\":{\"content\":\"fixture\"}}]}\n\n" +
-        "data: {\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":3},\"timings\":{\"predicted_per_second\":19}}\n\n" +
+        "data: {\"usage\":{\"prompt_tokens\":12,\"prompt_tokens_details\":{\"cached_tokens\":8},\"completion_tokens\":3},\"timings\":{\"predicted_per_second\":19}}\n\n" +
         "data: [DONE]\n\n";
     private const string SpeechBody = "{ \"model\":\"fixture-speech\", \"voice\":\"fixture\", \"input\":\"hello\" }";
+
+    public static async Task RunActivityAsync(string root)
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+        var status = await Tailnet.ReadAsync(timeout.Token);
+        var address = status.LocalAddresses.FirstOrDefault() ?? throw new InvalidOperationException("Peer activity checks require a local Tailscale address.");
+        await TestPhaseSevenAsync(root, status, address);
+    }
 
     private static async Task TestPhaseSevenAsync(string root, TailnetStatus status, IPAddress address)
     {
@@ -116,6 +124,10 @@ internal static partial class PeerChecks
                         record.Routes is [{ Node: var destination }] && destination == node, "ingress log identity and destination");
                     Check((record.Input is not null) == (mode >= RequestLogMode.Verbose) &&
                         (record.Output is not null) == (mode == RequestLogMode.Everything), $"payload availability follows {mode}");
+                    if (input.Kind == InferenceOperation.Chat)
+                        Check(record.Usage is { PromptTokens: 12, CachedTokens: 8, OutputTokens: 3, TokensPerSecond: 19,
+                            FirstTokenMilliseconds: >= 0 } && record.ElapsedMilliseconds >= record.Usage.FirstTokenMilliseconds,
+                            "remote ingress retains end-to-end latency and provider usage without network log collection");
                     if (mode >= RequestLogMode.Verbose)
                         await CheckPayload(first.Network.Logs, record, false, input.Content);
                     if (mode == RequestLogMode.Everything)
@@ -137,7 +149,7 @@ internal static partial class PeerChecks
                 item.Kind == LogKind.Attempt && item.Request == capturedChat!.Request));
             var executed = attempts.Single(item => item.Kind == LogKind.Attempt && item.Request == capturedChat!.Request);
             Check(executed.Ingress == here && executed.Input is null && executed.Output is null && executed.OutputTokens == 3 &&
-                executed.PromptTokens == 12 && executed.TokensPerSecond == 19 && executed.FirstTokenMilliseconds is not null,
+                executed.PromptTokens == 12 && executed.Usage?.CachedTokens == 8 && executed.TokensPerSecond == 19 && executed.FirstTokenMilliseconds is not null,
                 "serving metadata links to ingress and records measured token units without a second payload copy");
             var wave = attempts.LastOrDefault(item => item.Task == InferenceOperation.Speech);
             Check(wave?.AudioSeconds > 0, "binary speech duration uses WAV bytes");
@@ -184,6 +196,12 @@ internal static partial class PeerChecks
                 "repeated offline collection exposes useful partial totals without duplicate originals");
             owner = await Host.StartAsync(ownerPath, status, ownerPort);
             var late = await CollectLogDay(http, first);
+            var latest = await Local(http, first, $"logs?day={LogDate():yyyy-MM-dd}&limit=1");
+            var latestRows = latest.GetProperty("entries").EnumerateArray()
+                .Where(e => e.GetProperty("kind").GetString() is "request" or "attempt").ToArray();
+            Check(latest.GetProperty("moreRequests").GetBoolean() && latestRows.Select(e => e.GetProperty("request").GetGuid()).Distinct().Count() == 1 &&
+                latestRows.Any(e => e.GetProperty("kind").GetString() == "attempt") && latestRows.Any(e => e.GetProperty("kind").GetString() == "request"),
+                "history pages include the whole newest request and its serving record");
             Check(late.GetProperty("requests").GetInt32() == originalRequests + 2 &&
                 late.GetProperty("collection").GetProperty("sources").EnumerateArray().Any(item =>
                     item.GetProperty("node").GetGuid() == node && item.GetProperty("coverage").GetString() == "received"),

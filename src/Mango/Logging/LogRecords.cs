@@ -45,7 +45,7 @@ internal sealed record LogEntry(Guid Id, LogKind Kind, DateTimeOffset At, Guid N
     double? ElapsedMilliseconds = null,
     double? TokensPerSecond = null, int? Items = null, long? RequestedPixels = null, double? AudioSeconds = null,
     LogRoute[]? Routes = null, LogPayload? Input = null, LogPayload? Output = null,
-    DateTimeOffset? CompletedAt = null);
+    DateTimeOffset? CompletedAt = null, RequestUsage? Usage = null, DateTimeOffset? RequestArrived = null);
 
 internal sealed record LogWindow(DateOnly Day, DateTimeOffset Start, DateTimeOffset End)
 {

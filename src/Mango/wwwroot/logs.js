@@ -7,8 +7,9 @@ const logFeedback = document.querySelector("#logs-feedback");
 const logCollect = document.querySelector("#logs-collect");
 const logExport = document.querySelector("#logs-export");
 let logViewVersion = 0;
-let logPolicyWriter, logPage = 0, logEntries = [], logFilterTimer;
+let logPolicyWriter, logFilterTimer;
 let logCollectionTimer;
+let followToday = true;
 
 const coverageLabels = { received: "Received", unavailable: "Unavailable", off: "Request logging off",
   error: "Collection error", beyondRetention: "Beyond retention" };
@@ -81,8 +82,8 @@ function logRender(view) {
       source.dropped ? "Incomplete capture" : "", source.fromCache ? "Cached records available" : ""].filter(Boolean).join(" · ")));
   logList("#logs-keys", view.byKey, logUsage);
   logList("#logs-sources", view.bySource, logUsage);
-  logEntries = view.entries;
-  renderLogPage();
+  updateActivityHistory(view, logQuery.elements.key.value, logQuery.elements.source.value);
+  logList("#logs-entries", view.entries.filter(entry => entry.kind === "benchmark" || entry.kind === "operation").slice(0, 80), logDetail);
   document.querySelector("#logs-count").textContent =
     `${logCount(view.requests, "client request")} · ${logCount(view.attempts, "serving attempt")}.${view.capped ? " View limited to 10,000 records. The download includes all available records." : ""}`;
   logCollect.disabled = view.collection.running;
@@ -99,7 +100,9 @@ function logError(error) {
 async function loadLogs() {
   const version = ++logViewVersion;
   const values = new FormData(logQuery);
+  if (followToday) values.delete("day");
   const query = new URLSearchParams([...values].filter(([, value]) => value));
+  query.set("limit", activityLimit);
   const view = await api(`logs?${query}`);
   if (version !== logViewVersion) return;
   fillInput(logQuery.elements.day, view.day);
@@ -113,20 +116,14 @@ logQuery.addEventListener("submit", event => {
   loadLogs().catch(logError);
 });
 
-function renderLogPage() {
-  logPage = Math.min(logPage, Math.max(0, Math.ceil(logEntries.length / 50) - 1));
-  logList("#logs-entries", logEntries.slice(logPage * 50, logPage * 50 + 50), logDetail);
-  document.querySelector("#logs-page").textContent = logEntries.length ? `${logPage * 50 + 1}–${Math.min(logEntries.length, logPage * 50 + 50)} of ${logEntries.length}` : "No records match these filters.";
-  document.querySelector("#logs-previous").disabled = logPage === 0;
-  document.querySelector("#logs-next").disabled = (logPage + 1) * 50 >= logEntries.length;
-}
-document.querySelector("#logs-previous").addEventListener("click", () => { logPage--; renderLogPage(); });
-document.querySelector("#logs-next").addEventListener("click", () => { logPage++; renderLogPage(); });
 logQuery.addEventListener("input", event => {
   if (event.isComposing) return;
   logViewVersion++;
+  if (event.target.name === "day") followToday = !event.target.value;
+  activityLimit = 80;
+  document.querySelector("#request-history").scrollTop = 0;
   clearTimeout(logFilterTimer);
-  logFilterTimer = setTimeout(() => { logPage = 0; loadLogs().catch(logError); }, 350);
+  logFilterTimer = setTimeout(() => loadLogs().catch(logError), 350);
 });
 
 logClear.addEventListener("submit", event => {

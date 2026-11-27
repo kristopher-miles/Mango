@@ -265,13 +265,21 @@ internal sealed partial class PeerNetwork
             target.ContentType = response.Content.Headers.ContentType?.ToString() ?? "application/octet-stream";
             target.Headers.CacheControl = "no-store";
             var output = new InferenceOutput(context, payload.Operation, payload.Alias);
+            var mediaType = response.Content.Headers.ContentType?.MediaType;
+            var metrics = payload.MeasureOutput(System.Diagnostics.Stopwatch.GetTimestamp(), mediaType);
+            var events = payload.Operation == InferenceOperation.Chat && mediaType == "text/event-stream"
+                ? new InferenceRequest.InferenceEvents(metrics, interpretErrors: false) : null;
             await using var stream = await response.Content.ReadAsStreamAsync(cancellation);
             var buffer = new byte[16 * 1024];
             int count;
             while ((count = await stream.ReadAsync(buffer, cancellation)) != 0)
             {
+                metrics.Add(buffer.AsSpan(0, count));
+                events?.Read(buffer.AsSpan(0, count));
                 await output.WriteAsync(buffer.AsMemory(0, count), cancellation);
             }
+            events?.FinishLine();
+            metrics.Complete();
             await output.CompleteAsync(cancellation);
             return new(AttemptState.Completed, 200, Epoch: Header(response, EpochHeader));
         }

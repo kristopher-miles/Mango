@@ -6,8 +6,7 @@
     serving: ["Serving", "Configure a provider. Make its models ready."],
     "serving/aliases": ["Alias ratings", "Set clearly scoped ratings across matching deployments."],
     "serving/measurements": ["Measurements", "Observed benchmark results for the selected model."],
-    "activity/live": ["Activity", "See where work is running and what is waiting."],
-    "activity/history": ["History", "Explore retained work and network coverage."],
+    activity: ["Activity", "Live requests and retained history."],
     "network/nodes": ["Network", "Your computers and their last observed state."],
     "network/queue": ["Queue", "How long a request may wait for capacity."],
     "network/keys": ["Access", "Client inference keys and this computer’s public endpoint."],
@@ -25,13 +24,12 @@
   };
   const tabs = {
     serving: [["serving", "Models and readiness"], ["serving/aliases", "Aliases"], ["serving/measurements", "Measurements"]],
-    activity: [["activity/live", "Live"], ["activity/history", "History"]],
     network: [["network/nodes", "Computers and queue"], ["network/keys", "Access"], ["network/recovery", "Recovery"], ["network/setup", "Setup"]],
     system: [["system/startup", "Host settings"], ["system/logging", "Logging and storage"]]
   };
   const aliases = { "private-network": "network/nodes", providers: "serving", models: "serving",
-    "live-requests": "activity/live", "public-inference": "network/public", logging: "activity/history", settings: "protection/activity",
-    activity: "activity/live", network: "network/nodes", protection: "protection/activity", system: "system/startup" };
+    "live-requests": "activity", "public-inference": "network/public", logging: "activity", settings: "protection/activity",
+    "activity/live": "activity", "activity/history": "activity", network: "network/nodes", protection: "protection/activity", system: "system/startup" };
 
   function parseRoute(hash) {
     const [raw, query = ""] = hash.replace(/^#\/?/, "").split("?");

@@ -1,9 +1,6 @@
 "use strict";
 
 const requestsStatus = document.querySelector("#requests-status");
-const requestsResources = document.querySelector("#requests-resources");
-const ingressActivity = document.querySelector("#ingress-activity");
-const servingActivity = document.querySelector("#serving-activity");
 const publicForm = document.querySelector("#public-form");
 const publicState = document.querySelector("#public-state");
 const publicCheck = document.querySelector("#public-check");
@@ -39,20 +36,10 @@ copyInferenceUrl.addEventListener("click", async event => {
 });
 copyInferenceUrl.addEventListener("dblclick", () => navigate("network/keys"));
 
-const attemptStates = { waiting: "Queued", running: "Running", rejected: "Rejected", stopped: "Stopped",
-  failed: "Failed", uncertain: "Stop unconfirmed", completed: "Completed" };
-
 function requestSource(source) {
   if (!source?.address) return "Source unknown";
   const prefix = { proxyObserved: "Proxy observed", trustedProxy: "Client via trusted proxy", direct: "Direct client" }[source.provenance] || "Observed";
   return `${prefix} ${source.address}`;
-}
-
-function requestDurations(record) {
-  const time = [];
-  if (record.queueMilliseconds != null) time.push(`Wait ${(record.queueMilliseconds / 1000).toFixed(2)} s`);
-  if (record.loadMilliseconds != null) time.push(`Load ${(record.loadMilliseconds / 1000).toFixed(2)} s`);
-  return time.join(" · ");
 }
 
 function renderRequests(view) {
@@ -64,36 +51,7 @@ function renderRequests(view) {
     row.append(element("strong", request.alias), element("p", `${operationNames[request.operation]} · ${request.finished ? "Finished" : request.attempts.at(-1)?.state || "Finding capacity"}${request.reason ? ` · ${request.reason}` : ""}`, "muted"));
     return row;
   }) : [element("li", "No recent work.", "muted")]));
-  const total = `${view.waiting} waiting · ${view.running} running on this host`;
-  if (requestsStatus.textContent !== total) requestsStatus.textContent = total;
-  const resource = view.localResources;
-  requestsResources.textContent = resource ? [stateNames[resource.state], resource.reason].filter(Boolean).join(" · ") : "";
-  const received = [...view.ingress, ...[...view.recent].reverse()].slice(0, 50);
-  ingressActivity.replaceChildren(...(received.length ? received.map(request => {
-    const row = element("li");
-    row.append(element("strong", `${request.alias} · ${operationNames[request.operation]} · ${request.priority} priority`));
-    row.append(element("p", [request.keyName, requestSource(request.source), request.id].filter(Boolean).join(" · "), "muted"));
-    if (request.reason) row.append(element("p", request.reason));
-    if (!request.attempts.length && !request.finished) row.append(element("p", "Finding an eligible placement."));
-    if (request.attempts.length) {
-      const attempts = element("ol", undefined, "request-attempts");
-      request.attempts.forEach((attempt, index) => {
-        const node = memberNames.get(attempt.node) || (attempt.node === "00000000-0000-0000-0000-000000000000" ? "This host" : attempt.node);
-        const state = attempt.state === "waiting" ? "Waiting for serving admission or output" : attemptStates[attempt.state];
-        attempts.append(element("li", [index ? "Rerouted" : "Selected", node, state, attempt.reason,
-          requestDurations(attempt)].filter(Boolean).join(" · ")));
-      });
-      row.append(attempts);
-    }
-    return row;
-  }) : [element("li", "No recent requests received here.")]));
-  servingActivity.replaceChildren(...(view.serving.length ? view.serving.slice(0, 50).map(attempt => {
-    const row = element("li");
-    row.append(element("strong", `${attempt.alias} · ${attempt.loading ? "Loading" : attemptStates[attempt.state]} · ${attempt.priority} priority`));
-    row.append(element("p", [attempt.reason, requestDurations(attempt)].filter(Boolean).join(" · ")));
-    row.append(element("p", `${requestSource(attempt.source)} · ${attempt.request}`, "muted"));
-    return row;
-  }) : [element("li", "No recent attempts served here.")]));
+  updateRequestActivity(view);
 }
 
 async function watchDashboard() {
@@ -123,7 +81,10 @@ async function watchDashboard() {
       }
     }
   } catch (error) {
-    if (!controller.signal.aborted) requestsStatus.textContent = error.message;
+    if (!controller.signal.aborted) {
+      activityFeedError = error.message;
+      requestsStatus.textContent = activityFeedError;
+    }
   } finally {
     if (dashboard === controller) {
       dashboard = null;

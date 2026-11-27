@@ -43,6 +43,13 @@ try
         await SchedulingChecks.RunAsync();
         return;
     }
+    if (args is ["--activity-checks"])
+    {
+        await ProviderChecks.RunAsync();
+        await PeerChecks.RunActivityAsync(directory);
+        Console.WriteLine("Provider, peer activity and retained history checks passed.");
+        return;
+    }
     if (args is ["--provider-resource-checks"])
     {
         await ProviderChecks.RunAsync();

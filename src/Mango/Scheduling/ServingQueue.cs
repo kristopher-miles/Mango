@@ -234,7 +234,7 @@ internal sealed class ServingQueue : IAsyncDisposable
         {
             var cutoff = clock.GetUtcNow().AddMinutes(-5);
             return entries.Values.Where(entry => entry.Work is not null && entry.ActivityGeneration == activityGeneration)
-                .OrderBy(entry => entry.Sequence).Take(48).Select(entry => Describe(entry, entry.Work!, null))
+                .OrderBy(entry => entry.Sequence).Select(entry => Describe(entry, entry.Work!, null))
                 .Concat(recentActivity.Reverse().Where(item => item.Finished >= cutoff).Take(32)).ToArray();
         }
     }
@@ -254,8 +254,8 @@ internal sealed class ServingQueue : IAsyncDisposable
             work.Access.Priority, work.Ticket.Source ?? InferenceSource.Of(work.Context), work.Ticket.Arrived, finished,
             entry.State.State, entry.State.Reason ?? (entry.State.State == AttemptState.Waiting ? entry.WaitingReason : null),
             entry.QueueMilliseconds ?? clock.GetElapsedTime(entry.QueuedAt).TotalMilliseconds,
-            entry.LoadMilliseconds ?? (entry.LoadingAt is { } loadingAt ? clock.GetElapsedTime(loadingAt).TotalMilliseconds : null),
-            entry.LoadingAt is not null);
+            entry.LoadingAt is { } loadingAt ? (entry.LoadMilliseconds ?? 0) + clock.GetElapsedTime(loadingAt).TotalMilliseconds : entry.LoadMilliseconds,
+            entry.LoadingAt is not null, work.Payload.Usage, work.Access.KeyName);
 
     private void WaitingReason(Entry entry, string? reason)
     {

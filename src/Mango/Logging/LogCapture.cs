@@ -124,7 +124,8 @@ internal sealed class LogCapture(LogStore store, LogConfiguration configuration,
         store.Queue(configuration, entry with
         {
             Status = aborted && !context.Response.HasStarted ? null : context.Response.StatusCode,
-            Outcome = entry.Outcome ?? (aborted ? "cancelled" : context.Response.StatusCode < 400 ? "completed" : "rejected"),
+            Outcome = aborted ? "cancelled" : context.Response.StatusCode >= 400 && entry.Outcome == "completed" ? "failed" :
+                entry.Outcome ?? (context.Response.StatusCode < 400 ? "completed" : "rejected"),
             Reason = Failure ?? entry.Reason,
             ElapsedMilliseconds = Clock.GetElapsedTime(Started).TotalMilliseconds,
             FirstOutputMilliseconds = FirstOutputMilliseconds,

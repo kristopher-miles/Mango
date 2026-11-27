@@ -18,8 +18,33 @@ internal static class ProviderChecks
         """;
     private const string Stream = "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\ndata: [DONE]\n\n";
 
+    private static void CheckActivityUsage()
+    {
+        using var request = new InferenceRequest(InferenceOperation.Chat, "fixture", null, null);
+        request.TrackUsage(() => 250, () => { });
+        var sent = System.Diagnostics.Stopwatch.GetTimestamp();
+        var metrics = request.MeasureOutput(sent, "application/json");
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(new { choices = new[] { new { content = new string('x', 100000) + " ] \" [" } },
+            usage = new { prompt_tokens = 140, completion_tokens = 32, prompt_tokens_details = new { cached_tokens = 100 } } });
+        for (var i = 0; i < bytes.Length; i += 1023)
+            metrics.Add(bytes.AsSpan(i, Math.Min(1023, bytes.Length - i)));
+        metrics.Complete();
+        Check(request.Usage is { PromptTokens: 140, OutputTokens: 32, CachedTokens: 100, FirstTokenMilliseconds: null },
+            "large JSON choices crossing read boundaries preserve input, output and cache metadata");
+
+        var stream = request.MeasureOutput(sent, "text/event-stream");
+        var events = new InferenceRequest.InferenceEvents(stream);
+        events.Read("data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n"u8);
+        Check(request.Usage.FirstTokenMilliseconds is null, "stream headers and role announcements are not a token");
+        events.Read("data: {\"choices\":[{\"delta\":{\"content\":\"text\"}}]}\ndata: {\"timings\":{\"prompt_n\":32,\"cache_n\":8,\"predicted_n\":2}}\n"u8);
+        stream.Complete();
+        Check(request.Usage is { PromptTokens: 40, CachedTokens: 8, OutputTokens: 2, FirstTokenMilliseconds: 250, TokensPerSecond: null },
+            "live usage includes cached input and leaves decode rate unavailable for buffered output");
+    }
+
     public static async Task RunAsync()
     {
+        CheckActivityUsage();
         var observed = new ObservedDeployment("fixture", "fixture", null, null, ["text", "image"], ["text"],
             [InferenceOperation.Chat], 262144, null, true, true, null, 1, null, "fixture", ClientTools: true);
         var catalogue = JsonSerializer.SerializeToElement(PeerNetwork.DescribeModel("fixture", [observed]));

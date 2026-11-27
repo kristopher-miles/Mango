@@ -20,6 +20,9 @@ internal sealed record ProviderExecution(string DeploymentId, string InstanceFin
     int? ContextTokens = null, int? OutputTokens = null, double? TokensPerSecond = null, long? OutputBytes = null,
     double? AudioSeconds = null);
 
+internal sealed record RequestUsage(int? PromptTokens = null, int? OutputTokens = null, int? CachedTokens = null,
+    double? TokensPerSecond = null, bool EstimatedRate = false, double? FirstTokenMilliseconds = null);
+
 internal sealed record InferenceShape(string Alias, InferenceOperation Operation, string[] Inputs, bool Tools,
     bool Structured, long PromptUnits, int OutputUnits, int MediaItems, int Items, long WorkUnits,
     int? Dimensions, string? Encoding, bool CanCountPrompt = false)
@@ -61,6 +64,20 @@ internal sealed class InferenceRequest(InferenceOperation operation, string alia
     public bool Settled { get; private set; }
     public long Bytes { get; private set; }
     public InferenceShape Shape { get; private set; } = null!;
+    private volatile RequestUsage usage = new();
+    public RequestUsage Usage => usage;
+    private Func<double>? requestAge;
+    private Action? usageChanged;
+
+    public void TrackUsage(Func<double> ageMilliseconds, Action changed)
+    {
+        requestAge ??= ageMilliseconds;
+        usageChanged ??= changed;
+    }
+
+    internal OutputMetrics MeasureOutput(long sent, string? mediaType) => new(operation, sent, mediaType, this);
+
+    public void ResetAttemptUsage() => usage = new();
 
     public string[] Prefixes()
     {
@@ -302,15 +319,14 @@ internal sealed class InferenceRequest(InferenceOperation operation, string alia
         var handle = instance.Id != deployment.Model.NativeId && ProviderIdentity.IsInstanceUuid(instance.Id) ? instance.Id : null;
         var output = new InferenceOutput(context, operation, Alias == handle ? deployment.Model.NativeId : Alias, handle);
         TimeSpan? firstOutput = null;
-        var statistics = context.Items.ContainsKey(typeof(LogConfiguration)) ? new OutputMetrics(operation, send,
-            response.Content.Headers.ContentType?.MediaType) : null;
+        var statistics = MeasureOutput(send, response.Content.Headers.ContentType?.MediaType);
         if (embeddingEncoding is not null)
         {
             var bytes = await ProviderAdapter.ReadBoundedAsync(response.Content, ProviderLimits.MaxRequestBytes, cancellation);
             Settled = true;
             CheckEmbeddingResult(bytes, embeddingEncoding, embeddingCount);
             firstOutput = Stopwatch.GetElapsedTime(send);
-            statistics?.Add(bytes);
+            statistics.Add(bytes);
             for (var offset = 0; offset < bytes.Length; offset += 16 * 1024)
                 await output.WriteAsync(bytes.AsMemory(offset, Math.Min(16 * 1024, bytes.Length - offset)), cancellation);
         }
@@ -323,7 +339,7 @@ internal sealed class InferenceRequest(InferenceOperation operation, string alia
             while ((count = await stream.ReadAsync(buffer, cancellation)) != 0)
             {
                 firstOutput ??= Stopwatch.GetElapsedTime(send);
-                statistics?.Add(buffer.AsSpan(0, count));
+                statistics.Add(buffer.AsSpan(0, count));
                 events?.Read(buffer.AsSpan(0, count));
                 await output.WriteAsync(buffer.AsMemory(0, count), cancellation);
             }
@@ -333,10 +349,9 @@ internal sealed class InferenceRequest(InferenceOperation operation, string alia
                 throw new ProviderFailure(502, "The provider stream ended before reporting completion.");
         }
         await output.CompleteAsync(cancellation);
-        var providerElapsed = Stopwatch.GetElapsedTime(send);
-        statistics?.Complete(providerElapsed);
+        statistics.Complete();
         double? inputAudio = null;
-        if (statistics is not null && operation == InferenceOperation.Transcription)
+        if (operation == InferenceOperation.Transcription)
         {
             try
             {
@@ -348,9 +363,9 @@ internal sealed class InferenceRequest(InferenceOperation operation, string alia
             catch (Exception error) when (error is IOException or OperationCanceledException) { }
         }
         return new(deployment.Id, instance.Fingerprint, operation, deployment.Options.Revision,
-            statistics?.PromptTokens ?? promptTokens, statistics?.PromptTokens is not null ? "provider usage" : promptCountSource,
-            headers, firstOutput, Stopwatch.GetElapsedTime(started), Stopwatch.GetElapsedTime(started, send), statistics?.FirstToken,
-            deployment.Context, statistics?.OutputTokens, statistics?.Rate, statistics?.Bytes, inputAudio ?? statistics?.AudioSeconds);
+            statistics.PromptTokens ?? promptTokens, statistics.PromptTokens is not null ? "provider usage" : promptCountSource,
+            headers, firstOutput, Stopwatch.GetElapsedTime(started), Stopwatch.GetElapsedTime(started, send), statistics.FirstToken,
+            deployment.Context, statistics.OutputTokens, statistics.Rate, statistics.Bytes, inputAudio ?? statistics.AudioSeconds);
     }
 
     internal static async Task WriteOutputAsync(HttpContext context, ReadOnlyMemory<byte> bytes, CancellationToken cancellation)
@@ -369,14 +384,16 @@ internal sealed class InferenceRequest(InferenceOperation operation, string alia
         }
     }
 
-    private sealed class InferenceEvents(OutputMetrics? statistics, bool interpretErrors = true)
+    internal sealed class InferenceEvents(OutputMetrics statistics, bool interpretErrors = true)
     {
-        private readonly byte[] line = new byte[statistics is null ? 4096 : 16 * 1024];
+        private readonly byte[] line = new byte[16 * 1024];
         private int length;
+        private long observed;
         public bool Completed { get; private set; }
 
         public void Read(ReadOnlySpan<byte> bytes)
         {
+            observed = Stopwatch.GetTimestamp();
             foreach (var value in bytes)
             {
                 if (value == (byte)'\n')
@@ -397,15 +414,14 @@ internal sealed class InferenceRequest(InferenceOperation operation, string alia
             if (!data.IsEmpty && data[^1] == (byte)'\r')
                 data = data[..^1];
             if (data.SequenceEqual("[DONE]"u8))
+            {
                 Completed = true;
-            var hasError = data.IndexOf("\"error\""u8) >= 0;
-            if (!hasError && (statistics is null || statistics.FirstToken is not null &&
-                data.IndexOf("\"usage\""u8) < 0 && data.IndexOf("\"timings\""u8) < 0))
                 return;
+            }
             try
             {
                 using var document = JsonDocument.Parse(line.AsMemory(start, data.Length));
-                statistics?.Observe(document.RootElement, streaming: true);
+                statistics.Observe(document.RootElement, observed);
                 var error = document.RootElement.Get("error");
                 if (interpretErrors && error.ValueKind != JsonValueKind.Undefined && ProviderAdapter.IsAllocationFailure(error.GetRawText()))
                     throw new ProviderFailure(503, "The provider could not allocate model memory.", allocationFailure: true);
@@ -414,54 +430,103 @@ internal sealed class InferenceRequest(InferenceOperation operation, string alia
         }
     }
 
-    private sealed class OutputMetrics(InferenceOperation operation, long sent, string? mediaType)
+    internal sealed class OutputMetrics(InferenceOperation operation, long sent, string? mediaType, InferenceRequest request)
     {
         private readonly byte[]? sample = mediaType == "application/json" &&
             operation is InferenceOperation.Chat or InferenceOperation.Embeddings or InferenceOperation.SystemOne ? new byte[64 * 1024] :
             operation == InferenceOperation.Speech ? new byte[4096] : null;
         private int length;
+        private bool quoted, escaped, overflow;
+        private int arrayDepth;
         public long Bytes { get; private set; }
         public int? PromptTokens { get; private set; }
         public int? OutputTokens { get; private set; }
         public TimeSpan? FirstToken { get; private set; }
         public double? Rate { get; private set; }
         public double? AudioSeconds { get; private set; }
+        private int? cachedTokens;
+        private TimeSpan? lastToken;
+        private double? firstTokenMilliseconds;
+
+        private void Publish(bool estimated = false)
+        {
+            var previous = request.usage;
+            if (previous.PromptTokens == PromptTokens && previous.OutputTokens == OutputTokens &&
+                previous.CachedTokens == cachedTokens && previous.TokensPerSecond == Rate &&
+                previous.EstimatedRate == estimated && previous.FirstTokenMilliseconds == firstTokenMilliseconds) return;
+            request.usage = new(PromptTokens, OutputTokens, cachedTokens, Rate, estimated, firstTokenMilliseconds);
+            request.usageChanged?.Invoke();
+        }
 
         public void Add(ReadOnlySpan<byte> data)
         {
             Bytes += data.Length;
-            if (sample is null || length == sample.Length)
+            if (sample is null || overflow)
                 return;
+            if (mediaType == "application/json" && operation != InferenceOperation.Speech)
+            {
+                // Usage is object metadata. Skip array contents so long choices and embeddings cannot crowd it out.
+                foreach (var value in data)
+                {
+                    var copy = arrayDepth == 0;
+                    if (quoted)
+                    {
+                        if (escaped) escaped = false;
+                        else if (value == '\\') escaped = true;
+                        else if (value == '"') quoted = false;
+                    }
+                    else if (value == '"') quoted = true;
+                    else if (value == '[') arrayDepth++;
+                    else if (value == ']' && arrayDepth > 0) copy = --arrayDepth == 0;
+                    if (!copy) continue;
+                    if (length == sample.Length) { overflow = true; break; }
+                    sample[length++] = value;
+                }
+                return;
+            }
             var copied = Math.Min(data.Length, sample.Length - length);
             data[..copied].CopyTo(sample.AsSpan(length));
             length += copied;
         }
 
-        public void Observe(JsonElement body, bool streaming)
+        public void Observe(JsonElement body, long? observed = null)
         {
-            (PromptTokens, OutputTokens, _, Rate, _) = BenchmarkProtocol.ReadMetrics(body, (PromptTokens, OutputTokens, null, Rate, null));
-            if (streaming && FirstToken is null && body.Get("choices").Items().Any(choice =>
+            (var prompt, OutputTokens, _, Rate, cachedTokens) = BenchmarkProtocol.ReadMetrics(body, (PromptTokens, OutputTokens, null, Rate, cachedTokens));
+            // llama.cpp reports freshly evaluated input in prompt_n and reused input separately.
+            if (body.Get("usage").Number("prompt_tokens") is >= 0) PromptTokens = prompt;
+            else if (body.Get("timings").Number("prompt_n") is int evaluated && evaluated >= 0 && cachedTokens is int cached)
+                PromptTokens = (long)evaluated + cached <= int.MaxValue ? evaluated + cached : null;
+            if (observed is { } timestamp && body.Get("choices").Items().Any(choice =>
                 choice.Get("delta").Text("content") is { Length: > 0 } ||
                 choice.Get("delta").Text("reasoning_content") is { Length: > 0 } ||
                 choice.Get("delta").Get("tool_calls").Items().Any()))
-                FirstToken = Stopwatch.GetElapsedTime(sent);
+            {
+                lastToken = Stopwatch.GetElapsedTime(sent, timestamp);
+                FirstToken ??= lastToken;
+                firstTokenMilliseconds ??= request.requestAge?.Invoke();
+            }
+            Publish();
         }
 
-        public void Complete(TimeSpan elapsed)
+        public void Complete()
         {
-            if (sample is not null && mediaType == "application/json" && length == Bytes)
+            if (sample is not null && mediaType == "application/json" && !overflow && operation != InferenceOperation.Speech)
             {
                 try
                 {
                     using var document = JsonDocument.Parse(sample.AsMemory(0, length));
-                    Observe(document.RootElement, streaming: false);
+                    Observe(document.RootElement);
                 }
                 catch (JsonException) { }
             }
             else if (sample is not null && operation == InferenceOperation.Speech)
                 AudioSeconds = WavSeconds(sample.AsSpan(0, length), Bytes);
-            if (Rate is null && OutputTokens is > 1 && FirstToken is { } first && elapsed > first)
-                Rate = (OutputTokens - 1) / (elapsed - first).TotalSeconds;
+            if (Rate is null && OutputTokens is > 1 && FirstToken is { } first && lastToken is { } last &&
+                last > first && !BenchmarkProtocol.StreamLooksBuffered(first, last))
+            {
+                Rate = (OutputTokens - 1) / (last - first).TotalSeconds;
+                Publish(estimated: true);
+            }
         }
     }
 

@@ -44,7 +44,7 @@ internal sealed partial class PeerNetwork
     private sealed record RecentService(Guid Origin, AttemptTicket Ticket, InferenceShape Shape, DateTimeOffset At);
     private sealed record IngressActivity(Guid Id, string Alias, InferenceOperation Operation, InferenceSource Source,
         string? KeyName, KeyPriority Priority, DateTimeOffset Arrived, DateTimeOffset Finished, AttemptTrace[] Attempts,
-        bool Output, string? Reason);
+        bool Output, string? Reason, RequestUsage Usage, bool Cancelled);
 
     public int QueueWaitSeconds => Snapshot.Records.Queue?.WaitSeconds ?? QueuePolicy.DefaultWaitSeconds;
 
@@ -123,10 +123,10 @@ internal sealed partial class PeerNetwork
                 QueueWaitSeconds, counts.Waiting, counts.Running, DiscoveryRuns = Volatile.Read(ref discoveryRuns),
                 Submissions = Volatile.Read(ref submissions), StopQueries = Volatile.Read(ref stopQueries),
                 PlacementChecks = Volatile.Read(ref placementChecks), DigestMerges = Volatile.Read(ref digestMerges),
-                Serving = servingActivity, LocalResources = providers.Resources?.Status,
-                Ingress = ingress.Values.Take(48).Select(item => new { item.Id, item.Alias, item.Operation, item.Source,
+                ObservedAt = clock.GetUtcNow(), Serving = servingActivity, LocalResources = providers.Resources?.Status,
+                Ingress = ingress.Values.Select(item => new { item.Id, item.Alias, item.Operation, item.Source,
                     item.Access.KeyId, item.Access.KeyName, item.Access.Priority, item.Arrived, item.QueueUntil, item.OutputStarted,
-                    Attempts = item.Attempts.ToArray() }).ToArray(),
+                    item.Usage, Attempts = item.Attempts.ToArray() }).ToArray(),
                 Recent = recentIngress.Where(item => item.Finished >= cutoff).TakeLast(48).ToArray()
             };
     }
@@ -189,7 +189,8 @@ internal sealed partial class PeerNetwork
         session = session.Length == 0 ? null : ProviderIdentity.Hash(session);
         var prefixes = session is null ? payload.Prefixes() : [];
         var identity = access.KeyId ?? Guid.Empty;
-        var item = new IngressRequest(log?.Id ?? Guid.NewGuid(), arrived, arrived + limit, access, source, payload.Alias, operation);
+        var item = new IngressRequest(log?.Id ?? Guid.NewGuid(), arrived, arrived + limit, access, source, payload.Alias, operation, payload);
+        payload.TrackUsage(() => clock.GetElapsedTime(age).TotalMilliseconds, SignalRequests);
         int generation;
         lock (routing)
         {
@@ -257,6 +258,7 @@ internal sealed partial class PeerNetwork
                     continue;
                 }
                 tried.Add(choice.Node);
+                if (attemptCount > 0) payload.ResetAttemptUsage();
                 SignalRequests();
                 attemptCount++;
                 var elapsed = clock.GetElapsedTime(age);
@@ -354,7 +356,8 @@ internal sealed partial class PeerNetwork
                     if (recentIngress.Count == 64)
                         recentIngress.Dequeue();
                     recentIngress.Enqueue(new(item.Id, item.Alias, item.Operation, item.Source, item.Access.KeyName, item.Access.Priority,
-                        item.Arrived, clock.GetUtcNow(), item.Attempts.ToArray(), item.OutputStarted, item.Reason));
+                        item.Arrived, clock.GetUtcNow(), item.Attempts.ToArray(), item.OutputStarted, item.Reason,
+                        payload.Usage, cancellation.IsCancellationRequested));
                     ArmRoutingExpiry();
                 }
             }
@@ -450,8 +453,7 @@ internal sealed partial class PeerNetwork
         var log = Logs.Configuration;
         var received = clock.GetUtcNow();
         var started = clock.GetTimestamp();
-        if (log.Policy.Mode != RequestLogMode.Off && log.Epoch.Generation == ticket.LogGeneration)
-            context.Items[typeof(LogConfiguration)] = log;
+        payload.TrackUsage(() => (received - ticket.Arrived + clock.GetElapsedTime(started)).TotalMilliseconds, SignalRequests);
         var result = await serving.SubmitAsync(new(origin, ticket, payload, access, context, FindAlternateAsync, Advise, DisplaceAsync,
             () => Snapshot.Digest, Suggest), cancellation);
         RecordServing(log, origin, ticket, payload, access, result, received, started);

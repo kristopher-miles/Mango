@@ -345,7 +345,7 @@ async function refreshPage() {
   if (route.group === "serving") jobs.push(loadProviders().catch(error => providerStatus.textContent = error.message));
   if (route.group === "network" || route.group === "serving") jobs.push(loadNetwork().catch(error => document.querySelector("#network-status").textContent = error.message));
   if (["system/startup", "system/ports", "system/updates"].includes(route.page)) jobs.push(loadRelease().catch(error => document.querySelector("#release-status").textContent = error.message));
-  if (["activity/history", "system/logging", "system/data"].includes(route.page)) jobs.push(loadLogs().catch(logError));
+  if (["activity", "system/logging", "system/data"].includes(route.page)) jobs.push(loadLogs().catch(logError));
   await Promise.allSettled(jobs);
 }
 document.addEventListener("DOMContentLoaded", async () => {

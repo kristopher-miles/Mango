@@ -12,7 +12,7 @@ internal sealed partial class PeerNetwork
     private readonly SemaphoreSlim logExports = new(1);
     private static readonly JsonSerializerOptions ExportJson = new(Json) { WriteIndented = false };
 
-    private async Task<object> ReadLogViewAsync(HttpRequest request, DateOnly? requested, string? key, string? source,
+    private async Task<object> ReadLogViewAsync(HttpRequest request, DateOnly? requested, string? key, string? source, int limit,
         CancellationToken cancellation)
     {
         if (key?.Length > 120 || source?.Length > 64)
@@ -57,10 +57,11 @@ internal sealed partial class PeerNetwork
                 if (entry.Kind == LogKind.Attempt)
                     attempts++;
                 details.Add(entry);
-                if (details.Count == 160)
-                    details = details.OrderByDescending(item => item.At).Take(80).ToList();
             }
         }
+        var ordered = details.OrderByDescending(item => item.CompletedAt ?? item.At).ToArray();
+        var groups = ordered.Where(item => item.Kind is LogKind.Request or LogKind.Attempt)
+            .GroupBy(item => item.Request ?? item.Id).ToArray();
         var result = new
         {
             Settings = config.Policy, Day = day, Today = Today(config.Policy.TimeZone), window.Start, window.End,
@@ -72,7 +73,9 @@ internal sealed partial class PeerNetwork
             Requests = requests, Attempts = attempts, Capped = capped,
             ByKey = keys.Values.OrderByDescending(item => item.Requests).ToArray(),
             BySource = sources.Values.OrderByDescending(item => item.Requests).ToArray(),
-            Entries = details.OrderByDescending(item => item.At).Take(80).ToArray()
+            MoreRequests = groups.Length > limit,
+            Entries = groups.Take(limit).SelectMany(group => group)
+                .Concat(ordered.Where(item => item.Kind is not (LogKind.Request or LogKind.Attempt)).Take(80)).ToArray()
         };
         if (Logs.Configuration.Epoch != config.Epoch)
             throw new PeerFailure(409, "Log history was cleared while reading. Refresh the view.");

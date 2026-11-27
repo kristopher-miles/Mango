@@ -62,6 +62,8 @@ internal sealed partial class PeerNetwork
         capture.Entry = entry with
         {
             Alias = request.Alias, Deployment = last?.Deployment,
+            Usage = payload.Usage, PromptTokens = payload.Usage.PromptTokens, OutputTokens = payload.Usage.OutputTokens,
+            FirstTokenMilliseconds = payload.Usage.FirstTokenMilliseconds, TokensPerSecond = payload.Usage.TokensPerSecond,
             Outcome = last?.State.ToString().ToLowerInvariant(),
             Reason = request.Reason ?? last?.Reason,
             Routes = request.Attempts.Select(attempt => new LogRoute(attempt.Attempt, attempt.Node,
@@ -92,7 +94,7 @@ internal sealed partial class PeerNetwork
             FirstTokenMilliseconds: timing?.FirstToken?.TotalMilliseconds,
             ElapsedMilliseconds: clock.GetElapsedTime(started).TotalMilliseconds, TokensPerSecond: timing?.TokensPerSecond,
             Items: payload.Shape.Items, RequestedPixels: payload.Operation == InferenceOperation.Images ? payload.Shape.WorkUnits : null,
-            AudioSeconds: timing?.AudioSeconds, CompletedAt: clock.GetUtcNow()));
+            AudioSeconds: timing?.AudioSeconds, CompletedAt: clock.GetUtcNow(), Usage: payload.Usage, RequestArrived: ticket.Arrived));
     }
 
     private void LogOperation(string outcome, string reason, string? deployment = null, int? status = null)
