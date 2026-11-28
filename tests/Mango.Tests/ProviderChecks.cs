@@ -32,13 +32,21 @@ internal static class ProviderChecks
         Check(request.Usage is { PromptTokens: 140, OutputTokens: 32, CachedTokens: 100, FirstTokenMilliseconds: null },
             "large JSON choices crossing read boundaries preserve input, output and cache metadata");
 
+        var buffered = request.MeasureOutput(sent - System.Diagnostics.Stopwatch.Frequency, "application/json");
+        buffered.Add("""{"usage":{"completion_tokens":32},"timings":{"predicted_ms":180}}"""u8);
+        buffered.Complete();
+        Check(request.Usage is { FirstTokenMilliseconds: 70, EstimatedFirstToken: true },
+            "buffered timing subtracts the provider's decode span from the first response byte's request age");
+
+        request.ResetAttemptUsage();
         var stream = request.MeasureOutput(sent, "text/event-stream");
         var events = new InferenceRequest.InferenceEvents(stream);
         events.Read("data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n"u8);
         Check(request.Usage.FirstTokenMilliseconds is null, "stream headers and role announcements are not a token");
         events.Read("data: {\"choices\":[{\"delta\":{\"content\":\"text\"}}]}\ndata: {\"timings\":{\"prompt_n\":32,\"cache_n\":8,\"predicted_n\":2}}\n"u8);
         stream.Complete();
-        Check(request.Usage is { PromptTokens: 40, CachedTokens: 8, OutputTokens: 2, FirstTokenMilliseconds: 250, TokensPerSecond: null },
+        Check(request.Usage is { PromptTokens: 40, CachedTokens: 8, OutputTokens: 2, FirstTokenMilliseconds: 250,
+            EstimatedFirstToken: false, TokensPerSecond: null },
             "live usage includes cached input and leaves decode rate unavailable for buffered output");
     }
 

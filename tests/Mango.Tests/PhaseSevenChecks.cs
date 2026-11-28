@@ -20,6 +20,9 @@ internal static partial class PeerChecks
     private const string TextReply = "data: {\"choices\":[{\"delta\":{\"content\":\"fixture\"}}]}\n\n" +
         "data: {\"usage\":{\"prompt_tokens\":12,\"prompt_tokens_details\":{\"cached_tokens\":8},\"completion_tokens\":3},\"timings\":{\"predicted_per_second\":19}}\n\n" +
         "data: [DONE]\n\n";
+    private const string BufferedTextReply = """
+        {"choices":[{"message":{"role":"assistant","content":"fixture"}}],"usage":{"prompt_tokens":12,"prompt_tokens_details":{"cached_tokens":8},"completion_tokens":3},"timings":{"predicted_per_second":19,"predicted_ms":12}}
+        """;
     private const string SpeechBody = "{ \"model\":\"fixture-speech\", \"voice\":\"fixture\", \"input\":\"hello\" }";
 
     public static async Task RunActivityAsync(string root)
@@ -104,11 +107,13 @@ internal static partial class PeerChecks
                 var inputs = new[]
                 {
                     (Path: "/v1/chat/completions", Kind: InferenceOperation.Chat, Content: Encoding.UTF8.GetBytes(TextBody),
-                        Media: "application/json", Expected: Encoding.UTF8.GetBytes(TextReply)),
+                        Media: "application/json", Expected: Encoding.UTF8.GetBytes(TextReply), Buffered: false),
+                    (Path: "/v1/chat/completions", Kind: InferenceOperation.Chat, Content: Encoding.UTF8.GetBytes(TextBody.Replace("true", "false")),
+                        Media: "application/json", Expected: Encoding.UTF8.GetBytes(BufferedTextReply), Buffered: true),
                     (Path: "/v1/audio/speech", Kind: InferenceOperation.Speech, Content: Encoding.UTF8.GetBytes(SpeechBody),
-                        Media: "application/json", Expected: wav),
+                        Media: "application/json", Expected: wav, Buffered: false),
                     (Path: "/v1/audio/transcriptions", Kind: InferenceOperation.Transcription, Content: LogMultipart(wav),
-                        Media: "multipart/form-data; boundary=mango-log-test", Expected: "{\"text\":\"fixture\"}"u8.ToArray())
+                        Media: "multipart/form-data; boundary=mango-log-test", Expected: "{\"text\":\"fixture\"}"u8.ToArray(), Buffered: false)
                 };
                 foreach (var input in inputs)
                 {
@@ -126,13 +131,14 @@ internal static partial class PeerChecks
                         (record.Output is not null) == (mode == RequestLogMode.Everything), $"payload availability follows {mode}");
                     if (input.Kind == InferenceOperation.Chat)
                         Check(record.Usage is { PromptTokens: 12, CachedTokens: 8, OutputTokens: 3, TokensPerSecond: 19,
-                            FirstTokenMilliseconds: >= 0 } && record.ElapsedMilliseconds >= record.Usage.FirstTokenMilliseconds,
+                            FirstTokenMilliseconds: >= 0 } && record.Usage.EstimatedFirstToken == input.Buffered &&
+                            record.ElapsedMilliseconds >= record.Usage.FirstTokenMilliseconds,
                             "remote ingress retains end-to-end latency and provider usage without network log collection");
                     if (mode >= RequestLogMode.Verbose)
                         await CheckPayload(first.Network.Logs, record, false, input.Content);
                     if (mode == RequestLogMode.Everything)
                         await CheckPayload(first.Network.Logs, record, true, input.Expected);
-                    if (mode == RequestLogMode.Everything && input.Kind == InferenceOperation.Chat)
+                    if (mode == RequestLogMode.Everything && input.Kind == InferenceOperation.Chat && !input.Buffered)
                         capturedChat = record;
                 }
                 if (mode == RequestLogMode.Off)
@@ -355,7 +361,14 @@ internal static partial class PeerChecks
         app.MapGet("/api/inference/status", () => new { context_length = 2048, parallel_slots = 1 });
         app.MapPost("/v1/chat/completions", async (HttpContext context) =>
         {
-            await context.Request.Body.CopyToAsync(Stream.Null);
+            using var payload = await JsonDocument.ParseAsync(context.Request.Body, cancellationToken: context.RequestAborted);
+            if (!payload.RootElement.TryGetProperty("stream", out var stream) || stream.ValueKind != JsonValueKind.True)
+            {
+                await Task.Delay(30, context.RequestAborted);
+                context.Response.ContentType = "application/json";
+                await context.Response.WriteAsync(BufferedTextReply);
+                return;
+            }
             context.Response.ContentType = "text/event-stream";
             var split = TextReply.IndexOf("\n\n", StringComparison.Ordinal) + 2;
             await context.Response.WriteAsync(TextReply[..split]);

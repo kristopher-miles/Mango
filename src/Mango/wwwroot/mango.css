@@ -1,8 +1,8 @@
 @charset "UTF-8";
 
 .panel.request-feed{padding:0;overflow:hidden;container-type:inline-size}
-.request-grid{display:grid;grid-template-columns:22px minmax(65px,.8fr) minmax(100px,1.65fr) repeat(2,minmax(57px,.75fr)) repeat(3,minmax(47px,.62fr)) minmax(72px,.9fr);align-items:center;gap:8px;padding:0 14px}
-.request-grid>span:nth-child(n+4){text-align:end}
+.request-grid{display:grid;grid-template-columns:22px minmax(60px,.65fr) minmax(100px,1.45fr) minmax(80px,1fr) minmax(100px,1.2fr) repeat(2,minmax(57px,.7fr)) repeat(3,minmax(47px,.62fr)) minmax(72px,.8fr);align-items:center;gap:8px;padding:0 14px}
+.request-grid>span:nth-child(n+6){text-align:end}
 .request-band,.request-tools{display:flex;gap:12px;align-items:center;justify-content:space-between;padding:8px 14px;background:var(--bar);border-block:1px solid var(--line)}
 .request-band h2{margin:0;font-size:15px}.request-band small,.request-tools,.request-band .muted{font-size:12px;color:var(--muted);font-weight:400}
 .request-band small{margin-inline-start:6px}.request-band button,.request-tools button{min-height:28px;padding:3px 8px;font-size:12px}
@@ -15,7 +15,7 @@
 .request-row summary:focus-visible{outline:2px solid var(--focus);outline-offset:-2px}
 .request-row summary>span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .request-row summary>span:nth-child(3){font-weight:600}
-.request-row summary>span:nth-child(4){font-weight:650}
+.request-row summary>span[data-label="Total"]{font-weight:650}
 .request-state{display:inline-flex;justify-content:center;align-items:center;color:var(--muted)}
 .request-state .glyph{width:16px;height:16px}
 .request-row:is([data-state=running],[data-state=streaming]) .request-state{color:var(--green)}
@@ -29,14 +29,16 @@
 .request-tools{border-bottom:0}
 .request-feed :is(#logs-query,#log-diagnostics){padding:10px 14px}
 .request-feed #logs-feedback:empty{display:none}
-@container(max-width:720px){
+@container(max-width:825px){
   .request-head{display:none}
-  .request-row summary{grid-template-columns:18px repeat(6,minmax(0,1fr));gap:4px;grid-template-rows:auto auto;padding:6px 8px}
+  .request-row summary{grid-template-columns:18px repeat(6,minmax(0,1fr));gap:4px;padding:6px 8px}
   .request-row summary>span:first-child{grid-column:1;grid-row:1}
   .request-row summary>span:nth-child(2){grid-column:5/-1;grid-row:1;text-align:end;color:var(--muted)}
   .request-row summary>span:nth-child(3){grid-column:2/5;grid-row:1}
-  .request-row summary>span:nth-child(n+4){text-align:start;font-size:12px;white-space:nowrap}
-  .request-row summary>span:nth-child(4){grid-column:2}
+  .request-row summary>span:nth-child(n+4){text-align:start;font-size:12px}
+  .request-row summary>span[data-label="Key"]{grid-column:2/5}
+  .request-row summary>span[data-label="Client"]{grid-column:5/-1}
+  .request-row summary>span[data-label="Total"]{grid-column:2}
   .request-row summary>span:nth-child(n+4)::before{content:attr(data-label);display:block;color:var(--muted);font-size:11px;font-weight:400}
   .request-band small{display:block;margin:3px 0 0}
 }
@@ -44,7 +46,9 @@
   .request-row summary{grid-template-columns:18px repeat(3,minmax(0,1fr));gap:4px 7px}
   .request-row summary>span:nth-child(2){grid-column:4}
   .request-row summary>span:nth-child(3){grid-column:2/4}
-  .request-row summary>span:nth-child(7){grid-column:2}
+  .request-row summary>span[data-label="Key"]{grid-column:2}
+  .request-row summary>span[data-label="Client"]{grid-column:3/-1}
+  .request-row summary>span[data-label="Out tokens"]{grid-column:2}
 }
 /* A saved light preference is applied before the stylesheet loads. */
 :root{color-scheme:dark;--canvas:#111715;--surface:#1a211e;--bar:#161d1a;--ink:#edf4ee;--muted:#adbbb2;--line:#38443e;--control-line:#586b60;--green:#91ddb3;--green-soft:#223d2e;--on-green:#112b1b;--amber:#eaa43a;--warn:#f5c881;--warn-soft:#392e1f;--error:#ffaaa5;--error-soft:#412726;--hover:#29362e;--focus:#ffc46b;--cpu:#86dfa7;--gpu:#ffbd79;--ram:#8dbdf7;--vram:#cba6f2;font:14px/1.5 "Segoe UI Variable","Segoe UI",system-ui,sans-serif;color:var(--ink);background:var(--canvas)}

@@ -6,7 +6,8 @@ const activityStates = {
   cancelled: ["close", "Cancelled"], stopped: ["close", "Stopped"], rejected: ["warning", "Rejected"],
   failed: ["error", "Failed"], uncertain: ["unknown", "Stop unconfirmed"]
 };
-const activityColumns = ["State", "Started", "Model", "Total", "First token", "In tokens", "Out tokens", "tok/s", "Prompt cache"];
+const activityColumns = ["State", "Started", "Model", "Key", "Client", "Total", "First token", "In tokens", "Out tokens", "tok/s", "Prompt cache"];
+const activityTotalColumn = activityColumns.indexOf("Total");
 
 // Ingress owns the client outcome. A serving attempt may finish while ingress is still rerouting.
 function activityRows(snapshot, entries) {
@@ -43,10 +44,12 @@ function activityRows(snapshot, entries) {
     const counted = record => record?.promptCountSource === "provider usage" ||
       (record?.promptCountSource === "provider" && record.task === "chat") ? record.promptTokens : null;
     const prompt = usage("promptTokens") ?? counted(log) ?? counted(a);
-    const first = usage("firstTokenMilliseconds") ?? log?.firstTokenMilliseconds;
+    const firstUsage = [log, ingress, s, a].find(record => record?.usage?.firstTokenMilliseconds != null)?.usage;
+    const first = firstUsage?.firstTokenMilliseconds ?? log?.firstTokenMilliseconds ?? a?.firstTokenMilliseconds;
+    const providerFirst = first != null && firstUsage == null && log?.firstTokenMilliseconds == null;
     let state = log?.outcome || last?.state || last?.outcome || s?.state || a?.outcome;
     if (live) {
-      if (first != null) state = "streaming";
+      if (first != null && !firstUsage?.estimatedFirstToken) state = "streaming";
       else if (s?.loading) state = "loading";
       else if (s?.state === "running" || ingress?.outputStarted) state = "running";
       else state = last || s ? "waiting" : "placing";
@@ -55,7 +58,8 @@ function activityRows(snapshot, entries) {
     return {
       id: g.id, live, started, finished, state, model: log?.alias || ingress?.alias || s?.alias || a?.alias || "Unknown model",
       total: log?.elapsedMilliseconds ?? (finished && arrival ? Math.max(0, Date.parse(finished) - Date.parse(arrival)) : null),
-      first, prompt, output: usage("outputTokens") ?? log?.outputTokens ?? a?.outputTokens,
+      first, providerFirst, estimatedFirst: firstUsage?.estimatedFirstToken, prompt,
+      output: usage("outputTokens") ?? log?.outputTokens ?? a?.outputTokens,
       rate: usage("tokensPerSecond") ?? log?.tokensPerSecond ?? a?.tokensPerSecond, estimated: usage("estimatedRate"),
       cached: usage("cachedTokens"), key: log?.keyName || ingress?.keyName || s?.keyName || a?.keyName,
       source: log?.source || ingress?.source || s?.source || a?.source,
@@ -145,9 +149,14 @@ function fillActivityRow(row, item) {
   const arrived = Date.parse(item.started);
   const time = Number.isFinite(arrived) ? activityTimeFormat.format(arrived) : "—";
   const count = n => n == null ? "—" : n.toLocaleString();
-  const values = [time, item.model, item.live && Number.isFinite(arrived) ? null : activityDuration(item.total), activityDuration(item.first), count(item.prompt),
+  const first = (item.estimatedFirst ? "≈" : "") + activityDuration(item.first);
+  const values = [time, item.model, item.key || "—", item.source?.address || "—",
+    item.live && Number.isFinite(arrived) ? null : activityDuration(item.total), first, count(item.prompt),
     count(item.output), item.rate == null ? "—" : (item.estimated ? "≈" : "") + item.rate.toFixed(1), activityCache(item.cached, item.prompt)];
-  const titles = ["", item.model, "", "", item.prompt == null ? "Input token count unavailable" : count(item.prompt) + " input tokens, including reused prompt tokens",
+  const firstTitle = item.estimatedFirst ? "Estimated from response arrival and provider decode time" :
+    item.providerFirst ? "Measured from provider submission on the serving host" : item.first == null ? "First-token timing unavailable" : "";
+  const titles = ["", item.model, item.key || "", requestSource(item.source), "", firstTitle,
+    item.prompt == null ? "Input token count unavailable" : count(item.prompt) + " input tokens, including reused prompt tokens",
     item.output == null ? "Output token count unavailable" : count(item.output) + " output tokens",
     item.estimated ? "Estimated from the first and last generated output" : "Provider generation rate",
     item.cached == null ? "Cache usage unavailable" : count(item.cached) + " cached prompt tokens"];
@@ -156,7 +165,7 @@ function fillActivityRow(row, item) {
     if (value !== null) setText(cell.lastChild, value);
     if (cell.title !== titles[i]) cell.title = titles[i];
   });
-  const clock = summary.children[3].lastChild;
+  const clock = summary.children[activityTotalColumn].lastChild;
   if (item.live && Number.isFinite(arrived)) {
     if (activityClocks.get(clock) !== arrived) setText(clock, activityDuration(Math.max(0, activityObserved - arrived)));
     activityClocks.set(clock, arrived);
@@ -266,7 +275,7 @@ function renderActivity() {
   }
   if (focus !== document.body && focus?.isConnected && document.activeElement === document.body) focus.focus({ preventScroll: true });
   for (const node of removed) if (!node.parentElement) {
-    activityClocks.delete(node.firstElementChild.children[3].lastChild);
+    activityClocks.delete(node.firstElementChild.children[activityTotalColumn].lastChild);
     activityNodes.delete(node.activityItem.id);
   }
   const counts = new Map();

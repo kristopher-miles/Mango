@@ -43,6 +43,25 @@ test("old serving records, partials, estimates, misses and unavailable counters 
   assert.equal(activityCache(56, null), "56 tok");
 });
 
+test("Activity keeps client identity and distinguishes buffered estimates from streamed timing", () => {
+  const source = { address: "100.64.0.1", provenance: "direct" };
+  const ingress = { ...active, keyName: "Editor", source, outputStarted: true, usage: {} };
+  const serving = { ...service, usage: { firstTokenMilliseconds: 250, estimatedFirstToken: true } };
+  const [live] = activityRows({ ...empty, ingress: [ingress], serving: [serving] }, []);
+  assert.equal(live.state, "running");
+  assert.equal(live.key, "Editor");
+  assert.deepEqual(live.source, source);
+  assert.equal(live.first, 250);
+  assert.equal(live.estimatedFirst, true);
+
+  const [old] = activityRows(empty, [{ kind: "attempt", request: "req", at: started, outcome: "completed",
+    firstTokenMilliseconds: 120, keyName: "Editor", source }]);
+  assert.equal(old.first, 120);
+  assert.equal(old.providerFirst, true);
+  assert.equal(old.key, live.key);
+  assert.deepEqual(old.source, source);
+});
+
 test("identical feed frames and history polls schedule no redraw, including after navigation", () => {
   const fs = require("node:fs"), vm = require("node:vm");
   const jobs = [];

@@ -21,7 +21,8 @@ internal sealed record ProviderExecution(string DeploymentId, string InstanceFin
     double? AudioSeconds = null);
 
 internal sealed record RequestUsage(int? PromptTokens = null, int? OutputTokens = null, int? CachedTokens = null,
-    double? TokensPerSecond = null, bool EstimatedRate = false, double? FirstTokenMilliseconds = null);
+    double? TokensPerSecond = null, bool EstimatedRate = false, double? FirstTokenMilliseconds = null,
+    bool EstimatedFirstToken = false);
 
 internal sealed record InferenceShape(string Alias, InferenceOperation Operation, string[] Inputs, bool Tools,
     bool Structured, long PromptUnits, int OutputUnits, int MediaItems, int Items, long WorkUnits,
@@ -447,19 +448,28 @@ internal sealed class InferenceRequest(InferenceOperation operation, string alia
         private int? cachedTokens;
         private TimeSpan? lastToken;
         private double? firstTokenMilliseconds;
+        private double? bufferedOutputMilliseconds;
+        private double? bufferedOutputAge;
+        private bool estimatedFirstToken;
 
         private void Publish(bool estimated = false)
         {
             var previous = request.usage;
             if (previous.PromptTokens == PromptTokens && previous.OutputTokens == OutputTokens &&
                 previous.CachedTokens == cachedTokens && previous.TokensPerSecond == Rate &&
-                previous.EstimatedRate == estimated && previous.FirstTokenMilliseconds == firstTokenMilliseconds) return;
-            request.usage = new(PromptTokens, OutputTokens, cachedTokens, Rate, estimated, firstTokenMilliseconds);
+                previous.EstimatedRate == estimated && previous.FirstTokenMilliseconds == firstTokenMilliseconds &&
+                previous.EstimatedFirstToken == estimatedFirstToken) return;
+            request.usage = new(PromptTokens, OutputTokens, cachedTokens, Rate, estimated, firstTokenMilliseconds, estimatedFirstToken);
             request.usageChanged?.Invoke();
         }
 
         public void Add(ReadOnlySpan<byte> data)
         {
+            if (Bytes == 0 && !data.IsEmpty && operation == InferenceOperation.Chat && mediaType == "application/json")
+            {
+                bufferedOutputMilliseconds = Stopwatch.GetElapsedTime(sent).TotalMilliseconds;
+                bufferedOutputAge = request.requestAge?.Invoke();
+            }
             Bytes += data.Length;
             if (sample is null || overflow)
                 return;
@@ -504,6 +514,19 @@ internal sealed class InferenceRequest(InferenceOperation operation, string alia
                 lastToken = Stopwatch.GetElapsedTime(sent, timestamp);
                 FirstToken ??= lastToken;
                 firstTokenMilliseconds ??= request.requestAge?.Invoke();
+            }
+            else if (observed is null && bufferedOutputMilliseconds is { } elapsed && request.Shape?.Items is null or 1 &&
+                OutputTokens is > 0 && body.Get("timings").Get("predicted_ms") is { ValueKind: JsonValueKind.Number } decode &&
+                decode.TryGetDouble(out var decodeMilliseconds) && decodeMilliseconds >= 0 && decodeMilliseconds <= elapsed &&
+                (decodeMilliseconds > 0 || OutputTokens == 1))
+            {
+                // Buffered chat exposes the provider's decode span only after generation has finished.
+                FirstToken = TimeSpan.FromMilliseconds(elapsed - decodeMilliseconds);
+                if (bufferedOutputAge >= decodeMilliseconds)
+                {
+                    firstTokenMilliseconds = bufferedOutputAge - decodeMilliseconds;
+                    estimatedFirstToken = true;
+                }
             }
             Publish();
         }

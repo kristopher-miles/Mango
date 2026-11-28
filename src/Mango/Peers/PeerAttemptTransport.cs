@@ -235,6 +235,7 @@ internal sealed partial class PeerNetwork
             request.Headers.Add(ReleaseHeader, Release.Wire);
             request.Headers.Add(AttemptHeader, Convert.ToBase64String(JsonSerializer.SerializeToUtf8Bytes(metadata, Json)));
             Interlocked.Increment(ref submissions);
+            var sent = System.Diagnostics.Stopwatch.GetTimestamp();
             using var response = await inferenceHttp.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellation);
             receivedHeaders = true;
             if (Header(response, NodeHeader) != peer.Id.ToString("N") || Header(response, NetworkHeader) != current.Records.Identity.Id.ToString("N"))
@@ -266,7 +267,7 @@ internal sealed partial class PeerNetwork
             target.Headers.CacheControl = "no-store";
             var output = new InferenceOutput(context, payload.Operation, payload.Alias);
             var mediaType = response.Content.Headers.ContentType?.MediaType;
-            var metrics = payload.MeasureOutput(System.Diagnostics.Stopwatch.GetTimestamp(), mediaType);
+            var metrics = payload.MeasureOutput(sent, mediaType);
             var events = payload.Operation == InferenceOperation.Chat && mediaType == "text/event-stream"
                 ? new InferenceRequest.InferenceEvents(metrics, interpretErrors: false) : null;
             await using var stream = await response.Content.ReadAsStreamAsync(cancellation);
